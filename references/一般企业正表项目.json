@@ -1,0 +1,43 @@
+﻿{
+  "schema_version": "1.0",
+  "statement_items": [
+    {"item_id":"CFO-01","name":"销售商品、提供劳务收到的现金","section":"经营活动","display_order":1,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFO-02","name":"收到的税费返还","section":"经营活动","display_order":2,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFO-03","name":"收到其他与经营活动有关的现金","section":"经营活动","display_order":3,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFO-IN","name":"经营活动现金流入小计","section":"经营活动","display_order":4,"is_leaf":false,"normal_direction":"net","formula_components":[["CFO-01",1],["CFO-02",1],["CFO-03",1]]},
+    {"item_id":"CFO-04","name":"购买商品、接受劳务支付的现金","section":"经营活动","display_order":5,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFO-05","name":"支付给职工以及为职工支付的现金","section":"经营活动","display_order":6,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFO-06","name":"支付的各项税费","section":"经营活动","display_order":7,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFO-07","name":"支付其他与经营活动有关的现金","section":"经营活动","display_order":8,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFO-OUT","name":"经营活动现金流出小计","section":"经营活动","display_order":9,"is_leaf":false,"normal_direction":"net","formula_components":[["CFO-04",1],["CFO-05",1],["CFO-06",1],["CFO-07",1]]},
+    {"item_id":"CFO-NET","name":"经营活动产生的现金流量净额","section":"经营活动","display_order":10,"is_leaf":false,"normal_direction":"net","formula_components":[["CFO-IN",1],["CFO-OUT",-1]]},
+
+    {"item_id":"CFI-01","name":"收回投资收到的现金","section":"投资活动","display_order":11,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFI-02","name":"取得投资收益收到的现金","section":"投资活动","display_order":12,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFI-03","name":"处置固定资产、无形资产和其他长期资产收回的现金净额","section":"投资活动","display_order":13,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFI-04","name":"处置子公司及其他营业单位收到的现金净额","section":"投资活动","display_order":14,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFI-05","name":"收到其他与投资活动有关的现金","section":"投资活动","display_order":15,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFI-IN","name":"投资活动现金流入小计","section":"投资活动","display_order":16,"is_leaf":false,"normal_direction":"net","formula_components":[["CFI-01",1],["CFI-02",1],["CFI-03",1],["CFI-04",1],["CFI-05",1]]},
+    {"item_id":"CFI-06","name":"购建固定资产、无形资产和其他长期资产支付的现金","section":"投资活动","display_order":17,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFI-07","name":"投资支付的现金","section":"投资活动","display_order":18,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFI-08","name":"取得子公司及其他营业单位支付的现金净额","section":"投资活动","display_order":19,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFI-09","name":"支付其他与投资活动有关的现金","section":"投资活动","display_order":20,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFI-OUT","name":"投资活动现金流出小计","section":"投资活动","display_order":21,"is_leaf":false,"normal_direction":"net","formula_components":[["CFI-06",1],["CFI-07",1],["CFI-08",1],["CFI-09",1]]},
+    {"item_id":"CFI-NET","name":"投资活动产生的现金流量净额","section":"投资活动","display_order":22,"is_leaf":false,"normal_direction":"net","formula_components":[["CFI-IN",1],["CFI-OUT",-1]]},
+
+    {"item_id":"CFF-01","name":"吸收投资收到的现金","section":"筹资活动","display_order":23,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFF-02","name":"取得借款收到的现金","section":"筹资活动","display_order":24,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFF-03","name":"收到其他与筹资活动有关的现金","section":"筹资活动","display_order":25,"is_leaf":true,"normal_direction":"inflow","formula_components":[]},
+    {"item_id":"CFF-IN","name":"筹资活动现金流入小计","section":"筹资活动","display_order":26,"is_leaf":false,"normal_direction":"net","formula_components":[["CFF-01",1],["CFF-02",1],["CFF-03",1]]},
+    {"item_id":"CFF-04","name":"偿还债务支付的现金","section":"筹资活动","display_order":27,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFF-05","name":"分配股利、利润或偿付利息支付的现金","section":"筹资活动","display_order":28,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFF-06","name":"支付其他与筹资活动有关的现金","section":"筹资活动","display_order":29,"is_leaf":true,"normal_direction":"outflow","formula_components":[]},
+    {"item_id":"CFF-OUT","name":"筹资活动现金流出小计","section":"筹资活动","display_order":30,"is_leaf":false,"normal_direction":"net","formula_components":[["CFF-04",1],["CFF-05",1],["CFF-06",1]]},
+    {"item_id":"CFF-NET","name":"筹资活动产生的现金流量净额","section":"筹资活动","display_order":31,"is_leaf":false,"normal_direction":"net","formula_components":[["CFF-IN",1],["CFF-OUT",-1]]},
+
+    {"item_id":"FX","name":"汇率变动对现金及现金等价物的影响","section":"现金调节","display_order":32,"is_leaf":false,"normal_direction":"net","formula_components":[]},
+    {"item_id":"NET-CASH","name":"现金及现金等价物净增加额","section":"现金调节","display_order":33,"is_leaf":false,"normal_direction":"net","formula_components":[["CFO-NET",1],["CFI-NET",1],["CFF-NET",1],["FX",1]]},
+    {"item_id":"CASH-OPENING","name":"加：期初现金及现金等价物余额","section":"现金调节","display_order":34,"is_leaf":false,"normal_direction":"net","formula_components":[]},
+    {"item_id":"CASH-CLOSING","name":"期末现金及现金等价物余额","section":"现金调节","display_order":35,"is_leaf":false,"normal_direction":"net","formula_components":[["NET-CASH",1],["CASH-OPENING",1]]}
+  ]
+}

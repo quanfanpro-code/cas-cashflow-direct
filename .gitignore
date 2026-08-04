@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.xlsx
+*.xlsm
+dist/
+.coverage
+
