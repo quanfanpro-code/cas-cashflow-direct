@@ -1,0 +1,2 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-08-06T12:00	53710c1	cas-cashflow-direct	73.8	84.1	keep	执行编排	补齐CLI命令编排、decisions/result格式、AI复核闭环、失败恢复表、显性检查点	full_test
