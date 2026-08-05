@@ -141,6 +141,36 @@ def validate_ai_results(
     return AIValidation(tuple(valid), missing, duplicate_ids, tuple(sorted(invalid)), status)
 
 
+def merge_ai_results(
+    expected: Sequence[AITask],
+    prior_results: Sequence[AIResult],
+    payloads: Sequence[Mapping[str, object]],
+    valid_item_ids: set[str],
+) -> AIValidation:
+    incoming = validate_ai_results(expected, payloads, valid_item_ids)
+    merged = {item.task_id: item for item in prior_results}
+    invalid = set(incoming.invalid_ids)
+    for item in incoming.valid_results:
+        prior = merged.get(item.task_id)
+        if prior is not None and prior != item:
+            raise ValueError(f"AI 任务 {item.task_id} 与已导入结果冲突")
+        merged[item.task_id] = item
+    ordered = tuple(merged[task.task_id] for task in expected if task.task_id in merged)
+    missing = tuple(task.task_id for task in expected if task.task_id not in merged)
+    status = (
+        "AI 已完成"
+        if not missing and not incoming.duplicate_ids and not invalid
+        else "AI 未完成"
+    )
+    return AIValidation(
+        ordered,
+        missing,
+        incoming.duplicate_ids,
+        tuple(sorted(invalid)),
+        status,
+    )
+
+
 def write_ai_tasks_jsonl(path: Path, tasks: Sequence[AITask]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -152,20 +182,34 @@ def write_ai_tasks_jsonl(path: Path, tasks: Sequence[AITask]) -> None:
 def build_adjudication_tasks(
     system_decisions: Sequence[ClassificationDecision],
     ai_results: Sequence[AIResult],
+    ai_tasks: Sequence[AITask] = (),
 ) -> tuple[AdjudicationTask, ...]:
     system_by_component = {item.component_id: item for item in system_decisions}
+    context_by_component = {item.component_id: item for item in ai_tasks}
     tasks: list[AdjudicationTask] = []
     for result in ai_results:
         system = system_by_component[result.component_id]
         if result.item_id == system.system_item_id:
             continue
+        source_task = context_by_component.get(result.component_id)
         tasks.append(
             AdjudicationTask(
                 stable_id("ADJ", result.component_id, system.system_item_id, result.item_id),
                 result.component_id,
                 system.system_item_id,
                 result.item_id,
-                f"系统证据：{system.reason}；AI 证据：{result.reason}",
+                "；".join(
+                    part
+                    for part in (
+                        source_task.context if source_task is not None else "",
+                        f"原现流项目：{source_task.original_item}"
+                        if source_task is not None
+                        else "",
+                        f"系统证据：{system.reason}",
+                        f"AI 证据：{result.reason}",
+                    )
+                    if part
+                ),
             )
         )
     return tuple(tasks)
@@ -187,6 +231,16 @@ def resolve_automatic_decisions(
         adjudicated = adjudicated_by_component.get(system.component_id)
         if adjudicated is None or not adjudicated.reason.strip():
             resolved.append(replace(system, resolved=False, decision_source="ai_conflict"))
+            continue
+        if adjudicated.item_id not in {system.system_item_id, ai.item_id}:
+            resolved.append(
+                replace(
+                    system,
+                    resolved=False,
+                    decision_source="ai_conflict",
+                    reason=f"{system.reason}；AI 裁决超出系统首选与首次 AI 候选，送重要性判断",
+                )
+            )
             continue
         if adjudicated.confidence == "low" or (
             system.evidence_level == "high" and adjudicated.confidence != "high"

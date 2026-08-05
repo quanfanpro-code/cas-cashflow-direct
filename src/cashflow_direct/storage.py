@@ -17,6 +17,8 @@ BUSINESS_TABLES = (
     "cashflow_component",
     "classification_decision",
     "ai_task",
+    "ai_result",
+    "internal_transfer",
     "review_batch",
     "duplicate_group",
     "statement_value",

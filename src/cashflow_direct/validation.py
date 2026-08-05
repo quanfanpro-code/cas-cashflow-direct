@@ -40,6 +40,8 @@ def validate_classification(
     errors: list[str] = []
     component_ids = [item.component_id for item in components]
     decision_ids = [item.component_id for item in decisions if not item.excluded]
+    if not component_ids:
+        errors.append("未生成现金流业务组成")
     if len(component_ids) != len(set(component_ids)):
         errors.append("现金流业务组成编号不唯一")
     if set(component_ids) != set(decision_ids):

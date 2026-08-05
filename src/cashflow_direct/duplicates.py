@@ -56,25 +56,39 @@ def find_suspected_duplicates(
 
     result: list[DuplicateGroup] = []
     for signature, items in grouped.items():
-        if len(items) < 2:
-            continue
-        source_sets = [frozenset(item.source_file_ids) for item in items]
-        if not any(left.isdisjoint(right) for index, left in enumerate(source_sets) for right in source_sets[index + 1 :]):
-            continue
-        amounts = tuple(item.cash_delta_cent for item in items)
-        worst_case = sum(abs(amount) for amount in amounts[1:])
-        result.append(
-            DuplicateGroup(
-                group_id=stable_id("DUP", *signature, *(item.component_id for item in items)),
-                component_ids=tuple(item.component_id for item in items),
-                component_amounts_cent=amounts,
-                signature=signature,
-                default_decision="keep",
-                worst_case_impact_cent=worst_case,
-                blocks_manual_completion=worst_case >= performance_cent,
-                item_id=items[0].original_item_text,
+        pending = list(items)
+        while pending:
+            first = pending.pop(0)
+            occupied_sources = set(first.source_file_ids)
+            repeated_items: list[CashflowComponent] = []
+            remaining: list[CashflowComponent] = []
+            for candidate in pending:
+                candidate_sources = set(candidate.source_file_ids)
+                if occupied_sources.isdisjoint(candidate_sources):
+                    repeated_items.append(candidate)
+                    occupied_sources.update(candidate_sources)
+                else:
+                    remaining.append(candidate)
+            pending = remaining
+            if not repeated_items:
+                continue
+            matched_items = (first, *repeated_items)
+            amounts = tuple(item.cash_delta_cent for item in matched_items)
+            worst_case = sum(abs(item.cash_delta_cent) for item in repeated_items)
+            result.append(
+                DuplicateGroup(
+                    group_id=stable_id(
+                        "DUP", *signature, *(item.component_id for item in matched_items)
+                    ),
+                    component_ids=tuple(item.component_id for item in matched_items),
+                    component_amounts_cent=amounts,
+                    signature=signature,
+                    default_decision="keep",
+                    worst_case_impact_cent=worst_case,
+                    blocks_manual_completion=worst_case >= performance_cent,
+                    item_id=first.original_item_text,
+                )
             )
-        )
     return tuple(result)
 
 

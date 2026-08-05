@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +99,10 @@ def _rule_matches(rule: ClassificationRule, component: CashflowComponent) -> boo
     )
 
 
+def _normalize_item_name(value: str) -> str:
+    return re.sub(r"[\s，。；：、,.!！?？（）()《》\[\]【】]+", "", value)
+
+
 def classify_component(
     component: CashflowComponent,
     rules: RulePack,
@@ -114,6 +119,26 @@ def classify_component(
             "内部划转、非现金或零金额事项不进入正表",
             "high",
             excluded=True,
+        )
+
+    normalized_label = _normalize_item_name(component.original_item_text)
+    exact_item = next(
+        (
+            item
+            for item in rules.statement_items
+            if item.is_leaf and normalized_label and _normalize_item_name(item.name) == normalized_label
+        ),
+        None,
+    )
+    if exact_item is not None:
+        return ClassificationDecision(
+            component_id=component.component_id,
+            system_item_id=exact_item.item_id,
+            system_item_name=exact_item.name,
+            normal_direction=exact_item.normal_direction,
+            matched_rule_id="EXACT-STANDARD-LABEL",
+            reason="原现流项目与一般企业正表标准项目完全一致",
+            evidence_level="high",
         )
 
     matches = [rule for rule in rules.rules if _rule_matches(rule, component)]

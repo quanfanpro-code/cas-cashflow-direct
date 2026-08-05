@@ -36,6 +36,23 @@ EXPECTED_SHEETS = [
 
 
 class WorkbookOutputTests(unittest.TestCase):
+    def test_generated_workbook_uses_consistent_professional_base_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "统一格式.xlsx"
+            build_output_workbook(workbook_model(1, 1), path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                for sheet in workbook.worksheets:
+                    with self.subTest(sheet=sheet.title):
+                        self.assertFalse(sheet.sheet_view.showGridLines)
+                        self.assertEqual(18, sheet.sheet_format.defaultRowHeight)
+                        for row in sheet.iter_rows():
+                            for cell in row:
+                                if cell.value not in (None, ""):
+                                    self.assertEqual("Arial", cell.font.name)
+            finally:
+                workbook.close()
+
     def test_workbook_has_expected_visible_sheets_and_no_external_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "现金流量表正表及复核底稿.xlsx"
@@ -86,6 +103,28 @@ class WorkbookOutputTests(unittest.TestCase):
         self.assertIn("重要待复核事项", formula)
         self.assertIn("疑似重复事项", formula)
 
+    def test_invalid_pasted_review_text_is_neutral_and_cannot_complete_status(self) -> None:
+        model = workbook_model(review_batches=1, duplicate_groups=0)
+        self.assertEqual(
+            {},
+            calculate_manual_adjustments(model, {"REV-1": "随意粘贴的无效项目"}, {}),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "无效选择防护.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                review_formulas = [
+                    cell.value
+                    for row in workbook["重要待复核事项"].iter_rows()
+                    for cell in row
+                    if isinstance(cell.value, str) and cell.value.startswith("=")
+                ]
+                self.assertTrue(any("无效选择" in formula for formula in review_formulas))
+                self.assertIn("无效选择", workbook["使用说明与状态"]["B3"].value)
+            finally:
+                workbook.close()
+
     def test_reverse_direction_review_uses_signed_statement_amount(self) -> None:
         model = replace(
             workbook_model(0, 0),
@@ -98,6 +137,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     10_000,
                     "退款分类仍不确定",
                     baseline_statement_amount_cent=-10_000,
+                    cash_delta_cent=10_000,
                 ),
             ),
         )
@@ -105,7 +145,7 @@ class WorkbookOutputTests(unittest.TestCase):
             model, {"REV-REFUND": "CFO-03"}, {}
         )
         self.assertEqual(10_000, adjustments["CFO-04"])
-        self.assertEqual(-10_000, adjustments["CFO-03"])
+        self.assertEqual(10_000, adjustments["CFO-03"])
 
     def test_zero_review_batches_show_clear_note_and_statement_still_builds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,7 +166,8 @@ class WorkbookOutputTests(unittest.TestCase):
             workbook = load_workbook(path, data_only=False)
             try:
                 status_formula = workbook["使用说明与状态"]["B3"].value
-                self.assertIn("COUNTBLANK", status_formula)
+                self.assertIn("待确认", status_formula)
+                self.assertIn("无效选择", status_formula)
                 review = workbook["重要待复核事项"]
                 self.assertIsNone(review["C2"].value)
                 self.assertFalse(review["C2"].protection.locked)
@@ -163,6 +204,18 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertIn("现金流量表正表", workbook["正表核对报告"]["E2"].value)
                 headers = [cell.value for cell in workbook["现金范围与现金调节"][1]]
                 self.assertIn("金额（元）", headers)
+                cash_sheet = workbook["现金范围与现金调节"]
+                net_row = next(
+                    row for row in range(2, cash_sheet.max_row + 1)
+                    if cash_sheet.cell(row, 1).value == "本期现金净增加额"
+                )
+                difference_row = next(
+                    row for row in range(2, cash_sheet.max_row + 1)
+                    if cash_sheet.cell(row, 1).value == "现金调节差异"
+                )
+                self.assertIn("现金流量表正表", cash_sheet.cell(net_row, 3).value)
+                self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))
+                self.assertIn("现金范围与现金调节", workbook["使用说明与状态"]["B3"].value)
                 self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
             finally:
                 workbook.close()

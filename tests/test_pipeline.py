@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,13 +19,103 @@ from cashflow_direct.pipeline import (
     supplement_cash_balances,
 )
 from tests.fixture_factory import (
+    write_ai_batch_case,
     write_ai_end_to_end_case,
     write_ambiguous_money_fixture,
     write_end_to_end_case,
+    write_existing_statement_fixture,
 )
 
 
 class PipelineTests(unittest.TestCase):
+    def test_multiple_statement_sheet_names_survive_preflight_for_user_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "多张客户正表.xlsx"
+            write_existing_statement_fixture(source, header_row=7, with_custom_rows=False)
+            workbook = load_workbook(source)
+            duplicate = workbook.copy_worksheet(workbook.worksheets[0])
+            duplicate.title = "另一张现金流量表"
+            workbook.save(source)
+            workbook.close()
+
+            preflight = run_preflight(
+                [source], ("1000000", "750000", "50000"), output_parent=root
+            )
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            question = state["mapping_questions"][0]
+            self.assertEqual("statement_sheet", question["role"])
+            self.assertIn("报表页_随机", question["message"])
+            self.assertIn("另一张现金流量表", question["message"])
+            with self.assertRaisesRegex(RuntimeError, "报表页_随机.*另一张现金流量表"):
+                confirm_mapping(preflight.run_dir, {})
+
+    def test_ai_result_batches_accumulate_without_resubmitting_completed_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            preflight = run_preflight(
+                [write_ai_batch_case(root)],
+                ("1000000", "750000", "50000"),
+                root,
+            )
+            confirm_cash_scope(preflight.run_dir, {})
+            classified = run_classification(preflight.run_dir)
+            self.assertEqual(26, classified.ai_tasks_missing)
+            state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
+            tasks = json.loads(state_path.read_text(encoding="utf-8-sig"))["ai_tasks"]
+
+            def write_results(path: Path, selected: list[dict[str, object]]) -> None:
+                path.write_text(
+                    "".join(
+                        json.dumps(
+                            {
+                                "task_id": item["task_id"],
+                                "component_id": item["component_id"],
+                                "item_id": "CFO-03",
+                                "reason": "原标签与摘要一致",
+                                "confidence": "high",
+                            },
+                            ensure_ascii=False,
+                        ) + "\n"
+                        for item in selected
+                    ),
+                    encoding="utf-8-sig",
+                )
+
+            first_path = root / "第一批结果.jsonl"
+            write_results(first_path, tasks[:25])
+            first = import_ai_results(preflight.run_dir, first_path)
+            self.assertEqual(25, first.valid_count)
+            self.assertEqual(1, first.missing_count)
+
+            second_path = root / "第二批结果.jsonl"
+            write_results(second_path, tasks[25:])
+            second = import_ai_results(preflight.run_dir, second_path)
+            self.assertEqual(26, second.valid_count)
+            self.assertEqual(0, second.missing_count)
+            self.assertEqual("AI 已完成", second.status)
+
+            conflicting_path = root / "冲突结果.jsonl"
+            conflicting_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": tasks[0]["task_id"],
+                        "component_id": tasks[0]["component_id"],
+                        "item_id": "CFI-05",
+                        "reason": "与已导入结果冲突",
+                        "confidence": "high",
+                    },
+                    ensure_ascii=False,
+                ) + "\n",
+                encoding="utf-8-sig",
+            )
+            with self.assertRaisesRegex(ValueError, "冲突"):
+                import_ai_results(preflight.run_dir, conflicting_path)
+
     def test_preflight_reads_every_data_sheet_and_keeps_row_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -248,10 +339,35 @@ class PipelineTests(unittest.TestCase):
             )
             second = import_ai_results(preflight.run_dir, second_result)
             self.assertEqual("AI 已完成", second.status)
+            repeated = import_ai_results(preflight.run_dir, second_result)
+            self.assertEqual("AI 已完成", repeated.status)
+            self.assertEqual(0, repeated.missing_count)
             final = finalize_run(preflight.run_dir)
             self.assertEqual("最终可使用", final.overall_status)
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
             self.assertEqual("CFI-05", state["decisions"][0]["system_item_id"])
+            workbook = load_workbook(final.workbook_path, data_only=False)
+            try:
+                ai_sheet = workbook["AI复核记录"]
+                self.assertEqual(3, ai_sheet.max_row)
+                self.assertIn("阶段", [cell.value for cell in ai_sheet[1]])
+                trace_headers = [cell.value for cell in workbook["全量分类留痕"][1]]
+                for header in ("原现流项目", "对方科目", "证据强度", "来源文件", "来源工作表", "来源单元格"):
+                    self.assertIn(header, trace_headers)
+            finally:
+                workbook.close()
+            connection = sqlite3.connect(preflight.run_dir / "计算留痕数据" / "计算留痕.sqlite3")
+            try:
+                self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM ai_result").fetchone()[0])
+                final_payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM classification_decision WHERE record_id = ?",
+                        (state["decisions"][0]["component_id"],),
+                    ).fetchone()[0]
+                )
+                self.assertEqual("CFI-05", final_payload["system_item_id"])
+            finally:
+                connection.close()
 
     def test_low_confidence_ai_conflict_reaches_material_human_review_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,6 +418,10 @@ class PipelineTests(unittest.TestCase):
             try:
                 self.assertIsNone(workbook["重要待复核事项"]["C2"].value)
                 self.assertEqual("CFO-03", workbook["重要待复核事项"]["B2"].value)
+                self.assertIn(
+                    "匿名弱证据明细.xlsx",
+                    workbook["重要待复核事项"]["O2"].value,
+                )
             finally:
                 workbook.close()
 

@@ -12,12 +12,14 @@ from cashflow_direct.storage import RunStore
 
 
 EXPECTED_TABLES = {
+    "ai_result",
     "ai_task",
     "cash_scope",
     "cashflow_component",
     "classification_decision",
     "duplicate_group",
     "field_mapping",
+    "internal_transfer",
     "reconciliation",
     "review_batch",
     "run_event",
@@ -100,7 +102,7 @@ class MoneyAndStorageTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(0, count)
 
-    def test_schema_has_exactly_the_seventeen_approved_tables(self) -> None:
+    def test_schema_has_all_approved_trace_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = RunStore(Path(tmp) / "trace.sqlite3")
             store.initialize()

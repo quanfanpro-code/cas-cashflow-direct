@@ -64,15 +64,21 @@ def _looks_like_cash(account_name: str) -> bool:
 
 
 def discover_cash_scope(entries: Sequence[NormalizedEntry]) -> CashScopeProposal:
-    grouped: dict[str, list[NormalizedEntry]] = defaultdict(list)
+    grouped: dict[str, list[tuple[NormalizedEntry, str, int, int]]] = defaultdict(list)
     for entry in entries:
         if _looks_like_cash(entry.account_name):
-            grouped[_account_key(entry.account_name)].append(entry)
+            grouped[_account_key(entry.account_name)].append(
+                (entry, entry.account_name, entry.debit_cent, entry.credit_cent)
+            )
+        elif entry.retained_side == "counterpart" and _looks_like_cash(entry.counterpart_name):
+            grouped[_account_key(entry.counterpart_name)].append(
+                (entry, entry.counterpart_name, entry.credit_cent, entry.debit_cent)
+            )
     candidates: list[CashScopeCandidate] = []
     for key, items in sorted(grouped.items()):
-        names = tuple(sorted({item.account_name for item in items}))
-        debit = sum(item.debit_cent for item in items)
-        credit = sum(item.credit_cent for item in items)
+        names = tuple(sorted({name for _, name, _, _ in items}))
+        debit = sum(item_debit for _, _, item_debit, _ in items)
+        credit = sum(item_credit for _, _, _, item_credit in items)
         restrictions = tuple(
             term for term in RESTRICTED_TERMS if any(term in name for name in names)
         )
@@ -215,7 +221,11 @@ def _voucher_components(
     for entry in labeled:
         direction = "in" if _signed_flow(entry) > 0 else "out"
         by_item[f"{direction}\x1f{entry.original_flow_item}"].append(entry)
-    if not by_item and len(noncash) > 1:
+    principal_and_interest = (
+        any(any(term in entry.account_name for term in ("借款", "债务")) for entry in noncash)
+        and any("利息" in entry.account_name for entry in noncash)
+    )
+    if not by_item and principal_and_interest:
         for entry in noncash:
             direction = "in" if _signed_flow(entry) > 0 else "out"
             by_item[f"{direction}\x1f{entry.account_name}"].append(entry)
@@ -334,6 +344,14 @@ def build_cashflow_components(
             excluded.extend(internal)
             continue
         for entry in voucher_entries:
-            if entry.flow_amount_cent:
+            named_cash_counterpart = bool(
+                entry.counterpart_name
+                and _account_key(entry.counterpart_name) in scope.included_keys
+            )
+            if entry.flow_amount_cent or (
+                entry.retained_side == "counterpart"
+                and named_cash_counterpart
+                and (entry.debit_cent or entry.credit_cent)
+            ):
                 components.append(_build_one_sided(entry))
     return ComponentBuildResult(tuple(components), tuple(excluded), 0)

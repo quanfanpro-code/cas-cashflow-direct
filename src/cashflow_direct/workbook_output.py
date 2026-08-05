@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 from cashflow_direct.classification import RulePack
 from cashflow_direct.duplicates import DuplicateGroup
 from cashflow_direct.models import ReviewBatch
+from cashflow_direct.money import statement_amount_cent
 from cashflow_direct.statement import (
     ReconciliationResult,
     StatementComparison,
@@ -60,8 +61,8 @@ def manual_adjustment_formula(
     review_end = max(2, review_last_row)
     duplicate_end = max(2, duplicate_last_row)
     return (
-        f'=SUMIFS(\'重要待复核事项\'!$F$2:$F${review_end},\'重要待复核事项\'!$C$2:$C${review_end},"{item_id}")'
-        f'-SUMIFS(\'重要待复核事项\'!$F$2:$F${review_end},\'重要待复核事项\'!$B$2:$B${review_end},"{item_id}")'
+        f'=SUMIFS(\'重要待复核事项\'!$G$2:$G${review_end},\'重要待复核事项\'!$B$2:$B${review_end},"{item_id}")'
+        f'+SUMIFS(\'重要待复核事项\'!$H$2:$H${review_end},\'重要待复核事项\'!$C$2:$C${review_end},"{item_id}")'
         f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_id}")'
     )
 
@@ -74,10 +75,13 @@ def calculate_manual_adjustments(
     adjustments: defaultdict[str, int] = defaultdict(int)
     for batch in model.review_batches:
         selected = review_decisions.get(batch.batch_id, batch.proposed_item_code)
-        if selected not in {"", "认可自动判断", batch.proposed_item_code}:
+        if selected in batch.alternative_item_codes:
             amount = batch.baseline_statement_amount_cent
             adjustments[batch.proposed_item_code] -= amount
-            adjustments[selected] += amount
+            adjustments[selected] += statement_amount_cent(
+                batch.cash_delta_cent,
+                model.rules.item_by_id[selected].normal_direction,
+            )
     for group in model.duplicate_groups:
         if duplicate_decisions.get(group.group_id, group.default_decision) in {"exclude", "剔除"}:
             adjustments[group.item_id] -= group.baseline_statement_amount_cent
@@ -85,27 +89,30 @@ def calculate_manual_adjustments(
 
 
 def _formats(workbook: xlsxwriter.Workbook) -> dict[str, xlsxwriter.format.Format]:
+    base = {"font_name": "Arial", "font_size": 11}
     return {
         "title": workbook.add_format(
-            {"bold": True, "font_size": 16, "font_color": "#FFFFFF", "bg_color": "#17365D", "align": "center", "valign": "vcenter"}
+            {**base, "bold": True, "font_size": 16, "font_color": "#FFFFFF", "bg_color": "#17365D", "align": "center", "valign": "vcenter"}
         ),
         "header": workbook.add_format(
-            {"bold": True, "font_color": "#FFFFFF", "bg_color": "#1F4E78", "border": 1, "align": "center", "valign": "vcenter"}
+            {**base, "bold": True, "font_color": "#FFFFFF", "bg_color": "#1F4E78", "border": 1, "align": "center", "valign": "vcenter"}
         ),
-        "section": workbook.add_format({"bold": True, "bg_color": "#D9EAF7", "border": 1}),
-        "text": workbook.add_format({"border": 1, "valign": "top"}),
-        "money": workbook.add_format({"border": 1, "num_format": "#,##0.00;[Red](#,##0.00);-"}),
-        "input": workbook.add_format({"border": 1, "bg_color": "#DDEBF7", "font_color": "#0070C0", "locked": False}),
-        "pending": workbook.add_format({"border": 1, "bg_color": "#FFF2CC"}),
-        "error": workbook.add_format({"border": 1, "bg_color": "#F4CCCC", "font_color": "#9C0006"}),
-        "note": workbook.add_format({"italic": True, "font_color": "#666666"}),
-        "link": workbook.add_format({"font_color": "#0563C1", "underline": True}),
+        "section": workbook.add_format({**base, "bold": True, "bg_color": "#D9EAF7", "border": 1}),
+        "text": workbook.add_format({**base, "border": 1, "valign": "top"}),
+        "money": workbook.add_format({**base, "border": 1, "num_format": "#,##0.00;[Red](#,##0.00);-"}),
+        "input": workbook.add_format({**base, "border": 1, "bg_color": "#DDEBF7", "font_color": "#0070C0", "locked": False}),
+        "pending": workbook.add_format({**base, "border": 1, "bg_color": "#FFF2CC"}),
+        "error": workbook.add_format({**base, "border": 1, "bg_color": "#F4CCCC", "font_color": "#9C0006"}),
+        "note": workbook.add_format({**base, "italic": True, "font_color": "#666666"}),
+        "link": workbook.add_format({**base, "font_color": "#0563C1", "underline": True}),
     }
 
 
 def _configure_sheet(
     sheet: xlsxwriter.worksheet.Worksheet, columns: int, rows: int = 2
 ) -> None:
+    sheet.set_default_row(18)
+    sheet.hide_gridlines(2)
     sheet.freeze_panes(1, 0)
     sheet.set_landscape()
     sheet.fit_to_pages(1, 0)
@@ -148,28 +155,54 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     sheets = {name: workbook.add_worksheet(name) for name in SHEET_NAMES}
     try:
         status = sheets["使用说明与状态"]
+        status.set_default_row(18)
+        status.set_row(0, 24)
+        status.hide_gridlines(2)
         status.merge_range("A1:D1", "直接法现金流量表正表编制与复核底稿", formats["title"])
         status.write("A3", "当前状态", formats["header"])
-        if model.overall_status.startswith("草稿"):
+        reconciliation_complete = bool(
+            model.reconciliation is not None
+            and model.reconciliation.opening_cent is not None
+            and model.reconciliation.closing_cent is not None
+            and model.reconciliation.fx_cent is not None
+        )
+        hard_draft = "输入存在未处理错误" in model.overall_status or (
+            model.reconciliation is not None and not reconciliation_complete
+        )
+        if hard_draft:
             status.write("B3", model.overall_status, formats["error"])
-        elif model.review_batches or any(
-            group.blocks_manual_completion for group in model.duplicate_groups
-        ):
+        elif model.review_batches or model.duplicate_groups or reconciliation_complete:
             review_end = max(2, len(model.review_batches) + 1)
             duplicate_end = max(2, len(model.duplicate_groups) + 1)
             pending_terms = []
             if model.review_batches:
-                pending_terms.append(f"COUNTBLANK('重要待复核事项'!C2:C{review_end})")
-            if any(group.blocks_manual_completion for group in model.duplicate_groups):
+                pending_terms.extend(
+                    (
+                        f'COUNTIF(\'重要待复核事项\'!J2:J{review_end},"待确认")',
+                        f'COUNTIF(\'重要待复核事项\'!J2:J{review_end},"无效选择")',
+                    )
+                )
+            if model.duplicate_groups:
+                pending_terms.append(
+                    f'COUNTIF(\'疑似重复事项\'!H2:H{duplicate_end},"无效选择")'
+                )
                 pending_terms.append(
                     f'COUNTIFS(\'疑似重复事项\'!G2:G{duplicate_end},"是",'
-                    f'\'疑似重复事项\'!C2:C{duplicate_end},"")'
+                    f'\'疑似重复事项\'!H2:H{duplicate_end},"待确认")'
                 )
+            completed_value = '"最终可使用"'
+            if reconciliation_complete:
+                difference_row = len(model.cash_scope_rows) + 6
+                completed_value = (
+                    f'IF(\'现金范围与现金调节\'!C{difference_row}=0,'
+                    '"最终可使用","草稿：现金调节存在差异")'
+                )
+            condition = "+".join(pending_terms) or "0"
             status.write_formula(
                 "B3",
-                f'=IF({"+".join(pending_terms)}=0,"最终可使用","待完成人工确认")',
+                f'=IF({condition}=0,{completed_value},"待完成人工确认")',
                 formats["pending"],
-                "待完成人工确认",
+                model.overall_status,
             )
         else:
             status.write("B3", "最终可使用", formats["text"])
@@ -189,13 +222,16 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             "人工确认项目",
             "最不利影响金额",
             "系统基线金额",
-            "有效调整金额",
+            "现金变化金额",
+            "系统项目调整",
+            "目标项目金额",
             "原因",
             "状态",
             "包含笔数",
             "业务组成编号",
             "摘要模式",
             "对方科目组",
+            "来源位置",
         )
         for column, header in enumerate(review_headers):
             review.write(0, column, header, formats["header"])
@@ -211,25 +247,50 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     batch.baseline_statement_amount_cent / 100,
                     formats["money"],
                 )
-                review.write_formula(
+                review.write_number(
                     row_index,
                     5,
-                    f'=IF(OR(C{row_index + 1}="",C{row_index + 1}="认可自动判断"),0,E{row_index + 1})',
+                    batch.cash_delta_cent / 100,
+                    formats["money"],
+                )
+                excel_row = row_index + 1
+                valid_choices = ",".join(
+                    f'C{excel_row}="{item_id}"' for item_id in batch.alternative_item_codes
+                ) or "FALSE"
+                review.write_formula(
+                    row_index,
+                    6,
+                    f'=IF(OR({valid_choices}),-E{excel_row},0)',
                     formats["money"],
                     0,
                 )
-                review.write(row_index, 6, batch.reason, formats["text"])
+                target_formula = "0"
+                for alternative in reversed(batch.alternative_item_codes):
+                    direction = model.rules.item_by_id[alternative].normal_direction
+                    amount = f'F{excel_row}' if direction == "inflow" else f'-F{excel_row}'
+                    target_formula = (
+                        f'IF(C{excel_row}="{alternative}",{amount},{target_formula})'
+                    )
                 review.write_formula(
                     row_index,
                     7,
-                    f'=IF(C{row_index + 1}="","待确认",IF(C{row_index + 1}="认可自动判断","认可自动判断","已改列"))',
+                    f'={target_formula}',
+                    formats["money"],
+                    0,
+                )
+                review.write(row_index, 8, batch.reason, formats["text"])
+                review.write_formula(
+                    row_index,
+                    9,
+                    f'=IF(C{excel_row}="","待确认",IF(C{excel_row}="认可自动判断","认可自动判断",IF(OR({valid_choices}),"已重分类","无效选择")))',
                     formats["pending"],
                     "待确认",
                 )
-                review.write_number(row_index, 8, len(batch.component_ids), formats["text"])
-                review.write(row_index, 9, "、".join(batch.component_ids), formats["text"])
-                review.write(row_index, 10, batch.representative_summary, formats["text"])
-                review.write(row_index, 11, batch.counterpart_group, formats["text"])
+                review.write_number(row_index, 10, len(batch.component_ids), formats["text"])
+                review.write(row_index, 11, "、".join(batch.component_ids), formats["text"])
+                review.write(row_index, 12, batch.representative_summary, formats["text"])
+                review.write(row_index, 13, batch.counterpart_group, formats["text"])
+                review.write(row_index, 14, "、".join(batch.source_locations), formats["text"])
                 review.data_validation(
                     row_index,
                     2,
@@ -244,11 +305,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         else:
             review.write(1, 0, "本期无重大剩余不确定事项，无需人工复核。", formats["note"])
         review.set_column("A:C", 18)
-        review.set_column("D:F", 16)
-        review.set_column("G:G", 46)
-        review.set_column("H:H", 16)
-        review.set_column("I:I", 12)
-        review.set_column("J:L", 32)
+        review.set_column("D:H", 16)
+        review.set_column("I:I", 46)
+        review.set_column("J:J", 16)
+        review.set_column("K:K", 12)
+        review.set_column("L:O", 32)
         _configure_sheet(review, len(review_headers), len(model.review_batches) + 1)
         review.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
@@ -261,6 +322,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             "重复计入正表金额",
             "有效调整金额",
             "是否阻止完成",
+            "状态",
         )
         for column, header in enumerate(duplicate_headers):
             duplicate.write(0, column, header, formats["header"])
@@ -284,16 +346,26 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     0,
                 )
                 duplicate.write(row_index, 6, "是" if group.blocks_manual_completion else "否", formats["pending"])
+                duplicate.write_formula(
+                    row_index,
+                    7,
+                    f'=IF(C{row_index + 1}="",IF(G{row_index + 1}="是","待确认","默认保留"),IF(C{row_index + 1}="保留","保留",IF(C{row_index + 1}="剔除","剔除","无效选择")))',
+                    formats["pending"],
+                    "待确认" if group.blocks_manual_completion else "默认保留",
+                )
                 duplicate.data_validation(row_index, 2, row_index, 2, {"validate": "list", "source": ["保留", "剔除"]})
             duplicate.autofilter(0, 0, len(model.duplicate_groups), len(duplicate_headers) - 1)
         else:
             duplicate.write(1, 0, "本期未发现跨文件疑似重复事项。", formats["note"])
         duplicate.set_column("A:C", 18)
-        duplicate.set_column("D:G", 18)
+        duplicate.set_column("D:H", 18)
         _configure_sheet(duplicate, len(duplicate_headers), len(model.duplicate_groups) + 1)
         duplicate.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
         main = sheets["现金流量表正表"]
+        main.set_default_row(18)
+        main.set_row(0, 24)
+        main.hide_gridlines(2)
         main.merge_range("A1:F1", "现金流量表", formats["title"])
         main.write("A2", "金额单位：人民币元", formats["note"])
         headers = ("项目编号", "项目", "上期金额", "自动基线", "人工调整", "最终金额")
@@ -405,7 +477,34 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         "金额（元）": None if amount is None else amount / 100,
                     }
                 )
-        _write_dict_rows(sheets["现金范围与现金调节"], tuple(cash_rows), formats, "现金范围尚未确认。")
+        cash_sheet = sheets["现金范围与现金调节"]
+        _write_dict_rows(cash_sheet, tuple(cash_rows), formats, "现金范围尚未确认。")
+        if reconciliation_complete:
+            opening_row = len(model.cash_scope_rows) + 2
+            net_row = len(model.cash_scope_rows) + 4
+            closing_row = len(model.cash_scope_rows) + 5
+            difference_row = len(model.cash_scope_rows) + 6
+            cash_sheet.write_formula(
+                net_row - 1,
+                2,
+                f"='现金流量表正表'!F{excel_row_by_id['NET-CASH']}",
+                formats["money"],
+                model.reconciliation.net_cash_cent / 100,
+            )
+            cash_sheet.write_formula(
+                difference_row - 1,
+                2,
+                f'=C{closing_row}-C{opening_row}-C{net_row}',
+                formats["money"],
+                model.reconciliation.difference_cent / 100,
+            )
+            cash_sheet.write_formula(
+                difference_row - 1,
+                1,
+                f'=IF(C{difference_row}=0,"现金调节完成","现金调节存在差异")',
+                formats["pending"],
+                model.reconciliation.status,
+            )
         _write_dict_rows(sheets["全量分类留痕"], model.trace_rows, formats, "没有现金流业务组成。")
         _write_dict_rows(sheets["输入识别与字段映射"], model.mapping_rows, formats, "没有字段映射记录。")
     finally:

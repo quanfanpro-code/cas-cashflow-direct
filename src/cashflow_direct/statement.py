@@ -36,6 +36,7 @@ class ExistingStatementResult:
     standardized_values: dict[str, int | None]
     custom_rows: tuple[ExistingCustomRow, ...]
     unit_multiplier: int
+    sheet_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +122,12 @@ def _normalize_item_name(value: str) -> str:
     return text.replace("和", "").replace("其中", "")
 
 
-def _mapping_question(role: str, text: str, row_number: int) -> MappingQuestion:
+def _mapping_question(
+    role: str,
+    text: str,
+    row_number: int,
+    sheet_name: str = "",
+) -> MappingQuestion:
     candidate = ColumnMapping(
         role,
         1,
@@ -130,7 +136,7 @@ def _mapping_question(role: str, text: str, row_number: int) -> MappingQuestion:
         f"A{row_number}",
         0,
     )
-    return MappingQuestion(role, candidate, (), (text, "", ""))
+    return MappingQuestion(role, candidate, (), (text, "", ""), sheet_name)
 
 
 def _amount_to_cent(value: object, unit_multiplier: int) -> int | None:
@@ -139,92 +145,129 @@ def _amount_to_cent(value: object, unit_multiplier: int) -> int | None:
     return yuan_to_cent(value) * unit_multiplier
 
 
+def _parse_statement_rows(
+    rows: list[tuple[object, ...]],
+    sheet_name: str,
+    rules: RulePack,
+) -> ExistingStatementResult | MappingQuestion | None:
+    unit_text = "|".join(
+        str(value)
+        for row in rows[:20]
+        for value in row
+        if value not in (None, "")
+    )
+    unit_multiplier = 10_000 if "万元" in unit_text else 1
+    header_row = None
+    project_column = current_column = prior_column = None
+    for row_index, row in enumerate(rows, 1):
+        texts = [_normalize_item_name(str(value)) if value is not None else "" for value in row]
+        project = next((index for index, text in enumerate(texts) if text == "项目"), None)
+        current = next(
+            (index for index, text in enumerate(texts) if "本期" in text or "本年" in text),
+            None,
+        )
+        if project is not None and current is not None:
+            header_row = row_index
+            project_column = project
+            current_column = current
+            prior_column = next(
+                (index for index, text in enumerate(texts) if "上期" in text or "上年" in text),
+                None,
+            )
+            break
+    if header_row is None or project_column is None or current_column is None:
+        return None
+
+    normalized_to_id = {
+        _normalize_item_name(item.name): item.item_id for item in rules.statement_items
+    }
+    values: dict[str, int | None] = {}
+    prior_values: dict[str, int | None] = {}
+    custom_rows: list[ExistingCustomRow] = []
+    last_standard_id = ""
+    for row_number, row in enumerate(rows[header_row:], header_row + 1):
+        if project_column >= len(row):
+            continue
+        raw_name = row[project_column]
+        if raw_name in (None, ""):
+            continue
+        name = str(raw_name).strip()
+        normalized = _normalize_item_name(name)
+        item_id = normalized_to_id.get(normalized)
+        current_value = row[current_column] if current_column < len(row) else None
+        prior_value = row[prior_column] if prior_column is not None and prior_column < len(row) else None
+        if item_id is not None:
+            values[item_id] = _amount_to_cent(current_value, unit_multiplier)
+            prior_values[item_id] = _amount_to_cent(prior_value, unit_multiplier)
+            last_standard_id = item_id
+            continue
+        last_item = rules.item_by_id.get(last_standard_id)
+        if last_standard_id and (
+            name.startswith("其中")
+            or (
+                last_item is not None
+                and last_item.is_leaf
+                and not any(term in name for term in ("合计", "总额", "净额", "余额", "影响"))
+            )
+        ):
+            custom_rows.append(
+                ExistingCustomRow(
+                    name,
+                    last_standard_id,
+                    _amount_to_cent(current_value, unit_multiplier),
+                    _amount_to_cent(prior_value, unit_multiplier),
+                    f"A{row_number}",
+                )
+            )
+            continue
+        return _mapping_question("statement_item", name, row_number, sheet_name)
+
+    if len(values) != len(rules.statement_items):
+        missing = next(
+            item.item_id for item in rules.statement_items if item.item_id not in values
+        )
+        return _mapping_question(
+            "statement_item",
+            f"缺少标准项目 {missing}",
+            header_row,
+            sheet_name,
+        )
+    return ExistingStatementResult(
+        values,
+        prior_values,
+        dict(values),
+        tuple(custom_rows),
+        unit_multiplier,
+        sheet_name,
+    )
+
+
 def parse_existing_statement(
     path: Path,
     rules: RulePack,
 ) -> ExistingStatementResult | MappingQuestion:
     workbook = load_workbook(path, read_only=True, data_only=True, keep_vba=False)
     try:
-        worksheet = workbook.worksheets[0]
-        rows = list(worksheet.iter_rows(values_only=True))
-        unit_text = "|".join(
-            str(value)
-            for row in rows[:20]
-            for value in row
-            if value not in (None, "")
-        )
-        unit_multiplier = 10_000 if "万元" in unit_text else 1
-        header_row = None
-        project_column = current_column = prior_column = None
-        for row_index, row in enumerate(rows, 1):
-            texts = [_normalize_item_name(str(value)) if value is not None else "" for value in row]
-            project = next((index for index, text in enumerate(texts) if text == "项目"), None)
-            current = next((index for index, text in enumerate(texts) if "本期" in text), None)
-            if project is not None and current is not None:
-                header_row = row_index
-                project_column = project
-                current_column = current
-                prior_column = next((index for index, text in enumerate(texts) if "上期" in text), None)
-                break
-        if header_row is None or project_column is None or current_column is None:
-            return _mapping_question("statement_header", "未找到项目和本期金额列", 1)
-
-        normalized_to_id = {
-            _normalize_item_name(item.name): item.item_id for item in rules.statement_items
-        }
-        values: dict[str, int | None] = {}
-        prior_values: dict[str, int | None] = {}
-        custom_rows: list[ExistingCustomRow] = []
-        last_standard_id = ""
-        for row_number, row in enumerate(rows[header_row:], header_row + 1):
-            if project_column >= len(row):
-                continue
-            raw_name = row[project_column]
-            if raw_name in (None, ""):
-                continue
-            name = str(raw_name).strip()
-            normalized = _normalize_item_name(name)
-            item_id = normalized_to_id.get(normalized)
-            current_value = row[current_column] if current_column < len(row) else None
-            prior_value = row[prior_column] if prior_column is not None and prior_column < len(row) else None
-            if item_id is not None:
-                values[item_id] = _amount_to_cent(current_value, unit_multiplier)
-                prior_values[item_id] = _amount_to_cent(prior_value, unit_multiplier)
-                last_standard_id = item_id
-                continue
-            last_item = rules.item_by_id.get(last_standard_id)
-            if last_standard_id and (
-                name.startswith("其中")
-                or (
-                    last_item is not None
-                    and last_item.is_leaf
-                    and not any(term in name for term in ("合计", "总额", "净额", "余额", "影响"))
-                )
-            ):
-                custom_rows.append(
-                    ExistingCustomRow(
-                        name,
-                        last_standard_id,
-                        _amount_to_cent(current_value, unit_multiplier),
-                        _amount_to_cent(prior_value, unit_multiplier),
-                        f"A{row_number}",
-                    )
-                )
-                continue
-            return _mapping_question("statement_item", name, row_number)
-
-        if len(values) != len(rules.statement_items):
-            missing = next(
-                item.item_id for item in rules.statement_items if item.item_id not in values
+        candidates = tuple(
+            _parse_statement_rows(
+                list(worksheet.iter_rows(values_only=True)),
+                worksheet.title,
+                rules,
             )
-            return _mapping_question("statement_item", f"缺少标准项目 {missing}", header_row)
-        return ExistingStatementResult(
-            values,
-            prior_values,
-            dict(values),
-            tuple(custom_rows),
-            unit_multiplier,
+            for worksheet in workbook.worksheets
         )
+        valid = tuple(item for item in candidates if isinstance(item, ExistingStatementResult))
+        if len(valid) > 1:
+            names = "、".join(item.sheet_name for item in valid)
+            return _mapping_question(
+                "statement_sheet",
+                f"识别到多个现金流量表工作表：{names}",
+                1,
+            )
+        if valid:
+            return valid[0]
+        question = next((item for item in candidates if isinstance(item, MappingQuestion)), None)
+        return question or _mapping_question("statement_header", "未找到项目和本期或本年金额列", 1)
     finally:
         workbook.close()
 

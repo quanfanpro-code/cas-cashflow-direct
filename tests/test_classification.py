@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from cashflow_direct.classification import classify_component, load_rule_pack
+from cashflow_direct.validation import validate_classification
 from cashflow_direct.money import statement_amount_cent
 from tests.fixture_factory import cashflow_component
 
@@ -12,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClassificationTests(unittest.TestCase):
+    def test_empty_component_set_cannot_pass_classification_validation(self) -> None:
+        result = validate_classification((), ())
+        self.assertFalse(result.valid)
+        self.assertIn("未生成现金流业务组成", result.errors)
+
     def test_general_enterprise_pack_has_35_rows_and_22_leaf_items(self) -> None:
         rules = load_rule_pack(ROOT)
         self.assertEqual(35, len(rules.statement_items))
@@ -21,6 +27,36 @@ class ClassificationTests(unittest.TestCase):
             "CFF-01", "CFF-02", "CFF-03", "CFF-04", "CFF-05", "CFF-06",
         }
         self.assertEqual(expected_leaf_ids, {item.item_id for item in rules.statement_items if item.is_leaf})
+
+    def test_each_exact_standard_leaf_label_has_priority_over_keyword_rules(self) -> None:
+        rules = load_rule_pack(ROOT)
+        for item in (item for item in rules.statement_items if item.is_leaf):
+            amount = 100 if item.normal_direction == "inflow" else -100
+            component = cashflow_component(
+                "普通业务",
+                amount,
+                original_item_text=item.name,
+                component_id=f"LABEL-{item.item_id}",
+            )
+            with self.subTest(item_id=item.item_id):
+                decision = classify_component(component, rules)
+                self.assertEqual(item.item_id, decision.system_item_id)
+                self.assertEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+
+    def test_exact_standard_label_does_not_ignore_meaningful_words(self) -> None:
+        rules = load_rule_pack(ROOT)
+        item = rules.item_by_id["CFI-03"]
+        shortened = item.name.replace("和", "", 1)
+        decision = classify_component(
+            cashflow_component(
+                "处置长期资产收款",
+                100,
+                original_item_text=shortened,
+                component_id="LABEL-NOT-EXACT",
+            ),
+            rules,
+        )
+        self.assertNotEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
 
     def test_ordinary_current_account_defaults_to_other_operating_cash(self) -> None:
         rules = load_rule_pack(ROOT)

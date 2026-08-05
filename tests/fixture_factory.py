@@ -211,6 +211,17 @@ def component_entries(case: str) -> tuple[NormalizedEntry, ...]:
         "one_sided_counterpart": (
             _component_entry(9, "V4", "应收款项", credit_cent=12_000, item="项目甲", flow_amount_cent=12_000, retained_side="counterpart"),
         ),
+        "one_sided_counterpart_without_flow_amount": (
+            _component_entry(
+                28,
+                "V15",
+                "应收款项",
+                credit_cent=12_000,
+                item="销售商品、提供劳务收到的现金",
+                retained_side="counterpart",
+                counterpart_name="1002 银行存款",
+            ),
+        ),
         "one_sided_cash": (
             _component_entry(10, "V5", "1002 银行存款", debit_cent=14_000, item="项目甲", flow_amount_cent=14_000, retained_side="cash"),
         ),
@@ -252,6 +263,11 @@ def component_entries(case: str) -> tuple[NormalizedEntry, ...]:
             _component_entry(24, "V13", "1002 银行存款", credit_cent=110_000, retained_side="cash", summary="偿还本金及利息"),
             _component_entry(25, "V13", "短期借款", debit_cent=100_000, retained_side="counterpart", summary="偿还本金及利息"),
             _component_entry(26, "V13", "应付利息", debit_cent=10_000, retained_side="counterpart", summary="偿还本金及利息"),
+        ),
+        "purchase_with_input_vat": (
+            _component_entry(29, "V16", "1002 银行存款", credit_cent=113_000, retained_side="cash", summary="采购原材料"),
+            _component_entry(30, "V16", "原材料", debit_cent=100_000, retained_side="counterpart", summary="采购原材料"),
+            _component_entry(31, "V16", "应交税费-应交增值税（进项税额）", debit_cent=13_000, retained_side="counterpart", summary="采购原材料"),
         ),
         "one_sided_internal_transfer": (
             _component_entry(
@@ -447,6 +463,7 @@ def workbook_model(review_batches: int, duplicate_groups: int):
             worst_case_impact_cent=10_000 + index,
             reason="匿名重大剩余事项",
             baseline_statement_amount_cent=10_000 + index,
+            cash_delta_cent=-(10_000 + index),
         )
         for index in range(review_batches)
     )
@@ -588,6 +605,23 @@ def write_ai_end_to_end_case(root: Path) -> Path:
     balance.append(["项目", "金额"])
     balance.append(["期初现金及现金等价物余额", 1000000])
     balance.append(["期末现金及现金等价物余额", 1800000])
+    balance.append(["汇率变动对现金及现金等价物的影响", 0])
+    workbook.save(path)
+    return path
+
+
+def write_ai_batch_case(root: Path, count: int = 26) -> Path:
+    path = root / "多批匿名弱证据明细.xlsx"
+    workbook = Workbook()
+    detail = workbook.active
+    detail.title = "匿名流量明细"
+    detail.append(["发生额方向", "金额", "摘要", "现流项目"])
+    for index in range(count):
+        detail.append(["借", 800000, f"匿名往来款{index + 1}", "收到其他经营现金"])
+    balance = workbook.create_sheet("现金余额资料")
+    balance.append(["项目", "金额"])
+    balance.append(["期初现金及现金等价物余额", 1000000])
+    balance.append(["期末现金及现金等价物余额", 1000000 + count * 800000])
     balance.append(["汇率变动对现金及现金等价物的影响", 0])
     workbook.save(path)
     return path

@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 from cashflow_direct.semantic_mapping import MappingQuestion
 from cashflow_direct.statement import (
     aggregate_statement,
@@ -71,6 +73,38 @@ class StatementTests(unittest.TestCase):
             row = next(item for item in comparison.rows if item.item_id == "CFO-01")
             self.assertEqual(computed.values["CFO-01"] - existing.values["CFO-01"], row.difference_cent)
             self.assertEqual(("S1",), row.support_component_ids)
+
+    def test_existing_statement_scans_all_sheets_and_accepts_year_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "多页客户正表.xlsx"
+            write_existing_statement_fixture(path, header_row=7, with_custom_rows=False)
+            workbook = load_workbook(path)
+            statement_sheet = workbook.worksheets[0]
+            statement_sheet["C7"] = "本年金额"
+            statement_sheet["D7"] = "上年金额"
+            cover = workbook.create_sheet("封面", 0)
+            cover["A1"] = "审计资料封面"
+            workbook.save(path)
+            workbook.close()
+
+            result = parse_existing_statement(path, classified_components().rules)
+            self.assertNotIsInstance(result, MappingQuestion)
+            self.assertEqual("报表页_随机", result.sheet_name)
+            self.assertEqual(35, len(result.values))
+
+    def test_multiple_statement_sheets_return_an_ambiguity_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "重复正表.xlsx"
+            write_existing_statement_fixture(path, header_row=7, with_custom_rows=False)
+            workbook = load_workbook(path)
+            duplicate = workbook.copy_worksheet(workbook.worksheets[0])
+            duplicate.title = "另一张现金流量表"
+            workbook.save(path)
+            workbook.close()
+
+            result = parse_existing_statement(path, classified_components().rules)
+            self.assertIsInstance(result, MappingQuestion)
+            self.assertEqual("statement_sheet", result.role)
 
     def test_unmapped_total_returns_question_instead_of_guessing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

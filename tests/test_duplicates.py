@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from cashflow_direct.duplicates import (
     apply_duplicate_decisions,
@@ -43,6 +44,35 @@ class DuplicateTests(unittest.TestCase):
     def test_common_spacing_and_punctuation_normalize_but_same_file_split_does_not_group(self) -> None:
         self.assertEqual(1, len(find_suspected_duplicates(duplicate_components(100), 1)))
         self.assertEqual((), find_suspected_duplicates(duplicate_components(100, same_file=True), 1))
+
+    def test_cross_file_pair_does_not_absorb_a_legitimate_same_file_repeat(self) -> None:
+        first, same_file_repeat = duplicate_components(100, same_file=True)
+        cross_file_repeat = replace(
+            same_file_repeat,
+            component_id="DUP-C",
+            source_keys=("F2:E1",),
+            source_file_ids=("F2",),
+        )
+        groups = find_suspected_duplicates(
+            (first, same_file_repeat, cross_file_repeat),
+            performance_cent=1,
+        )
+        self.assertEqual(1, len(groups))
+        self.assertEqual(("DUP-A", "DUP-C"), groups[0].component_ids)
+        self.assertNotIn("DUP-B", groups[0].component_ids)
+
+    def test_one_base_record_matches_repeats_from_each_other_file(self) -> None:
+        first, second = duplicate_components(100)
+        third = replace(
+            second,
+            component_id="DUP-C",
+            source_keys=("F3:E1",),
+            source_file_ids=("F3",),
+        )
+        groups = find_suspected_duplicates((first, second, third), performance_cent=1)
+        self.assertEqual(1, len(groups))
+        self.assertEqual(("DUP-A", "DUP-B", "DUP-C"), groups[0].component_ids)
+        self.assertEqual(200, groups[0].worst_case_impact_cent)
 
     def test_below_performance_is_listed_without_blocking(self) -> None:
         groups = find_suspected_duplicates(duplicate_components(74_999_999), 75_000_000)

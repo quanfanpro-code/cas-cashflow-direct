@@ -66,6 +66,18 @@ class ComponentTests(unittest.TestCase):
             {item.counterpart_accounts for item in result.components},
         )
 
+    def test_unlabeled_purchase_and_input_vat_stay_in_one_cash_business(self) -> None:
+        result = build_cashflow_components(
+            component_entries("purchase_with_input_vat"),
+            _confirmed_scope("purchase_with_input_vat"),
+        )
+        self.assertEqual(1, len(result.components))
+        self.assertEqual(-113_000, result.components[0].cash_delta_cent)
+        self.assertEqual(
+            ("原材料", "应交税费-应交增值税（进项税额）"),
+            result.components[0].counterpart_accounts,
+        )
+
     def test_one_sided_cash_leg_with_confirmed_cash_counterpart_is_internal(self) -> None:
         result = build_cashflow_components(
             component_entries("one_sided_internal_transfer"),
@@ -87,6 +99,18 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(("应收款项",), counterpart.counterpart_accounts)
         self.assertEqual((), cash.counterpart_accounts)
         self.assertEqual((), summary_only.counterpart_accounts)
+
+    def test_counterpart_side_ledger_without_flow_amount_uses_named_cash_counterpart(self) -> None:
+        entries = component_entries("one_sided_counterpart_without_flow_amount")
+        proposal = discover_cash_scope(entries)
+        self.assertEqual(("1002",), tuple(item.account_key for item in proposal.candidates))
+        result = build_cashflow_components(
+            entries,
+            confirm_cash_scope(proposal, {"1002": "include"}),
+        )
+        self.assertEqual(1, len(result.components))
+        self.assertEqual(12_000, result.components[0].cash_delta_cent)
+        self.assertEqual(("应收款项",), result.components[0].counterpart_accounts)
 
     def test_summary_only_uses_flow_item_direction_when_retained_side_is_unknown(self) -> None:
         result = build_cashflow_components(
@@ -118,7 +142,6 @@ class ComponentTests(unittest.TestCase):
         proposal = discover_cash_scope(component_entries("pure_internal"))
         with self.assertRaisesRegex(ValueError, "等待现金范围确认"):
             confirm_cash_scope(proposal, {})
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from cashflow_direct.ai_review import (
 )
 from cashflow_direct.materiality import build_review_batches
 from cashflow_direct.models import MaterialityAmounts
+from cashflow_direct.pipeline import _review_text_pattern
 from tests.fixture_factory import ai_case
 
 
@@ -88,6 +89,22 @@ class AIAndMaterialityTests(unittest.TestCase):
         self.assertTrue(resolved[0].resolved)
         self.assertEqual("CFI-05", resolved[0].system_item_id)
 
+    def test_adjudication_cannot_choose_an_unrelated_third_item(self) -> None:
+        case = ai_case("guard-third", 80_000_000, weak=True, anomaly=True)
+        ai_result = AIResult(case.task.task_id, "guard-third", "CFI-05", "首次判断为投资", "high")
+        adjudication = AIResult("ADJ-THIRD", "guard-third", "CFF-01", "改判筹资", "high")
+        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudication])
+        self.assertFalse(resolved[0].resolved)
+        self.assertEqual("CFO-03", resolved[0].system_item_id)
+
+    def test_adjudication_task_keeps_original_transaction_context(self) -> None:
+        case = ai_case("context", 80_000_000, weak=True, anomaly=True)
+        ai_result = AIResult(case.task.task_id, "context", "CFI-05", "首次判断为投资", "high")
+        task = build_adjudication_tasks([case.decision], [ai_result], [case.task])[0]
+        self.assertIn("摘要：匿名往来事项", task.context)
+        self.assertIn("系统证据", task.context)
+        self.assertIn("AI 证据", task.context)
+
     def test_low_confidence_adjudication_does_not_override_high_evidence_rule(self) -> None:
         case = ai_case("guarded", 80_000_000, weak=False, anomaly=True)
         ai_result = AIResult(case.task.task_id, "guarded", "CFI-05", "可能属于投资", "low")
@@ -110,6 +127,13 @@ class AIAndMaterialityTests(unittest.TestCase):
         self.assertEqual(2, len(batches))
         grouped = next(batch for batch in batches if set(batch.component_ids) == {"a", "b"})
         self.assertEqual(80_000_000, grouped.worst_case_impact_cent)
+
+    def test_review_pattern_keeps_full_business_text_except_dates_and_numbers(self) -> None:
+        first = _review_text_pattern("支付甲公司服务费 2026-01-01 1,000元")
+        second = _review_text_pattern("支付乙公司服务费 2026-02-02 2,000元")
+        self.assertNotEqual(first, second)
+        self.assertNotIn("2026", first)
+        self.assertNotIn("1000", first)
 
 
 if __name__ == "__main__":

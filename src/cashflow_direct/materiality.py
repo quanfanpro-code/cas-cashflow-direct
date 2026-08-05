@@ -44,8 +44,16 @@ def build_review_batches(
                     item.system_statement_amount_cent or abs(item.cash_delta_cent)
                     for item in items
                 ),
+                cash_delta_cent=sum(item.cash_delta_cent for item in items),
                 representative_summary=items[0].summary_pattern,
                 counterpart_group=items[0].counterpart_group,
+                source_locations=tuple(
+                    dict.fromkeys(
+                        location
+                        for item in items
+                        for location in item.source_locations
+                    )
+                ),
             )
         )
     return tuple(batches)

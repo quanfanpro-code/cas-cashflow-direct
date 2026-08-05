@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -13,9 +14,9 @@ from cashflow_direct.ai_review import (
     AIResult,
     build_adjudication_tasks,
     chunk_ai_tasks,
+    merge_ai_results,
     resolve_automatic_decisions,
     select_ai_tasks,
-    validate_ai_results,
 )
 from cashflow_direct.classification import classify_all, load_rule_pack
 from cashflow_direct.components import (
@@ -65,25 +66,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRACE_DIR_NAME = "计算留痕数据"
 STATE_FILE_NAME = "运行状态.json"
 DB_FILE_NAME = "计算留痕.sqlite3"
-REVIEW_PATTERN_TERMS = (
-    "销售",
-    "采购",
-    "退款",
-    "往来",
-    "投资",
-    "借款",
-    "利息",
-    "股利",
-    "资产",
-    "工程",
-    "工资",
-    "职工",
-    "税",
-    "押金",
-    "保证金",
-)
-
-
 @dataclass(frozen=True, slots=True)
 class PreflightResult:
     run_id: str
@@ -202,9 +184,28 @@ def _materiality_from_state(state: Mapping[str, object]) -> MaterialityAmounts:
 
 
 def _review_text_pattern(text: str) -> str:
-    # ponytail: 只提取稳定业务词用于合并人工复核批次；需要更细分时再扩充词表。
-    matched = tuple(term for term in REVIEW_PATTERN_TERMS if term in text)
-    return "、".join(matched) if matched else "其他"
+    without_dates = re.sub(r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?", "", text)
+    without_numbers = re.sub(r"\d[\d,，.]*", "", without_dates)
+    normalized = re.sub(r"[\s，。；：、,.!！?？（）()《》\[\]【】_-]+", "", without_numbers)
+    return normalized.lower() or "空白"
+
+
+def _persist_ai_results(
+    run_dir: Path,
+    stage_name: str,
+    results: Sequence[AIResult],
+) -> None:
+    with _store(run_dir).stage(f"ai_result_{stage_name}") as connection:
+        connection.executemany(
+            "INSERT OR REPLACE INTO ai_result(record_id, payload_json) VALUES (?, ?)",
+            (
+                (
+                    f"{stage_name}:{item.task_id}",
+                    json.dumps({"阶段": stage_name, **asdict(item)}, ensure_ascii=False),
+                )
+                for item in results
+            ),
+        )
 
 
 def _assert_inputs_unchanged(state: Mapping[str, object]) -> None:
@@ -347,6 +348,7 @@ def run_preflight(
                 "sheet": existing.sheet_name,
                 "role": existing.role,
                 "recommended": existing.recommended.column_letter,
+                "message": existing.sample_values[0],
                 "kind": "statement",
             }
         )
@@ -444,10 +446,15 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
         (str(item["file_id"]), str(item["sheet"])) for item in state.get("mappings", ())
     }
     for file_id, questions in pending_by_file.items():
-        if any(question.get("kind") == "statement" for question in questions):
-            raise RuntimeError(
-                "客户现有正表包含无法归属的总额行，请先在原表中补充标准项目名称后重新预检"
+        statement_questions = [
+            question for question in questions if question.get("kind") == "statement"
+        ]
+        if statement_questions:
+            messages = "；".join(
+                str(question.get("message") or "客户现有正表仍有无法映射的项目")
+                for question in statement_questions
             )
+            raise RuntimeError(f"{messages}；请明确目标正表后重新预检")
         overrides_by_sheet: dict[str, dict[str, int]] = {}
         for question in questions:
             role = str(question["role"])
@@ -661,13 +668,25 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             "INSERT INTO ai_task(record_id, payload_json) VALUES (?, ?)",
             ((item.task_id, json.dumps(asdict(item), ensure_ascii=False)) for item in tasks),
         )
+        connection.executemany(
+            "INSERT INTO internal_transfer(record_id, payload_json) VALUES (?, ?)",
+            (
+                (
+                    stable_id("ITR", item.voucher_key, item.entry_id, item.matched_cent),
+                    json.dumps(asdict(item), ensure_ascii=False),
+                )
+                for item in build.excluded_internal_transfers
+            ),
+        )
     state["components"] = serialized_components
     state["decisions"] = serialized_decisions
     state["ai_tasks"] = [asdict(item) for item in tasks]
+    state["internal_transfers"] = [asdict(item) for item in build.excluded_internal_transfers]
     state["classification_summary"] = summary
     state["stage"] = summary["status"]
     for batch_number, batch in enumerate(chunk_ai_tasks(tasks), 1):
         _write_trace_jsonl(run_dir, f"AI复核请求_第{batch_number:02d}批.jsonl", batch)
+    _write_trace_jsonl(run_dir, "内部划转排除.jsonl", build.excluded_internal_transfers)
     _save_state(run_dir, state)
     return _result_from_classification(state, run_dir)
 
@@ -683,7 +702,18 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
     leaf_ids = {
         item.item_id for item in load_rule_pack(PROJECT_ROOT).statement_items if item.is_leaf
     }
-    if state.get("adjudication_tasks") and state.get("stage") == "waiting_adjudication":
+    adjudication_task_ids = {
+        str(item["task_id"]) for item in state.get("adjudication_tasks", ())
+    }
+    payload_task_ids = {str(item.get("task_id", "")) for item in payloads if item.get("task_id")}
+    is_adjudication_import = bool(
+        adjudication_task_ids
+        and (
+            state.get("stage") == "waiting_adjudication"
+            or (payload_task_ids and payload_task_ids <= adjudication_task_ids)
+        )
+    )
+    if is_adjudication_import:
         tasks = tuple(
             AITask(
                 task_id=str(item["task_id"]),
@@ -695,7 +725,11 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
             )
             for item in state["adjudication_tasks"]
         )
-        validation = validate_ai_results(tasks, payloads, leaf_ids)
+        prior_results = tuple(
+            AIResult(**item)
+            for item in state.get("adjudication_validation", {}).get("valid_results", ())
+        )
+        validation = merge_ai_results(tasks, prior_results, payloads, leaf_ids)
         state["adjudication_validation"] = {
             "valid_results": [asdict(item) for item in validation.valid_results],
             "missing_ids": validation.missing_ids,
@@ -703,6 +737,7 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
             "invalid_ids": validation.invalid_ids,
             "status": validation.status,
         }
+        _persist_ai_results(run_dir, "裁决", validation.valid_results)
         _write_trace_jsonl(run_dir, "AI裁决结果.jsonl", validation.valid_results)
         state["classification_summary"]["ai_tasks_missing"] = len(validation.missing_ids)
         if validation.status == "AI 已完成":
@@ -736,7 +771,10 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
         )
 
     tasks = tuple(AITask(**item) for item in state.get("ai_tasks", ()))
-    validation = validate_ai_results(tasks, payloads, leaf_ids)
+    prior_results = tuple(
+        AIResult(**item) for item in state.get("ai_validation", {}).get("valid_results", ())
+    )
+    validation = merge_ai_results(tasks, prior_results, payloads, leaf_ids)
     state["ai_validation"] = {
         "valid_results": [asdict(item) for item in validation.valid_results],
         "missing_ids": validation.missing_ids,
@@ -744,10 +782,15 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
         "invalid_ids": validation.invalid_ids,
         "status": validation.status,
     }
+    _persist_ai_results(run_dir, "首次复核", validation.valid_results)
     _write_trace_jsonl(run_dir, "AI复核结果.jsonl", validation.valid_results)
     if validation.status == "AI 已完成":
         system_decisions = tuple(_decision_from_dict(item) for item in state["decisions"])
-        adjudication_tasks = build_adjudication_tasks(system_decisions, validation.valid_results)
+        adjudication_tasks = build_adjudication_tasks(
+            system_decisions,
+            validation.valid_results,
+            tasks,
+        )
         if adjudication_tasks:
             state["system_decisions"] = [asdict(item) for item in system_decisions]
             state["adjudication_tasks"] = [asdict(item) for item in adjudication_tasks]
@@ -797,6 +840,10 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
 
     components = tuple(_component_from_dict(item) for item in state["components"])
     decisions = tuple(_decision_from_dict(item) for item in state["decisions"])
+    entry_by_id = {
+        entry.entry_id: entry
+        for entry in (_entry_from_dict(item) for item in state["entries"])
+    }
     rules = load_rule_pack(PROJECT_ROOT)
     comparison = None
     existing = None
@@ -833,6 +880,9 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         decisions,
     )
     component_by_id = {item.component_id: item for item in components}
+    file_name_by_id = {
+        str(item["file_id"]): Path(str(item["path"])).name for item in state["files"]
+    }
     adjudication_by_component = {
         str(item["component_id"]): item for item in state.get("adjudication_tasks", ())
     }
@@ -872,6 +922,13 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 component_by_id[decision.component_id].cash_delta_cent,
                 rules.item_by_id[decision.system_item_id].normal_direction,
             ),
+            source_locations=tuple(
+                dict.fromkeys(
+                    f"{file_name_by_id.get(entry_by_id[key].source.file_id, entry_by_id[key].source.file_id)}|{entry_by_id[key].source.sheet_name}|{entry_by_id[key].source.cell_range}"
+                    for key in component_by_id[decision.component_id].source_keys
+                    if key in entry_by_id
+                )
+            ),
         )
         for decision in decisions
         if not decision.resolved and not decision.excluded
@@ -879,19 +936,63 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     review_batches = build_review_batches(
         unresolved, _materiality_from_state(state).performance_cent
     )
-    trace_rows = tuple(
-        {
-            "业务组成编号": component.component_id,
-            "摘要": component.summary,
-            "现金变化": component.cash_delta_cent / 100,
-            "系统项目": decision.system_item_id,
-            "命中规则": decision.matched_rule_id,
-            "判断理由": decision.reason,
-            "来源占用键": "、".join(component.source_keys),
-            "异常": "、".join(component.anomalies),
-        }
-        for component, decision in zip(components, decisions, strict=True)
-    )
+    trace_rows_list: list[dict[str, object]] = []
+    for component, decision in zip(components, decisions, strict=True):
+        source_entries = tuple(
+            entry_by_id[key] for key in component.source_keys if key in entry_by_id
+        )
+        trace_rows_list.append(
+            {
+                "记录类型": "现金流业务组成",
+                "业务组成编号": component.component_id,
+                "摘要": component.summary,
+                "现金变化": component.cash_delta_cent / 100,
+                "原现流项目": component.original_item_text,
+                "对方科目": "、".join(component.counterpart_accounts),
+                "系统项目": decision.system_item_id,
+                "命中规则": decision.matched_rule_id,
+                "判断理由": decision.reason,
+                "证据强度": decision.evidence_level,
+                "决策来源": decision.decision_source,
+                "来源文件": "、".join(
+                    dict.fromkeys(
+                        file_name_by_id.get(entry.source.file_id, entry.source.file_id)
+                        for entry in source_entries
+                    )
+                ),
+                "来源工作表": "、".join(
+                    dict.fromkeys(entry.source.sheet_name for entry in source_entries)
+                ),
+                "来源单元格": "、".join(
+                    dict.fromkeys(entry.source.cell_range for entry in source_entries)
+                ),
+                "来源占用键": "、".join(component.source_keys),
+                "异常": "、".join(component.anomalies),
+            }
+        )
+    for transfer in state.get("internal_transfers", ()):
+        entry = entry_by_id.get(str(transfer["entry_id"]))
+        trace_rows_list.append(
+            {
+                "记录类型": "内部划转排除",
+                "业务组成编号": transfer["entry_id"],
+                "摘要": "" if entry is None else entry.summary,
+                "现金变化": int(transfer["matched_cent"]) / 100,
+                "原现流项目": "" if entry is None else entry.original_flow_item,
+                "对方科目": "" if entry is None else entry.counterpart_name,
+                "系统项目": "不进入正表",
+                "命中规则": "INTERNAL-TRANSFER",
+                "判断理由": "现金及现金等价物内部划转",
+                "证据强度": "high",
+                "决策来源": "system",
+                "来源文件": "" if entry is None else file_name_by_id.get(entry.source.file_id, entry.source.file_id),
+                "来源工作表": "" if entry is None else entry.source.sheet_name,
+                "来源单元格": "" if entry is None else entry.source.cell_range,
+                "来源占用键": transfer["entry_id"],
+                "异常": "内部划转已排除",
+            }
+        )
+    trace_rows = tuple(trace_rows_list)
     mapping_rows = tuple(
         {
             "文件": item["file"],
@@ -923,7 +1024,14 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         comparison=comparison,
         review_batches=review_batches,
         duplicate_groups=duplicate_groups,
-        ai_records=tuple(state.get("ai_validation", {}).get("valid_results", ())),
+        ai_records=tuple(
+            {"阶段": stage_name, **item}
+            for stage_name, records in (
+                ("首次复核", state.get("ai_validation", {}).get("valid_results", ())),
+                ("裁决", state.get("adjudication_validation", {}).get("valid_results", ())),
+            )
+            for item in records
+        ),
         cash_scope_rows=tuple(
             {"科目": key, "决定": "纳入"}
             for key in state["cash_scope"]["included_keys"]
@@ -948,6 +1056,10 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     temporary_path.replace(workbook_path)
     store = _store(run_dir)
     with store.stage("finalize") as connection:
+        connection.executemany(
+            "INSERT OR REPLACE INTO classification_decision(record_id, payload_json) VALUES (?, ?)",
+            ((item.component_id, json.dumps(asdict(item), ensure_ascii=False)) for item in decisions),
+        )
         connection.executemany(
             "INSERT OR REPLACE INTO statement_value(record_id, payload_json) VALUES (?, ?)",
             (
