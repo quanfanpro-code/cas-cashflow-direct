@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-ROOT_FILES = ("SKILL.md", "README.md", "CHANGELOG.md", "LICENSE")
+ROOT_FILES = ("SKILL.md", "README.md", "LICENSE")
 ROOT_DIRECTORIES = ("references", "scripts", "src")
 
 
