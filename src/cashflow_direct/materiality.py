@@ -40,6 +40,12 @@ def build_review_batches(
                 alternative_item_codes=alternatives,
                 worst_case_impact_cent=worst_case,
                 reason="自动判断仍未收口，且同质事项最不利重分类毛额达到实际执行的重要性",
+                baseline_statement_amount_cent=sum(
+                    item.system_statement_amount_cent or abs(item.cash_delta_cent)
+                    for item in items
+                ),
+                representative_summary=items[0].summary_pattern,
+                counterpart_group=items[0].counterpart_group,
             )
         )
     return tuple(batches)

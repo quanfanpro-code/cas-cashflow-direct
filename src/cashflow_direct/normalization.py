@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from cashflow_direct.models import EvidenceProfile, NormalizedEntry, SourceLocator
 from cashflow_direct.money import stable_id, yuan_to_cent
@@ -81,6 +83,12 @@ def _is_repeated_header(row: tuple[object, ...], mapping: DatasetMapping) -> boo
     return matches >= 3
 
 
+def _is_total_row(summary: str, first_cell: object) -> bool:
+    totals = {"合计", "总计", "本页合计", "本月合计", "本年累计"}
+    normalized = lambda value: re.sub(r"[\s：:]+", "", _text(value))
+    return normalized(summary) in totals or normalized(first_cell) in totals
+
+
 def _retained_side(account_name: str) -> str:
     if not account_name:
         return "unknown"
@@ -120,10 +128,27 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
     try:
         worksheet = workbook[mapping.sheet_name]
         columns = [item.column_index for item in mapping.role_to_column.values()]
+        merged_values: dict[tuple[int, int], object] = {}
+        for merged in mapping.merged_ranges:
+            min_col, min_row, max_col, max_row = range_boundaries(merged)
+            if max_row <= mapping.header_row_end:
+                continue
+            anchor = worksheet.cell(min_row, min_col).value
+            for row_index in range(max(min_row, mapping.header_row_end + 1), max_row + 1):
+                for column_index in range(min_col, max_col + 1):
+                    merged_values[(row_index, column_index)] = anchor
+        previous_voucher_date = previous_voucher_no = ""
         for row_number, row in enumerate(
             worksheet.iter_rows(min_row=mapping.header_row_end + 1, values_only=True),
             mapping.header_row_end + 1,
         ):
+            logical_row = list(row)
+            for column_index in columns:
+                if column_index > len(logical_row):
+                    logical_row.extend([None] * (column_index - len(logical_row)))
+                if logical_row[column_index - 1] in (None, ""):
+                    logical_row[column_index - 1] = merged_values.get((row_number, column_index))
+            row = tuple(logical_row)
             rows_read += 1
             source = _row_locator(file_id, worksheet.title, row_number, columns)
             if all(value in (None, "") for value in row):
@@ -133,7 +158,7 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
                 exclusions.append(RowExclusion(source, "repeated_header"))
                 continue
             summary = _text(_cell_value(tuple(row), mapping, "summary"))
-            if "合计" in summary or "合计" in _text(row[0] if row else None):
+            if _is_total_row(summary, row[0] if row else None):
                 exclusions.append(RowExclusion(source, "total_row"))
                 continue
 
@@ -182,6 +207,14 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
             label_side = retained_side if original_item else "unknown"
             voucher_date = _date_text(_cell_value(tuple(row), mapping, "voucher_date"))
             voucher_no = _text(_cell_value(tuple(row), mapping, "voucher_no"))
+            if "voucher_date" in mapping.role_to_column and not voucher_date:
+                voucher_date = previous_voucher_date
+            if "voucher_no" in mapping.role_to_column and not voucher_no:
+                voucher_no = previous_voucher_no
+            if voucher_date:
+                previous_voucher_date = voucher_date
+            if voucher_no:
+                previous_voucher_no = voucher_no
             voucher_key = stable_id(
                 "VCH", file_id, worksheet.title, voucher_date, voucher_no or row_number
             )

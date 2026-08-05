@@ -36,6 +36,44 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual((), result.components)
         self.assertEqual(2, len(result.excluded_internal_transfers))
 
+    def test_same_voucher_receipt_and_fee_keep_both_real_directions(self) -> None:
+        result = build_cashflow_components(
+            component_entries("receipt_and_fee"), _confirmed_scope("receipt_and_fee")
+        )
+        self.assertEqual([1_000_000, -500], sorted(
+            (item.cash_delta_cent for item in result.components), reverse=True
+        ))
+        self.assertEqual((), result.excluded_internal_transfers)
+
+    def test_explicit_cash_counterpart_is_internal_transfer(self) -> None:
+        result = build_cashflow_components(
+            component_entries("explicit_internal_transfer"),
+            _confirmed_scope("explicit_internal_transfer"),
+        )
+        self.assertEqual((), result.components)
+        self.assertEqual(2, len(result.excluded_internal_transfers))
+
+    def test_unlabeled_principal_and_interest_keep_separate_counterparts(self) -> None:
+        result = build_cashflow_components(
+            component_entries("principal_and_interest"),
+            _confirmed_scope("principal_and_interest"),
+        )
+        self.assertEqual([-100_000, -10_000], sorted(
+            (item.cash_delta_cent for item in result.components)
+        ))
+        self.assertEqual(
+            {("短期借款",), ("应付利息",)},
+            {item.counterpart_accounts for item in result.components},
+        )
+
+    def test_one_sided_cash_leg_with_confirmed_cash_counterpart_is_internal(self) -> None:
+        result = build_cashflow_components(
+            component_entries("one_sided_internal_transfer"),
+            _confirmed_scope("one_sided_internal_transfer"),
+        )
+        self.assertEqual((), result.components)
+        self.assertEqual(1, len(result.excluded_internal_transfers))
+
     def test_one_sided_evidence_does_not_invent_counterpart(self) -> None:
         counterpart = build_cashflow_components(
             component_entries("one_sided_counterpart"), _confirmed_scope("one_sided_counterpart")

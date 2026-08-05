@@ -30,7 +30,7 @@ class LargeCaseTests(unittest.TestCase):
             self.assertEqual(100_000, classified.source_entry_count)
             self.assertEqual(expected_cash_delta, classified.cash_delta_cent)
             self.assertTrue(final.workbook_path.is_file())
-            self.assertEqual("final_usable", final.overall_status)
+            self.assertEqual("最终可使用", final.overall_status)
             self.assertLess(elapsed, 300)
             self.assertEqual(source_hash, hashlib.sha256(source.read_bytes()).hexdigest())
             print(

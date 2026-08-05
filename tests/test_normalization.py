@@ -54,6 +54,24 @@ class NormalizationTests(unittest.TestCase):
             self.assertIn("B2", result.errors[0].source.cell_range)
             self.assertIn("金额", result.errors[0].message)
 
+    def test_merged_and_blank_voucher_fields_stay_in_one_voucher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "合并凭证.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方"])
+            sheet.append(["2026-01-01", "记-1", "合计回款不是合计行", "银行存款", 100, None])
+            sheet.append([None, None, "合计回款不是合计行", "主营业务收入", None, 100])
+            sheet.merge_cells("A2:A3")
+            sheet.merge_cells("B2:B3")
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+            result = normalize_dataset(path, "FM", mapping)
+            self.assertEqual(2, len(result.entries))
+            self.assertEqual(1, len({item.voucher_key for item in result.entries}))
+            self.assertEqual(0, len(result.errors))
+
 
 if __name__ == "__main__":
     unittest.main()

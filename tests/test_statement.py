@@ -30,6 +30,22 @@ class StatementTests(unittest.TestCase):
         self.assertEqual(("S1",), result.support_component_ids["CFO-01"])
         self.assertIsNone(result.prior_values["CFO-01"])
 
+    def test_opening_and_fx_are_injected_into_closing_cash_formula(self) -> None:
+        case = classified_components()
+        result = aggregate_statement(
+            case.components,
+            case.decisions,
+            case.rules,
+            opening_cent=1_000_000,
+            fx_cent=12_300,
+        )
+        self.assertEqual(1_000_000, result.values["CASH-OPENING"])
+        self.assertEqual(12_300, result.values["FX"])
+        self.assertEqual(
+            result.values["CASH-OPENING"] + result.values["NET-CASH"],
+            result.values["CASH-CLOSING"],
+        )
+
     def test_custom_rows_map_to_standard_parent_without_double_counting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "客户正表.xlsx"

@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
-from cashflow_direct.money import stable_id
+from cashflow_direct.money import stable_id, statement_amount_cent
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,7 @@ class DuplicateGroup:
     worst_case_impact_cent: int
     blocks_manual_completion: bool
     item_id: str = ""
+    baseline_statement_amount_cent: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,18 +83,44 @@ def assign_duplicate_items(
     decisions: Sequence[ClassificationDecision],
 ) -> tuple[DuplicateGroup, ...]:
     """把疑似重复组绑定到最终标准项目，避免把客户原标签当作项目编号。"""
-    item_by_component = {item.component_id: item.system_item_id for item in decisions}
+    decision_by_component = {item.component_id: item for item in decisions}
     assigned: list[DuplicateGroup] = []
     for group in groups:
-        item_ids = {
-            item_by_component[component_id]
-            for component_id in group.component_ids
-            if item_by_component.get(component_id)
-        }
-        if len(item_ids) == 1:
-            assigned.append(replace(group, item_id=item_ids.pop()))
-        else:
+        repeated_by_item: dict[str, list[int]] = defaultdict(list)
+        for index, component_id in enumerate(group.component_ids[1:], 1):
+            decision = decision_by_component.get(component_id)
+            repeated_by_item["" if decision is None else decision.system_item_id].append(index)
+        if not repeated_by_item or "" in repeated_by_item:
             assigned.append(replace(group, item_id="", blocks_manual_completion=True))
+            continue
+        for item_id, indices in repeated_by_item.items():
+            component_ids = (group.component_ids[0],) + tuple(
+                group.component_ids[index] for index in indices
+            )
+            component_amounts = (group.component_amounts_cent[0],) + tuple(
+                group.component_amounts_cent[index] for index in indices
+            )
+            assigned.append(
+                replace(
+                    group,
+                    group_id=(
+                        group.group_id
+                        if len(repeated_by_item) == 1
+                        else stable_id("DUP", group.group_id, item_id)
+                    ),
+                    component_ids=component_ids,
+                    component_amounts_cent=component_amounts,
+                    worst_case_impact_cent=sum(abs(value) for value in component_amounts[1:]),
+                    item_id=item_id,
+                    baseline_statement_amount_cent=sum(
+                        statement_amount_cent(
+                            group.component_amounts_cent[index],
+                            decision_by_component[group.component_ids[index]].normal_direction,
+                        )
+                        for index in indices
+                    ),
+                )
+            )
     return tuple(assigned)
 
 

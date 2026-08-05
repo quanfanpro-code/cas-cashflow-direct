@@ -87,13 +87,15 @@ def _rule_matches(rule: ClassificationRule, component: CashflowComponent) -> boo
     direction = "inflow" if component.cash_delta_cent > 0 else "outflow"
     if rule.direction not in {"any", direction}:
         return False
-    text = "|".join(
-        (component.summary, component.original_item_text, *component.counterpart_accounts)
-    )
-    if any(term in text for term in rule.exclude_terms):
+    summary_text = "|".join((component.summary, component.original_item_text))
+    account_text = "|".join(component.counterpart_accounts)
+    if any(term in summary_text for term in rule.exclude_terms):
         return False
-    terms = rule.summary_terms + rule.account_terms
-    return not terms or any(term in text for term in terms)
+    if not rule.summary_terms and not rule.account_terms:
+        return True
+    return any(term in summary_text for term in rule.summary_terms) or any(
+        term in summary_text or term in account_text for term in rule.account_terms
+    )
 
 
 def classify_component(

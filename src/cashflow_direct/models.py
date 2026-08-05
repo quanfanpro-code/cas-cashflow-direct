@@ -104,7 +104,10 @@ class ReviewBatch:
     alternative_item_codes: tuple[str, ...]
     worst_case_impact_cent: int
     reason: str
+    baseline_statement_amount_cent: int = 0
     status: str = "待确认"
+    representative_summary: str = ""
+    counterpart_group: str = ""
 
     @property
     def alternative_item_code(self) -> str:
@@ -133,6 +136,7 @@ class UnresolvedDecision:
     summary_pattern: str
     alternative_item_ids: tuple[str, ...]
     reason: str
+    system_statement_amount_cent: int = 0
 
 
 def validate_materiality_order(amounts: MaterialityAmounts) -> MaterialityAmounts:

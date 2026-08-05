@@ -32,6 +32,7 @@ class DatasetMapping:
     header_row_start: int
     header_row_end: int
     role_to_column: dict[str, ColumnMapping]
+    merged_ranges: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class MappingQuestion:
     recommended: ColumnMapping
     alternatives: tuple[ColumnMapping, ...]
     sample_values: tuple[str, str, str]
+    sheet_name: str = ""
 
 
 def _dictionary() -> dict[str, dict[str, list[str]]]:
@@ -156,9 +158,33 @@ def _map_band(
         if len(ranked) > 1 and ranked[0].score - ranked[1].score <= 1:
             samples = [str(value) for value in _sample_values(sheet, band, ranked[0].column_index)[:3]]
             samples.extend([""] * (3 - len(samples)))
-            return MappingQuestion(role, ranked[0], tuple(ranked[1:]), tuple(samples[:3]))
+            return MappingQuestion(
+                role, ranked[0], tuple(ranked[1:]), tuple(samples[:3]), sheet.name
+            )
         chosen[role] = ranked[0]
-    return DatasetMapping(sheet.name, band.row_start, band.row_end, chosen)
+    return DatasetMapping(sheet.name, band.row_start, band.row_end, chosen, sheet.merged_ranges)
+
+
+def infer_dataset_mappings(
+    snapshot: WorkbookSnapshot,
+    overrides: Mapping[str, Mapping[str, int]] | None = None,
+) -> tuple[DatasetMapping | MappingQuestion, ...]:
+    """逐工作表识别数据集，避免按月或按账户分表被静默跳过。"""
+    sheets = {sheet.name: sheet for sheet in snapshot.sheets}
+    results: list[DatasetMapping | MappingQuestion] = []
+    completed: set[str] = set()
+    for band in find_header_bands(snapshot):
+        if band.sheet_name in completed:
+            continue
+        result = _map_band(
+            sheets[band.sheet_name],
+            band,
+            (overrides or {}).get(band.sheet_name, {}),
+        )
+        if result is not None:
+            results.append(result)
+            completed.add(band.sheet_name)
+    return tuple(results)
 
 
 def infer_dataset_mapping(
@@ -166,10 +192,11 @@ def infer_dataset_mapping(
     overrides: Mapping[str, int] | None = None,
 ) -> DatasetMapping | MappingQuestion:
     """综合表头路径和列值类型映射字段；接近候选必须显式提问。"""
-    sheets = {sheet.name: sheet for sheet in snapshot.sheets}
-    for band in find_header_bands(snapshot):
-        result = _map_band(sheets[band.sheet_name], band, overrides or {})
-        if result is not None:
-            return result
+    results = infer_dataset_mappings(
+        snapshot,
+        {sheet.name: dict(overrides or {}) for sheet in snapshot.sheets},
+    )
+    if results:
+        return results[0]
     placeholder = ColumnMapping("unknown", 1, "A", (), "A1", 0)
     return MappingQuestion("dataset", placeholder, (), ("", "", ""))

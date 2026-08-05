@@ -45,6 +45,18 @@ class MoneyAndStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "方向"):
             statement_amount_cent(1, "sideways")
 
+    def test_common_excel_text_money_formats_are_accepted(self) -> None:
+        cases = {
+            "1,234.56": 123_456,
+            "1，234.56": 123_456,
+            "￥1,234.56": 123_456,
+            "（1,234.56）": -123_456,
+            "－12.34": -1_234,
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(expected, yuan_to_cent(raw))
+
     def test_stable_id_is_repeatable_and_namespaced(self) -> None:
         first = stable_id("CMP", "F1", "S1", 3)
         self.assertEqual(first, stable_id("CMP", "F1", "S1", 3))

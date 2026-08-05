@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cashflow_direct.semantic_mapping import DatasetMapping, MappingQuestion, infer_dataset_mapping
+from openpyxl import Workbook
+
+from cashflow_direct.semantic_mapping import (
+    DatasetMapping,
+    MappingQuestion,
+    infer_dataset_mapping,
+    infer_dataset_mappings,
+)
 from cashflow_direct.workbook_structure import find_header_bands, scan_workbook
 from tests.fixture_factory import (
     write_ambiguous_money_fixture,
@@ -14,6 +21,22 @@ from tests.fixture_factory import (
 
 
 class StructureAndMappingTests(unittest.TestCase):
+    def test_every_data_sheet_gets_its_own_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "按月序时账.xlsx"
+            workbook = Workbook()
+            for index, title in enumerate(("一月", "二月")):
+                sheet = workbook.active if index == 0 else workbook.create_sheet()
+                sheet.title = title
+                sheet.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方"])
+                sheet.append([f"2026-0{index + 1}-01", "记-1", "匿名收款", "银行存款", 100, None])
+            workbook.save(path)
+            mappings = infer_dataset_mappings(scan_workbook(path))
+            self.assertEqual(
+                {"一月", "二月"},
+                {item.sheet_name for item in mappings if isinstance(item, DatasetMapping)},
+            )
+
     def test_merged_multiline_header_has_same_roles_at_different_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             first = Path(tmp) / "结构甲.xlsx"

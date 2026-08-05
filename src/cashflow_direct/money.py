@@ -14,7 +14,13 @@ def yuan_to_cent(value: object) -> int:
         raise ValueError(f"金额无效：{value!r}")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"金额无效：{value!r}")
-    text = str(value).strip()
+    text = str(value).strip().replace("，", ",").replace("－", "-").replace("−", "-")
+    negative = (text.startswith("(") and text.endswith(")")) or (
+        text.startswith("（") and text.endswith("）")
+    )
+    if negative:
+        text = "-" + text[1:-1]
+    text = text.replace(",", "").replace("￥", "").replace("¥", "").replace("人民币", "").strip()
     if not text:
         raise ValueError(f"金额无效：{value!r}")
     try:
@@ -43,4 +49,3 @@ def stable_id(prefix: str, *parts: object) -> str:
     normalized = "\x1f".join("" if part is None else str(part) for part in parts)
     digest = hashlib.sha256(f"{namespace}\x1e{normalized}".encode("utf-8")).hexdigest()[:20]
     return f"{namespace}_{digest}"
-

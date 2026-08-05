@@ -67,6 +67,51 @@ class DuplicateTests(unittest.TestCase):
         assigned = assign_duplicate_items(groups, decisions)
         self.assertEqual("CFO-03", assigned[0].item_id)
 
+    def test_cross_project_duplicate_adjusts_the_repeated_component_project(self) -> None:
+        components = duplicate_components(100)
+        groups = find_suspected_duplicates(components, 1)
+        decisions = (
+            ClassificationDecision(
+                components[0].component_id,
+                "CFO-03",
+                "收到其他与经营活动有关的现金",
+                "inflow",
+                "R1",
+                "匿名证据",
+                "high",
+            ),
+            ClassificationDecision(
+                components[1].component_id,
+                "CFI-05",
+                "收到其他与投资活动有关的现金",
+                "inflow",
+                "R2",
+                "匿名证据",
+                "high",
+            ),
+        )
+        assigned = assign_duplicate_items(groups, decisions)
+        self.assertEqual(1, len(assigned))
+        self.assertEqual("CFI-05", assigned[0].item_id)
+
+    def test_refund_duplicate_keeps_negative_statement_amount(self) -> None:
+        components = duplicate_components(100)
+        groups = find_suspected_duplicates(components, 1)
+        decisions = tuple(
+            ClassificationDecision(
+                component.component_id,
+                "CFO-04",
+                "购买商品、接受劳务支付的现金",
+                "outflow",
+                "REFUND-PURCHASE",
+                "采购退款",
+                "high",
+            )
+            for component in components
+        )
+        assigned = assign_duplicate_items(groups, decisions)
+        self.assertEqual(-100, assigned[0].baseline_statement_amount_cent)
+
 
 if __name__ == "__main__":
     unittest.main()

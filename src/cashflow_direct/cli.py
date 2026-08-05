@@ -14,6 +14,7 @@ from cashflow_direct.pipeline import (
     import_ai_results,
     run_classification,
     run_preflight,
+    supplement_cash_balances,
 )
 
 
@@ -25,11 +26,26 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--performance", required=True, help="实际执行的重要性，单位元")
     preflight.add_argument("--trivial", required=True, help="明显微小错报临界值，单位元")
     preflight.add_argument("--output-parent", help="由 Skill 自动传递的输出父目录")
-    for name in ("confirm-mapping", "confirm-cash", "classify", "import-ai", "finalize", "status"):
+    for name in (
+        "confirm-mapping",
+        "confirm-cash",
+        "supplement-cash",
+        "classify",
+        "import-ai",
+        "finalize",
+        "status",
+    ):
         command = commands.add_parser(name)
         command.add_argument("--run-dir", required=True, help="由上一阶段自动传递的运行目录")
-        if name in {"confirm-mapping", "confirm-cash"}:
+        if name == "confirm-mapping":
+            command.add_argument("--decisions", required=True, help="字段映射确认 JSON")
+        elif name == "confirm-cash":
             command.add_argument("--decisions", required=True, help="现金范围决定 JSON")
+        elif name == "supplement-cash":
+            command.add_argument("--opening", required=True, help="期初现金余额，单位元")
+            command.add_argument("--closing", required=True, help="期末现金余额，单位元")
+            command.add_argument("--fx", required=True, help="汇率变动影响，单位元；没有则填零")
+            command.add_argument("--source-note", required=True, help="补充数据的资料来源说明")
         elif name == "import-ai":
             command.add_argument("--result-path", required=True, help="AI 返回结果 JSONL")
     return parser
@@ -51,6 +67,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = confirm_mapping(Path(arguments.run_dir), json.loads(arguments.decisions))
         elif arguments.command == "confirm-cash":
             result = confirm_cash_scope(Path(arguments.run_dir), json.loads(arguments.decisions))
+        elif arguments.command == "supplement-cash":
+            result = supplement_cash_balances(
+                Path(arguments.run_dir),
+                arguments.opening,
+                arguments.closing,
+                arguments.fx,
+                arguments.source_note,
+            )
         elif arguments.command == "classify":
             result = run_classification(Path(arguments.run_dir))
         elif arguments.command == "import-ai":

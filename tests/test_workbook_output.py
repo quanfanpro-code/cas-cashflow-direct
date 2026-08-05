@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -12,6 +13,12 @@ from cashflow_direct.workbook_output import (
     manual_adjustment_formula,
     validate_output_workbook,
 )
+from cashflow_direct.statement import (
+    ExistingStatementResult,
+    ReconciliationResult,
+    compare_statement,
+)
+from cashflow_direct.models import ReviewBatch
 from tests.fixture_factory import workbook_model
 
 
@@ -79,6 +86,27 @@ class WorkbookOutputTests(unittest.TestCase):
         self.assertIn("重要待复核事项", formula)
         self.assertIn("疑似重复事项", formula)
 
+    def test_reverse_direction_review_uses_signed_statement_amount(self) -> None:
+        model = replace(
+            workbook_model(0, 0),
+            review_batches=(
+                ReviewBatch(
+                    "REV-REFUND",
+                    ("C-REFUND",),
+                    "CFO-04",
+                    ("CFO-03",),
+                    10_000,
+                    "退款分类仍不确定",
+                    baseline_statement_amount_cent=-10_000,
+                ),
+            ),
+        )
+        adjustments = calculate_manual_adjustments(
+            model, {"REV-REFUND": "CFO-03"}, {}
+        )
+        self.assertEqual(10_000, adjustments["CFO-04"])
+        self.assertEqual(-10_000, adjustments["CFO-03"])
+
     def test_zero_review_batches_show_clear_note_and_statement_still_builds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "无重大事项.xlsx"
@@ -87,6 +115,55 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 self.assertIn("无重大", workbook["重要待复核事项"]["A2"].value)
                 self.assertEqual(35, workbook["现金流量表正表"].max_row - 3)
+            finally:
+                workbook.close()
+
+    def test_manual_cells_are_narrowly_validated_and_formulas_are_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "受保护底稿.xlsx"
+            model = workbook_model(1, 1)
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                status_formula = workbook["使用说明与状态"]["B3"].value
+                self.assertIn("COUNTBLANK", status_formula)
+                review = workbook["重要待复核事项"]
+                self.assertIsNone(review["C2"].value)
+                self.assertFalse(review["C2"].protection.locked)
+                validation = review.data_validations.dataValidation[0].formula1
+                self.assertIn("认可自动判断", validation)
+                self.assertIn("CFI-09", validation)
+                self.assertNotIn("CFO-01", validation)
+                self.assertTrue(review.protection.sheet)
+                self.assertTrue(workbook["现金流量表正表"].protection.sheet)
+            finally:
+                workbook.close()
+
+    def test_comparison_and_reconciliation_follow_final_statement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "动态核对底稿.xlsx"
+            model = workbook_model(1, 0)
+            existing = ExistingStatementResult(
+                values=dict(model.statement.values),
+                prior_values=dict(model.statement.prior_values),
+                standardized_values=dict(model.statement.values),
+                custom_rows=(),
+                unit_multiplier=1,
+            )
+            model = replace(
+                model,
+                comparison=compare_statement(existing, model.statement),
+                reconciliation=ReconciliationResult(
+                    "现金调节完成", 100_000, 160_000, 0, 60_000, 0
+                ),
+            )
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                self.assertIn("现金流量表正表", workbook["正表核对报告"]["E2"].value)
+                headers = [cell.value for cell in workbook["现金范围与现金调节"][1]]
+                self.assertIn("金额（元）", headers)
+                self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
             finally:
                 workbook.close()
 

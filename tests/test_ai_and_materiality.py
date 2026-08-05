@@ -88,6 +88,14 @@ class AIAndMaterialityTests(unittest.TestCase):
         self.assertTrue(resolved[0].resolved)
         self.assertEqual("CFI-05", resolved[0].system_item_id)
 
+    def test_low_confidence_adjudication_does_not_override_high_evidence_rule(self) -> None:
+        case = ai_case("guarded", 80_000_000, weak=False, anomaly=True)
+        ai_result = AIResult(case.task.task_id, "guarded", "CFI-05", "可能属于投资", "low")
+        adjudication = AIResult("ADJ-1", "guarded", "CFI-05", "仍然不确定", "low")
+        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudication])
+        self.assertFalse(resolved[0].resolved)
+        self.assertEqual("CFO-03", resolved[0].system_item_id)
+
     def test_unresolved_below_performance_never_goes_to_human(self) -> None:
         unresolved = [ai_case("small", 74_999_999, weak=True, anomaly=True).unresolved]
         self.assertEqual((), build_review_batches(unresolved, performance_cent=75_000_000))

@@ -12,6 +12,7 @@ from openpyxl.utils.cell import column_index_from_string
 from cashflow_direct.ai_review import (
     AIResult,
     build_adjudication_tasks,
+    chunk_ai_tasks,
     resolve_automatic_decisions,
     select_ai_tasks,
     validate_ai_results,
@@ -32,10 +33,16 @@ from cashflow_direct.models import (
     MaterialityAmounts,
     NormalizedEntry,
     SourceLocator,
+    UnresolvedDecision,
 )
-from cashflow_direct.money import stable_id, yuan_to_cent
+from cashflow_direct.materiality import build_review_batches
+from cashflow_direct.money import stable_id, statement_amount_cent, yuan_to_cent
 from cashflow_direct.normalization import normalize_dataset
-from cashflow_direct.semantic_mapping import DatasetMapping, MappingQuestion, infer_dataset_mapping
+from cashflow_direct.semantic_mapping import (
+    DatasetMapping,
+    MappingQuestion,
+    infer_dataset_mappings,
+)
 from cashflow_direct.statement import (
     ExistingStatementResult,
     aggregate_statement,
@@ -58,6 +65,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRACE_DIR_NAME = "计算留痕数据"
 STATE_FILE_NAME = "运行状态.json"
 DB_FILE_NAME = "计算留痕.sqlite3"
+REVIEW_PATTERN_TERMS = (
+    "销售",
+    "采购",
+    "退款",
+    "往来",
+    "投资",
+    "借款",
+    "利息",
+    "股利",
+    "资产",
+    "工程",
+    "工资",
+    "职工",
+    "税",
+    "押金",
+    "保证金",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +201,12 @@ def _materiality_from_state(state: Mapping[str, object]) -> MaterialityAmounts:
     return MaterialityAmounts(**state["materiality"])
 
 
+def _review_text_pattern(text: str) -> str:
+    # ponytail: 只提取稳定业务词用于合并人工复核批次；需要更细分时再扩充词表。
+    matched = tuple(term for term in REVIEW_PATTERN_TERMS if term in text)
+    return "、".join(matched) if matched else "其他"
+
+
 def _assert_inputs_unchanged(state: Mapping[str, object]) -> None:
     result = validate_input_hashes(state["files"])
     if not result.valid:
@@ -189,6 +219,13 @@ def _read_cash_balances(path: Path) -> dict[str, tuple[int, int]]:
     try:
         for sheet in workbook.worksheets:
             priority = 2 if "余额" in sheet.title else 1
+            unit_text = "|".join(
+                str(value)
+                for row in sheet.iter_rows(min_row=1, max_row=20, max_col=10, values_only=True)
+                for value in row
+                if value not in (None, "")
+            )
+            multiplier = 10_000 if "万元" in unit_text else 1
             for row in sheet.iter_rows(min_row=1, max_row=100, max_col=10, values_only=True):
                 for index, value in enumerate(row[:-1]):
                     if not isinstance(value, str) or row[index + 1] in (None, ""):
@@ -202,7 +239,7 @@ def _read_cash_balances(path: Path) -> dict[str, tuple[int, int]]:
                         key = "fx_cent"
                     if key is not None:
                         try:
-                            amount = yuan_to_cent(row[index + 1])
+                            amount = yuan_to_cent(row[index + 1]) * multiplier
                             if key not in found or priority > found[key][0]:
                                 found[key] = (priority, amount)
                         except ValueError:
@@ -243,6 +280,8 @@ def run_preflight(
     entries: list[NormalizedEntry] = []
     mappings: list[dict[str, object]] = []
     questions: list[dict[str, object]] = []
+    normalization_issues: list[dict[str, object]] = []
+    sheet_structures: list[dict[str, object]] = []
     existing_statement_path: str | None = None
     balance_candidates: dict[str, tuple[int, int]] = {}
     for registered in intake.active_files:
@@ -250,19 +289,52 @@ def run_preflight(
             if key not in balance_candidates or candidate[0] > balance_candidates[key][0]:
                 balance_candidates[key] = candidate
         snapshot = scan_workbook(registered.path)
-        mapping = infer_dataset_mapping(snapshot)
-        if isinstance(mapping, DatasetMapping):
-            normalized = normalize_dataset(registered.path, registered.file_id, mapping)
-            entries.extend(normalized.entries)
-            mappings.append(
-                {
-                    "file_id": registered.file_id,
-                    "file": registered.path.name,
-                    "sheet": mapping.sheet_name,
-                    "header_rows": f"{mapping.header_row_start}:{mapping.header_row_end}",
-                    "roles": {role: column.column_letter for role, column in mapping.role_to_column.items()},
-                }
-            )
+        sheet_structures.extend(
+            {
+                "file_id": registered.file_id,
+                "sheet": sheet.name,
+                "sample_rows": len(sheet.rows),
+                "merged_ranges": sheet.merged_ranges,
+                "hidden_columns": sheet.hidden_columns,
+            }
+            for sheet in snapshot.sheets
+        )
+        detected = infer_dataset_mappings(snapshot)
+        for mapping in detected:
+            if isinstance(mapping, DatasetMapping):
+                normalized = normalize_dataset(registered.path, registered.file_id, mapping)
+                entries.extend(normalized.entries)
+                mappings.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": mapping.sheet_name,
+                        "header_rows": f"{mapping.header_row_start}:{mapping.header_row_end}",
+                        "roles": {role: column.column_letter for role, column in mapping.role_to_column.items()},
+                    }
+                )
+                normalization_issues.extend(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": issue.source.sheet_name,
+                        "cell": issue.source.cell_range,
+                        "kind": "错误" if hasattr(issue, "message") else "排除",
+                        "message": getattr(issue, "message", getattr(issue, "discard_reason", "")),
+                    }
+                    for issue in (*normalized.errors, *normalized.exclusions)
+                )
+            else:
+                questions.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": mapping.sheet_name,
+                        "role": mapping.role,
+                        "recommended": mapping.recommended.column_letter,
+                    }
+                )
+        if detected:
             continue
         existing = parse_existing_statement(registered.path, rules)
         if isinstance(existing, ExistingStatementResult):
@@ -272,8 +344,10 @@ def run_preflight(
             {
                 "file_id": registered.file_id,
                 "file": registered.path.name,
-                "role": mapping.role,
-                "recommended": mapping.recommended.column_letter,
+                "sheet": existing.sheet_name,
+                "role": existing.role,
+                "recommended": existing.recommended.column_letter,
+                "kind": "statement",
             }
         )
 
@@ -306,7 +380,9 @@ def run_preflight(
         "recommended_cash_decisions": recommended,
         "existing_statement_path": existing_statement_path,
         "cash_balances": {key: value for key, (_, value) in balance_candidates.items()},
+        "normalization_issues": normalization_issues,
     }
+    _assert_inputs_unchanged(state)
     with store.stage("preflight") as connection:
         connection.execute(
             "INSERT INTO run_manifest(record_id, payload_json) VALUES (?, ?)",
@@ -315,6 +391,33 @@ def run_preflight(
         connection.executemany(
             "INSERT INTO source_entry(record_id, payload_json) VALUES (?, ?)",
             ((entry.entry_id, json.dumps(asdict(entry), ensure_ascii=False)) for entry in entries),
+        )
+        connection.executemany(
+            "INSERT INTO source_file(record_id, payload_json) VALUES (?, ?)",
+            (
+                (item.file_id, json.dumps(asdict(item), ensure_ascii=False, default=str))
+                for item in intake.files
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO sheet_structure(record_id, payload_json) VALUES (?, ?)",
+            (
+                (
+                    stable_id("SHT", item["file_id"], item["sheet"]),
+                    json.dumps(item, ensure_ascii=False),
+                )
+                for item in sheet_structures
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO field_mapping(record_id, payload_json) VALUES (?, ?)",
+            (
+                (
+                    stable_id("MAP", item["file_id"], item["sheet"]),
+                    json.dumps(item, ensure_ascii=False),
+                )
+                for item in mappings
+            ),
         )
     _save_state(run_dir, state)
     status = "waiting_mapping" if questions else "waiting_cash_scope"
@@ -336,51 +439,73 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     new_questions: list[dict[str, object]] = []
     new_entries: list[NormalizedEntry] = []
     new_mappings: list[dict[str, object]] = []
+    new_issues: list[dict[str, object]] = []
+    mapped_sheets = {
+        (str(item["file_id"]), str(item["sheet"])) for item in state.get("mappings", ())
+    }
     for file_id, questions in pending_by_file.items():
-        prefix = f"{file_id}:"
-        overrides: dict[str, int] = {
-            key[len(prefix) :]: column_index_from_string(str(value).strip().upper())
-            for key, value in confirmations.items()
-            if key.startswith(prefix)
-        }
+        if any(question.get("kind") == "statement" for question in questions):
+            raise RuntimeError(
+                "客户现有正表包含无法归属的总额行，请先在原表中补充标准项目名称后重新预检"
+            )
+        overrides_by_sheet: dict[str, dict[str, int]] = {}
         for question in questions:
             role = str(question["role"])
-            key = f"{file_id}:{role}"
-            choice = confirmations.get(key)
+            sheet_name = str(question.get("sheet", ""))
+            full_key = f"{file_id}:{sheet_name}:{role}"
+            legacy_key = f"{file_id}:{role}"
+            choice = confirmations.get(full_key, confirmations.get(legacy_key))
             if not choice:
-                raise ValueError(f"等待字段确认：缺少 {key}")
+                raise ValueError(f"等待字段确认：缺少 {full_key}")
             try:
-                overrides[role] = column_index_from_string(str(choice).strip().upper())
+                overrides_by_sheet.setdefault(sheet_name, {})[role] = column_index_from_string(
+                    str(choice).strip().upper()
+                )
             except ValueError as error:
-                raise ValueError(f"字段 {key} 的确认值必须是 Excel 列字母") from error
+                raise ValueError(f"字段 {full_key} 的确认值必须是 Excel 列字母") from error
         path = files_by_id[file_id]
-        mapping = infer_dataset_mapping(scan_workbook(path), overrides)
-        if isinstance(mapping, MappingQuestion):
-            new_questions.append(
+        for mapping in infer_dataset_mappings(scan_workbook(path), overrides_by_sheet):
+            if isinstance(mapping, MappingQuestion):
+                new_questions.append(
+                    {
+                        "file_id": file_id,
+                        "file": path.name,
+                        "sheet": mapping.sheet_name,
+                        "role": mapping.role,
+                        "recommended": mapping.recommended.column_letter,
+                    }
+                )
+                continue
+            if (file_id, mapping.sheet_name) in mapped_sheets:
+                continue
+            normalized = normalize_dataset(path, file_id, mapping)
+            new_entries.extend(normalized.entries)
+            new_mappings.append(
                 {
                     "file_id": file_id,
                     "file": path.name,
-                    "role": mapping.role,
-                    "recommended": mapping.recommended.column_letter,
+                    "sheet": mapping.sheet_name,
+                    "header_rows": f"{mapping.header_row_start}:{mapping.header_row_end}",
+                    "roles": {role: column.column_letter for role, column in mapping.role_to_column.items()},
                 }
             )
-            continue
-        normalized = normalize_dataset(path, file_id, mapping)
-        new_entries.extend(normalized.entries)
-        new_mappings.append(
-            {
-                "file_id": file_id,
-                "file": path.name,
-                "sheet": mapping.sheet_name,
-                "header_rows": f"{mapping.header_row_start}:{mapping.header_row_end}",
-                "roles": {role: column.column_letter for role, column in mapping.role_to_column.items()},
-            }
-        )
+            new_issues.extend(
+                {
+                    "file_id": file_id,
+                    "file": path.name,
+                    "sheet": issue.source.sheet_name,
+                    "cell": issue.source.cell_range,
+                    "kind": "错误" if hasattr(issue, "message") else "排除",
+                    "message": getattr(issue, "message", getattr(issue, "discard_reason", "")),
+                }
+                for issue in (*normalized.errors, *normalized.exclusions)
+            )
 
     entries = [_entry_from_dict(item) for item in state["entries"]] + new_entries
     proposal = discover_cash_scope(entries)
     state["entries"] = [asdict(item) for item in entries]
     state["mappings"] = [*state.get("mappings", ()), *new_mappings]
+    state["normalization_issues"] = [*state.get("normalization_issues", ()), *new_issues]
     state["mapping_questions"] = new_questions
     state["mapping_confirmations"] = confirmations
     state["cash_scope_proposal"] = asdict(proposal)
@@ -395,6 +520,16 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
             connection.executemany(
                 "INSERT OR REPLACE INTO source_entry(record_id, payload_json) VALUES (?, ?)",
                 ((entry.entry_id, json.dumps(asdict(entry), ensure_ascii=False)) for entry in new_entries),
+            )
+            connection.executemany(
+                "INSERT OR REPLACE INTO field_mapping(record_id, payload_json) VALUES (?, ?)",
+                (
+                    (
+                        stable_id("MAP", item["file_id"], item["sheet"]),
+                        json.dumps(item, ensure_ascii=False),
+                    )
+                    for item in new_mappings
+                ),
             )
     _save_state(run_dir, state)
     return StageResult(
@@ -431,6 +566,32 @@ def confirm_cash_scope(
     state["stage"] = "cash_scope_confirmed"
     _save_state(run_dir, state)
     return StageResult(str(state["run_id"]), Path(run_dir), "cash_scope", "completed", "执行自动分类")
+
+
+def supplement_cash_balances(
+    run_dir: Path,
+    opening: object,
+    closing: object,
+    fx: object,
+    source_note: str,
+) -> StageResult:
+    """补充缺失的现金余额和汇率影响，保留来源说明且不做倒挤。"""
+    state = _load_state(run_dir)
+    _assert_inputs_unchanged(state)
+    if not source_note.strip():
+        raise ValueError("补充现金余额时必须填写资料来源说明")
+    state["cash_balances"] = {
+        "opening_cent": yuan_to_cent(opening),
+        "closing_cent": yuan_to_cent(closing),
+        "fx_cent": yuan_to_cent(fx),
+    }
+    state["cash_balance_source"] = source_note.strip()
+    state.pop("overall_status", None)
+    state.pop("workbook_path", None)
+    _save_state(run_dir, state)
+    return StageResult(
+        str(state["run_id"]), Path(run_dir), "cash_balances", "completed", "生成最终工作簿"
+    )
 
 
 def run_classification(run_dir: Path) -> ClassificationStageResult:
@@ -475,6 +636,19 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     }
     store = _store(run_dir)
     with store.stage("classification") as connection:
+        vouchers: dict[str, list[str]] = {}
+        for entry in entries:
+            vouchers.setdefault(entry.voucher_key, []).append(entry.entry_id)
+        connection.executemany(
+            "INSERT OR REPLACE INTO voucher(record_id, payload_json) VALUES (?, ?)",
+            (
+                (
+                    voucher_key,
+                    json.dumps({"entry_ids": entry_ids}, ensure_ascii=False),
+                )
+                for voucher_key, entry_ids in vouchers.items()
+            ),
+        )
         connection.executemany(
             "INSERT INTO cashflow_component(record_id, payload_json) VALUES (?, ?)",
             ((item.component_id, json.dumps(asdict(item), ensure_ascii=False)) for item in components),
@@ -492,7 +666,8 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     state["ai_tasks"] = [asdict(item) for item in tasks]
     state["classification_summary"] = summary
     state["stage"] = summary["status"]
-    _write_trace_jsonl(run_dir, "AI复核请求.jsonl", tasks)
+    for batch_number, batch in enumerate(chunk_ai_tasks(tasks), 1):
+        _write_trace_jsonl(run_dir, f"AI复核请求_第{batch_number:02d}批.jsonl", batch)
     _save_state(run_dir, state)
     return _result_from_classification(state, run_dir)
 
@@ -576,7 +751,8 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
         if adjudication_tasks:
             state["system_decisions"] = [asdict(item) for item in system_decisions]
             state["adjudication_tasks"] = [asdict(item) for item in adjudication_tasks]
-            _write_trace_jsonl(run_dir, "AI裁决请求.jsonl", adjudication_tasks)
+            for batch_number, batch in enumerate(chunk_ai_tasks(adjudication_tasks), 1):
+                _write_trace_jsonl(run_dir, f"AI裁决请求_第{batch_number:02d}批.jsonl", batch)
             state["classification_summary"]["ai_tasks_missing"] = len(adjudication_tasks)
             state["stage"] = "waiting_adjudication"
             status = "AI 待裁决"
@@ -601,9 +777,19 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
     if state.get("overall_status") and state.get("workbook_path"):
-        return FinalizeResult(
-            str(state["run_id"]), Path(run_dir), Path(state["workbook_path"]), str(state["overall_status"])
-        )
+        existing_output = Path(str(state["workbook_path"]))
+        if existing_output.is_file():
+            try:
+                workbook = load_workbook(existing_output, read_only=True, data_only=False)
+                workbook.close()
+                return FinalizeResult(
+                    str(state["run_id"]),
+                    Path(run_dir),
+                    existing_output,
+                    str(state["overall_status"]),
+                )
+            except Exception as error:
+                state["recovery_note"] = f"原结果文件无法打开，已改为重建：{error}"
     if "classification_summary" not in state:
         raise RuntimeError("请先完成自动分类")
     if int(state["classification_summary"]["ai_tasks_missing"]) > 0:
@@ -612,19 +798,28 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     components = tuple(_component_from_dict(item) for item in state["components"])
     decisions = tuple(_decision_from_dict(item) for item in state["decisions"])
     rules = load_rule_pack(PROJECT_ROOT)
-    statement = aggregate_statement(components, decisions, rules)
-    statement_check = validate_statement(statement)
-    if not statement_check.valid:
-        raise RuntimeError("正表金额勾稽失败：" + "；".join(statement_check.errors))
     comparison = None
+    existing = None
     existing_path = state.get("existing_statement_path")
     if existing_path:
         existing = parse_existing_statement(Path(str(existing_path)), rules)
         if isinstance(existing, MappingQuestion):
             raise RuntimeError("客户现有正表仍有无法映射的项目，请先确认")
-        comparison = compare_statement(existing, statement)
 
     balances = state.get("cash_balances", {})
+    statement = aggregate_statement(
+        components,
+        decisions,
+        rules,
+        opening_cent=balances.get("opening_cent"),
+        fx_cent=balances.get("fx_cent"),
+        prior_values=None if existing is None else existing.prior_values,
+    )
+    statement_check = validate_statement(statement)
+    if not statement_check.valid:
+        raise RuntimeError("正表金额勾稽失败：" + "；".join(statement_check.errors))
+    if existing is not None:
+        comparison = compare_statement(existing, statement)
     reconciliation = reconcile_cash(
         statement,
         balances.get("opening_cent"),
@@ -636,6 +831,53 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             components, _materiality_from_state(state).performance_cent
         ),
         decisions,
+    )
+    component_by_id = {item.component_id: item for item in components}
+    adjudication_by_component = {
+        str(item["component_id"]): item for item in state.get("adjudication_tasks", ())
+    }
+    adjudication_result_by_component = {
+        str(item["component_id"]): item
+        for item in state.get("adjudication_validation", {}).get("valid_results", ())
+    }
+    unresolved = tuple(
+        UnresolvedDecision(
+            component_id=decision.component_id,
+            cash_delta_cent=component_by_id[decision.component_id].cash_delta_cent,
+            cash_direction=(
+                "inflow" if component_by_id[decision.component_id].cash_delta_cent > 0 else "outflow"
+            ),
+            original_item=component_by_id[decision.component_id].original_item_text,
+            system_item_id=decision.system_item_id,
+            adjudication_status="AI 裁决证据不足",
+            counterpart_group=_review_text_pattern(
+                "、".join(component_by_id[decision.component_id].counterpart_accounts)
+            ),
+            summary_pattern=_review_text_pattern(
+                component_by_id[decision.component_id].summary
+            ),
+            alternative_item_ids=tuple(
+                dict.fromkeys(
+                    item
+                    for item in (
+                        str(adjudication_by_component.get(decision.component_id, {}).get("system_item_id", "")),
+                        str(adjudication_by_component.get(decision.component_id, {}).get("ai_item_id", "")),
+                        str(adjudication_result_by_component.get(decision.component_id, {}).get("item_id", "")),
+                    )
+                    if item and item != decision.system_item_id
+                )
+            ),
+            reason=decision.reason,
+            system_statement_amount_cent=statement_amount_cent(
+                component_by_id[decision.component_id].cash_delta_cent,
+                rules.item_by_id[decision.system_item_id].normal_direction,
+            ),
+        )
+        for decision in decisions
+        if not decision.resolved and not decision.excluded
+    )
+    review_batches = build_review_batches(
+        unresolved, _materiality_from_state(state).performance_cent
     )
     trace_rows = tuple(
         {
@@ -658,17 +900,28 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             "字段映射": json.dumps(item["roles"], ensure_ascii=False),
         }
         for item in state.get("mappings", ())
+    ) + tuple(
+        {
+            "文件": item["file"],
+            "工作表": item["sheet"],
+            "表头行": item["cell"],
+            "字段映射": f"{item['kind']}：{item['message']}",
+        }
+        for item in state.get("normalization_issues", ())
     )
-    status = (
-        "final_usable"
-        if reconciliation.status == "现金调节完成" and not any(group.blocks_manual_completion for group in duplicate_groups)
-        else "draft_cash_reconciliation_incomplete"
-    )
+    if any(item.get("kind") == "错误" for item in state.get("normalization_issues", ())):
+        status = "草稿：输入存在未处理错误"
+    elif reconciliation.status != "现金调节完成":
+        status = "草稿：现金调节未完成或存在差异"
+    elif review_batches or any(group.blocks_manual_completion for group in duplicate_groups):
+        status = "待完成人工确认"
+    else:
+        status = "最终可使用"
     model = WorkbookModel(
         statement=statement,
         rules=rules,
         comparison=comparison,
-        review_batches=(),
+        review_batches=review_batches,
         duplicate_groups=duplicate_groups,
         ai_records=tuple(state.get("ai_validation", {}).get("valid_results", ())),
         cash_scope_rows=tuple(
@@ -680,11 +933,19 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         mapping_rows=mapping_rows,
         overall_status=status,
     )
-    workbook_path = Path(run_dir) / "现金流量表正表及复核底稿.xlsx"
-    build_output_workbook(model, workbook_path)
-    output_check = validate_final_output(workbook_path, model)
+    sequence = 1
+    while True:
+        suffix = "" if sequence == 1 else f"_重建{sequence}"
+        workbook_path = Path(run_dir) / f"现金流量表正表及复核底稿{suffix}.xlsx"
+        temporary_path = workbook_path.with_name(f"{workbook_path.stem}_生成中.xlsx")
+        if not workbook_path.exists() and not temporary_path.exists():
+            break
+        sequence += 1
+    build_output_workbook(model, temporary_path)
+    output_check = validate_final_output(temporary_path, model)
     if not output_check.valid:
-        status = "output_validation_failed"
+        raise RuntimeError("输出工作簿验收失败：" + "；".join(output_check.errors))
+    temporary_path.replace(workbook_path)
     store = _store(run_dir)
     with store.stage("finalize") as connection:
         connection.executemany(
@@ -693,6 +954,23 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 (item_id, json.dumps({"amount_cent": amount}, ensure_ascii=False))
                 for item_id, amount in statement.values.items()
             ),
+        )
+        connection.executemany(
+            "INSERT OR REPLACE INTO review_batch(record_id, payload_json) VALUES (?, ?)",
+            ((item.batch_id, json.dumps(asdict(item), ensure_ascii=False)) for item in review_batches),
+        )
+        connection.executemany(
+            "INSERT OR REPLACE INTO duplicate_group(record_id, payload_json) VALUES (?, ?)",
+            ((item.group_id, json.dumps(asdict(item), ensure_ascii=False)) for item in duplicate_groups),
+        )
+        if comparison is not None:
+            connection.executemany(
+                "INSERT OR REPLACE INTO statement_comparison(record_id, payload_json) VALUES (?, ?)",
+                ((item.item_id, json.dumps(asdict(item), ensure_ascii=False)) for item in comparison.rows),
+            )
+        connection.execute(
+            "INSERT OR REPLACE INTO reconciliation(record_id, payload_json) VALUES (?, ?)",
+            ("cash_reconciliation", json.dumps(asdict(reconciliation), ensure_ascii=False)),
         )
     state["reconciliation"] = asdict(reconciliation)
     state["workbook_path"] = str(workbook_path)

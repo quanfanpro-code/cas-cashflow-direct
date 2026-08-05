@@ -20,7 +20,7 @@ class ReleaseBundleTests(unittest.TestCase):
             release = build_release(ROOT, Path(tmp) / "cas-cashflow-direct")
             names = {path.name for path in release.root.iterdir()}
             self.assertEqual(
-                {"SKILL.md", "README.md", "LICENSE", "release_manifest.json", "references", "scripts", "src"},
+                {"SKILL.md", "README.md", "CHANGELOG.md", "LICENSE", "release_manifest.json", "references", "scripts", "src"},
                 names,
             )
             self.assertFalse((release.root / "docs").exists())

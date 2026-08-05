@@ -188,6 +188,18 @@ def resolve_automatic_decisions(
         if adjudicated is None or not adjudicated.reason.strip():
             resolved.append(replace(system, resolved=False, decision_source="ai_conflict"))
             continue
+        if adjudicated.confidence == "low" or (
+            system.evidence_level == "high" and adjudicated.confidence != "high"
+        ):
+            resolved.append(
+                replace(
+                    system,
+                    resolved=False,
+                    decision_source="ai_conflict",
+                    reason=f"{system.reason}；AI 裁决证据不足，保留系统首选并送重要性判断",
+                )
+            )
+            continue
         resolved.append(
             replace(
                 system,

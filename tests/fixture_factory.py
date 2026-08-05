@@ -171,6 +171,8 @@ def _component_entry(
     item: str = "",
     flow_amount_cent: int = 0,
     retained_side: str = "unknown",
+    counterpart_name: str = "",
+    summary: str = "匿名业务",
 ) -> NormalizedEntry:
     return NormalizedEntry(
         entry_id=f"E{row}",
@@ -178,9 +180,9 @@ def _component_entry(
         voucher_key=voucher,
         voucher_date="2026-03-01",
         voucher_no=voucher,
-        summary="匿名业务",
+        summary=summary,
         account_name=account,
-        counterpart_name="",
+        counterpart_name=counterpart_name,
         debit_cent=debit_cent,
         credit_cent=credit_cent,
         flow_amount_cent=flow_amount_cent,
@@ -235,6 +237,32 @@ def component_entries(case: str) -> tuple[NormalizedEntry, ...]:
         "unbalanced_cash_fact": (
             _component_entry(15, "V9", "1002 银行存款", debit_cent=30_000, retained_side="cash"),
             _component_entry(16, "V9", "其他科目", credit_cent=29_000, retained_side="counterpart"),
+        ),
+        "receipt_and_fee": (
+            _component_entry(18, "V11", "1002 银行存款甲", debit_cent=1_000_000, retained_side="cash"),
+            _component_entry(19, "V11", "主营业务收入", credit_cent=1_000_000, item="销售商品收到的现金", retained_side="counterpart"),
+            _component_entry(20, "V11", "财务费用", debit_cent=500, item="支付其他与经营活动有关的现金", retained_side="counterpart"),
+            _component_entry(21, "V11", "1002 银行存款乙", credit_cent=500, retained_side="cash"),
+        ),
+        "explicit_internal_transfer": (
+            _component_entry(22, "V12", "1002 银行存款甲", credit_cent=60_000, retained_side="cash", counterpart_name="1002 银行存款乙"),
+            _component_entry(23, "V12", "1002 银行存款乙", debit_cent=60_000, retained_side="cash", counterpart_name="1002 银行存款甲"),
+        ),
+        "principal_and_interest": (
+            _component_entry(24, "V13", "1002 银行存款", credit_cent=110_000, retained_side="cash", summary="偿还本金及利息"),
+            _component_entry(25, "V13", "短期借款", debit_cent=100_000, retained_side="counterpart", summary="偿还本金及利息"),
+            _component_entry(26, "V13", "应付利息", debit_cent=10_000, retained_side="counterpart", summary="偿还本金及利息"),
+        ),
+        "one_sided_internal_transfer": (
+            _component_entry(
+                27,
+                "V14",
+                "1002 银行存款甲",
+                credit_cent=60_000,
+                flow_amount_cent=60_000,
+                retained_side="cash",
+                counterpart_name="1002 银行存款乙",
+            ),
         ),
     }
     return cases[case]
@@ -393,7 +421,7 @@ def write_existing_statement_fixture(
         sheet.cell(row, 4, prior)
         row += 1
         if with_custom_rows and item.item_id == "CFO-03":
-            sheet.cell(row, 1, "其中：收到匿名专项经营款")
+            sheet.cell(row, 1, "收到匿名专项经营款")
             sheet.cell(row, 3, 0.01)
             row += 1
     if include_unknown:
@@ -418,6 +446,7 @@ def workbook_model(review_batches: int, duplicate_groups: int):
             alternative_item_codes=("CFI-09",),
             worst_case_impact_cent=10_000 + index,
             reason="匿名重大剩余事项",
+            baseline_statement_amount_cent=10_000 + index,
         )
         for index in range(review_batches)
     )
@@ -431,6 +460,7 @@ def workbook_model(review_batches: int, duplicate_groups: int):
             worst_case_impact_cent=20_000 + index,
             blocks_manual_completion=True,
             item_id="CFO-03",
+            baseline_statement_amount_cent=20_000 + index,
         )
         for index in range(duplicate_groups)
     )

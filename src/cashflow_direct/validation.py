@@ -58,6 +58,8 @@ def validate_statement(statement: StatementResult) -> ValidationResult:
     expected = values["CFO-NET"] + values["CFI-NET"] + values["CFF-NET"] + values["FX"]
     if expected != values["NET-CASH"]:
         errors.append("现金及现金等价物净增加额不勾稽")
+    if values["CASH-OPENING"] + values["NET-CASH"] != values["CASH-CLOSING"]:
+        errors.append("期初余额、净增加额与期末余额不勾稽")
     return ValidationResult(not errors, tuple(errors))
 
 

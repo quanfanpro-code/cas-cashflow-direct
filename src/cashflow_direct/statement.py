@@ -68,6 +68,10 @@ def aggregate_statement(
     components: Sequence[CashflowComponent],
     decisions: Sequence[ClassificationDecision],
     rules: RulePack,
+    *,
+    opening_cent: int | None = None,
+    fx_cent: int | None = None,
+    prior_values: dict[str, int | None] | None = None,
 ) -> StatementResult:
     item_by_id = rules.item_by_id
     values = {item.item_id: 0 for item in rules.statement_items}
@@ -85,6 +89,10 @@ def aggregate_statement(
         )
         support[item.item_id].append(component.component_id)
 
+    if fx_cent is not None:
+        values["FX"] = fx_cent
+    if opening_cent is not None:
+        values["CASH-OPENING"] = opening_cent
     for item in sorted(rules.statement_items, key=lambda value: value.display_order):
         if item.formula_components:
             values[item.item_id] = sum(
@@ -100,7 +108,10 @@ def aggregate_statement(
             )
     return StatementResult(
         values,
-        {item.item_id: None for item in rules.statement_items},
+        {
+            item.item_id: (prior_values or {}).get(item.item_id)
+            for item in rules.statement_items
+        },
         {item_id: tuple(component_ids) for item_id, component_ids in support.items()},
     )
 
@@ -181,7 +192,15 @@ def parse_existing_statement(
                 prior_values[item_id] = _amount_to_cent(prior_value, unit_multiplier)
                 last_standard_id = item_id
                 continue
-            if name.startswith("其中") and last_standard_id:
+            last_item = rules.item_by_id.get(last_standard_id)
+            if last_standard_id and (
+                name.startswith("其中")
+                or (
+                    last_item is not None
+                    and last_item.is_leaf
+                    and not any(term in name for term in ("合计", "总额", "净额", "余额", "影响"))
+                )
+            ):
                 custom_rows.append(
                     ExistingCustomRow(
                         name,

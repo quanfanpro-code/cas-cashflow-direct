@@ -74,6 +74,43 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(-12_000, statement_amount_cent(12_000, refund.normal_direction))
         self.assertEqual("CFO-01", independent.system_item_id)
 
+    def test_bank_deposit_interest_is_operating_but_investment_interest_is_investing(self) -> None:
+        rules = load_rule_pack(ROOT)
+        bank_interest = classify_component(
+            cashflow_component("收到银行存款利息", 12_000, ("财务费用-利息收入",)), rules
+        )
+        investment_interest = classify_component(
+            cashflow_component("收到债券投资利息", 12_000, ("投资收益",)), rules
+        )
+        self.assertEqual("CFO-03", bank_interest.system_item_id)
+        self.assertEqual("high", bank_interest.evidence_level)
+        self.assertEqual("CFI-02", investment_interest.system_item_id)
+
+    def test_customer_name_containing_investment_does_not_block_sales_receipt(self) -> None:
+        decision = classify_component(
+            cashflow_component("销售商品收到货款", 12_000, ("甲方投资有限公司",)),
+            load_rule_pack(ROOT),
+        )
+        self.assertEqual("CFO-01", decision.system_item_id)
+
+    def test_common_sales_and_purchase_refunds_offset_original_projects(self) -> None:
+        rules = load_rule_pack(ROOT)
+        sales_refund = classify_component(cashflow_component("退回客户货款", -12_000), rules)
+        purchase_refund = classify_component(cashflow_component("收到退回采购款", 12_000), rules)
+        self.assertEqual("CFO-01", sales_refund.system_item_id)
+        self.assertEqual("CFO-04", purchase_refund.system_item_id)
+
+    def test_combined_principal_and_interest_uses_each_counterpart_account(self) -> None:
+        rules = load_rule_pack(ROOT)
+        principal = classify_component(
+            cashflow_component("偿还本金及利息", -100_000, ("短期借款",)), rules
+        )
+        interest = classify_component(
+            cashflow_component("偿还本金及利息", -10_000, ("应付利息",)), rules
+        )
+        self.assertEqual("CFF-04", principal.system_item_id)
+        self.assertEqual("CFF-05", interest.system_item_id)
+
     def test_zero_and_explicit_non_cash_components_are_excluded(self) -> None:
         rules = load_rule_pack(ROOT)
         zero = classify_component(cashflow_component("不涉及现金", 0), rules)

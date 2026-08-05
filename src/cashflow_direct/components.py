@@ -143,6 +143,7 @@ def _component(
 def _build_one_sided(entry: NormalizedEntry) -> CashflowComponent:
     amount = _signed_flow(entry)
     counterpart = (entry.account_name,) if entry.retained_side == "counterpart" and entry.account_name else ()
+    usable_counterpart = entry.retained_side == "counterpart" and bool(entry.account_name)
     return _component(
         entry.voucher_key,
         1,
@@ -151,16 +152,31 @@ def _build_one_sided(entry: NormalizedEntry) -> CashflowComponent:
         counterpart,
         entry.original_flow_item,
         (entry.entry_id,),
-        ("one_sided_source",),
-        "weak",
+        () if usable_counterpart else ("one_sided_source",),
+        "medium" if usable_counterpart else "weak",
     )
 
 
 def _match_internal_transfers(
     voucher_key: str,
     cash_entries: list[NormalizedEntry],
+    external_amounts: Sequence[int] = (),
 ) -> tuple[dict[str, int], list[InternalTransferLeg]]:
     remaining = {entry.entry_id: _signed_flow(entry) for entry in cash_entries}
+    for external in external_amounts:
+        candidates = (
+            [entry for entry in cash_entries if remaining[entry.entry_id] > 0]
+            if external > 0
+            else [entry for entry in cash_entries if remaining[entry.entry_id] < 0]
+        )
+        amount_left = abs(external)
+        for entry in candidates:
+            available = abs(remaining[entry.entry_id])
+            used = min(available, amount_left)
+            remaining[entry.entry_id] -= used if external > 0 else -used
+            amount_left -= used
+            if amount_left == 0:
+                break
     positives = [entry for entry in cash_entries if remaining[entry.entry_id] > 0]
     negatives = [entry for entry in cash_entries if remaining[entry.entry_id] < 0]
     excluded: list[InternalTransferLeg] = []
@@ -189,53 +205,49 @@ def _voucher_components(
     entries: list[NormalizedEntry],
     cash_entries: list[NormalizedEntry],
 ) -> tuple[list[CashflowComponent], list[InternalTransferLeg]]:
-    remaining, excluded = _match_internal_transfers(voucher_key, cash_entries)
-    external_delta = sum(remaining.values())
-    if external_delta == 0:
-        return [], excluded
-
     noncash = [entry for entry in entries if entry not in cash_entries]
+    cash_delta = sum(_signed_flow(entry) for entry in cash_entries)
     imbalance = sum(entry.debit_cent - entry.credit_cent for entry in entries)
     base_anomalies = ("voucher_unbalanced",) if imbalance else ()
     counterpart_accounts = tuple(dict.fromkeys(entry.account_name for entry in noncash if entry.account_name))
-    cash_source_keys = tuple(entry.entry_id for entry in cash_entries if remaining[entry.entry_id])
-
-    direction = 1 if external_delta > 0 else -1
-    opposite_labeled = [
-        entry
-        for entry in noncash
-        if entry.original_flow_item and (entry.debit_cent - entry.credit_cent) * direction < 0
-    ]
-    labeled = opposite_labeled or [entry for entry in cash_entries if entry.original_flow_item]
+    labeled = [entry for entry in noncash if entry.original_flow_item]
     by_item: dict[str, list[NormalizedEntry]] = defaultdict(list)
     for entry in labeled:
-        by_item[entry.original_flow_item].append(entry)
+        direction = "in" if _signed_flow(entry) > 0 else "out"
+        by_item[f"{direction}\x1f{entry.original_flow_item}"].append(entry)
+    if not by_item and len(noncash) > 1:
+        for entry in noncash:
+            direction = "in" if _signed_flow(entry) > 0 else "out"
+            by_item[f"{direction}\x1f{entry.account_name}"].append(entry)
 
     if len(by_item) <= 1:
-        item = next(iter(by_item), next((entry.original_flow_item for entry in entries if entry.original_flow_item), ""))
-        sources = cash_source_keys + tuple(entry.entry_id for entry in by_item.get(item, ()))
+        item_entries = next(iter(by_item.values()), [])
+        item = item_entries[0].original_flow_item if item_entries else next(
+            (entry.original_flow_item for entry in cash_entries if entry.original_flow_item), ""
+        )
+        remaining, excluded = _match_internal_transfers(voucher_key, cash_entries, (cash_delta,))
+        if cash_delta == 0:
+            return [], excluded
         return [
             _component(
                 voucher_key,
                 1,
-                external_delta,
+                cash_delta,
                 entries[0].summary,
                 counterpart_accounts,
                 item,
-                sources,
+                tuple(entry.entry_id for entry in cash_entries) + tuple(
+                    entry.entry_id for entry in item_entries
+                ),
                 base_anomalies,
                 "strong" if noncash else "weak",
             )
         ], excluded
 
     components: list[CashflowComponent] = []
-    allocated = 0
-    for sequence, (item, item_entries) in enumerate(by_item.items(), 1):
-        item_amount = sum(abs(entry.debit_cent - entry.credit_cent) for entry in item_entries)
-        amount = direction * min(item_amount, max(0, abs(external_delta) - abs(allocated)))
-        if amount == 0:
-            continue
-        allocated += amount
+    for sequence, item_entries in enumerate(by_item.values(), 1):
+        item = item_entries[0].original_flow_item
+        amount = sum(_signed_flow(entry) for entry in item_entries)
         item_accounts = tuple(dict.fromkeys(entry.account_name for entry in item_entries if entry.account_name))
         components.append(
             _component(
@@ -245,12 +257,14 @@ def _voucher_components(
                 entries[0].summary,
                 item_accounts,
                 item,
-                cash_source_keys + tuple(entry.entry_id for entry in item_entries),
+                tuple(entry.entry_id for entry in cash_entries)
+                + tuple(entry.entry_id for entry in item_entries),
                 base_anomalies,
                 "strong",
             )
         )
-    residual = external_delta - allocated
+    allocated = sum(item.cash_delta_cent for item in components)
+    residual = cash_delta - allocated
     if residual:
         components.append(
             _component(
@@ -260,10 +274,25 @@ def _voucher_components(
                 entries[0].summary,
                 counterpart_accounts,
                 "",
-                cash_source_keys,
+                tuple(entry.entry_id for entry in cash_entries),
                 base_anomalies + ("unallocated_cash",),
                 "weak",
             )
+        )
+    remaining, excluded = _match_internal_transfers(
+        voucher_key, cash_entries, tuple(item.cash_delta_cent for item in components)
+    )
+    if sum(remaining.values()):
+        components[-1] = _component(
+            voucher_key,
+            len(components),
+            components[-1].cash_delta_cent,
+            components[-1].summary,
+            components[-1].counterpart_accounts,
+            components[-1].original_item_text,
+            components[-1].source_keys,
+            tuple(dict.fromkeys(components[-1].anomalies + ("cash_allocation_mismatch",))),
+            "weak",
         )
     return components, excluded
 
@@ -286,6 +315,20 @@ def build_cashflow_components(
             if entry.account_name and _account_key(entry.account_name) in scope.included_keys
         ]
         if cash_entries:
+            explicit_internal = [
+                entry
+                for entry in cash_entries
+                if entry.counterpart_name
+                and _account_key(entry.counterpart_name) in scope.included_keys
+            ]
+            if explicit_internal:
+                excluded.extend(
+                    InternalTransferLeg(voucher_key, entry.entry_id, abs(_signed_flow(entry)))
+                    for entry in explicit_internal
+                )
+                cash_entries = [entry for entry in cash_entries if entry not in explicit_internal]
+            if not cash_entries:
+                continue
             built, internal = _voucher_components(voucher_key, voucher_entries, cash_entries)
             components.extend(built)
             excluded.extend(internal)
