@@ -1,9 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 
-from cashflow_direct.components import build_cashflow_components, confirm_cash_scope, discover_cash_scope
-from tests.fixture_factory import component_entries
+from cashflow_direct.components import (
+    _signed_flow,
+    build_cashflow_components,
+    confirm_cash_scope,
+    discover_cash_scope,
+    flow_direction_source,
+)
+from tests.fixture_factory import _component_entry, component_entries
 
 
 def _confirmed_scope(case: str):
@@ -137,6 +143,37 @@ class ComponentTests(unittest.TestCase):
         )
         self.assertEqual(30_000, result.components[0].cash_delta_cent)
         self.assertIn("voucher_unbalanced", result.components[0].anomalies)
+
+    def test_counterpart_side_flow_detail_uses_item_direction(self) -> None:
+        # 清平式：对方科目侧 + 借贷列 + 流量金额 + 标准项目名 → 方向听项目名
+        entries = (
+            _component_entry(1, "V1", "销售费用_业务招待费", debit_cent=600_00, item="支付其他与经营活动有关的现金", flow_amount_cent=600_00, retained_side="counterpart"),
+            _component_entry(2, "V2", "合同负债_业务", credit_cent=700000_00, item="销售商品、提供劳务收到的现金", flow_amount_cent=700000_00, retained_side="counterpart"),
+        )
+        self.assertEqual(-600_00, _signed_flow(entries[0]))
+        self.assertEqual(700000_00, _signed_flow(entries[1]))
+
+    def test_red_reversal_sign_is_preserved(self) -> None:
+        # 负流量+流入项目 → 负（退款冲减流入）；负流量+流出项目 → 正（购买退款冲减流出）
+        refund_in = _component_entry(3, "V3", "其他应收款_其他", debit_cent=-180_00, item="收到其他与经营活动有关的现金", flow_amount_cent=-180_00, retained_side="counterpart")
+        refund_out = _component_entry(4, "V4", "应付账款_财务", credit_cent=29000_00, item="支付其他与经营活动有关的现金", flow_amount_cent=-29000_00, retained_side="counterpart")
+        self.assertEqual(-180_00, _signed_flow(refund_in))
+        self.assertEqual(29000_00, _signed_flow(refund_out))
+
+    def test_unknown_item_name_falls_back_to_legacy(self) -> None:
+        # 非标项目名（项目甲）不进新分支，行为与改动前一致
+        entry = _component_entry(5, "V5", "应收款项", credit_cent=12000_00, item="项目甲", flow_amount_cent=12000_00, retained_side="counterpart")
+        self.assertEqual(12000_00, _signed_flow(entry))
+
+    def test_flow_direction_source_labels_all_four_cases(self) -> None:
+        inflow = _component_entry(10, "V10", "银行存款", debit_cent=100_00, item="销售商品收到的现金", flow_amount_cent=100_00, retained_side="cash")
+        outflow = _component_entry(11, "V11", "银行存款", credit_cent=100_00, item="购买商品支付的现金", flow_amount_cent=100_00, retained_side="cash")
+        debit_credit = _component_entry(12, "V12", "银行存款", debit_cent=100_00, flow_amount_cent=100_00, retained_side="cash")
+        balance = _component_entry(13, "V13", "银行存款", debit_cent=100_00, retained_side="cash")
+        self.assertEqual("现流项目名(流入)", flow_direction_source(inflow))
+        self.assertEqual("现流项目名(流出)", flow_direction_source(outflow))
+        self.assertEqual("借贷列+流量金额", flow_direction_source(debit_credit))
+        self.assertEqual("借贷差额", flow_direction_source(balance))
 
     def test_every_cash_candidate_requires_one_confirmation(self) -> None:
         proposal = discover_cash_scope(component_entries("pure_internal"))

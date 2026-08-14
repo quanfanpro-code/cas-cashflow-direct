@@ -63,11 +63,20 @@ def _xml_sheet_metadata(path: Path) -> dict[str, tuple[tuple[str, ...], tuple[in
     return metadata
 
 
+def open_workbook_robust(path: Path):
+    """优先只读打开；dimension 损坏（导出工具写坏 max_column）时退回普通模式。"""
+    workbook = load_workbook(path, read_only=True, data_only=True, keep_vba=False)
+    if any(sheet.max_column in (None, 1) for sheet in workbook.worksheets):
+        workbook.close()
+        return load_workbook(path, read_only=False, data_only=True, keep_vba=False)
+    return workbook
+
+
 def scan_workbook(path: Path, sample_rows: int = 200) -> WorkbookSnapshot:
     """只读提取样例网格；合并信息直接从工作簿 XML 读取。"""
     source = Path(path)
     metadata = _xml_sheet_metadata(source)
-    workbook = load_workbook(source, read_only=True, data_only=True, keep_vba=False)
+    workbook = open_workbook_robust(source)
     try:
         sheets: list[SheetSnapshot] = []
         for worksheet in workbook.worksheets:

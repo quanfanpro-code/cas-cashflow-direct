@@ -104,12 +104,33 @@ def confirm_cash_scope(
     return CashScope(included, excluded, names, scope_hash)
 
 
+def _keyword_direction(item: str) -> int | None:
+    """标准项目名定收付方向：流出 -1，流入 +1，认不出 None。"""
+    if any(term in item for term in OUTFLOW_ITEM_TERMS):
+        return -1
+    if any(term in item for term in INFLOW_ITEM_TERMS):
+        return 1
+    return None
+
+
+def flow_direction_source(entry: NormalizedEntry) -> str:
+    """该行现金方向的判定依据（写入留痕）。"""
+    if entry.flow_amount_cent and entry.original_flow_item:
+        direction = _keyword_direction(entry.original_flow_item)
+        if direction == -1:
+            return "现流项目名(流出)"
+        if direction == 1:
+            return "现流项目名(流入)"
+    if entry.flow_amount_cent:
+        return "借贷列+流量金额"
+    return "借贷差额"
+
+
 def _signed_flow(entry: NormalizedEntry) -> int:
-    if entry.retained_side == "unknown" and entry.flow_amount_cent and entry.original_flow_item:
-        if any(term in entry.original_flow_item for term in OUTFLOW_ITEM_TERMS):
-            return -entry.flow_amount_cent
-        if any(term in entry.original_flow_item for term in INFLOW_ITEM_TERMS):
-            return entry.flow_amount_cent
+    if entry.flow_amount_cent and entry.original_flow_item:
+        direction = _keyword_direction(entry.original_flow_item)
+        if direction is not None:
+            return direction * entry.flow_amount_cent
     if entry.flow_amount_cent:
         if entry.debit_cent and not entry.credit_cent:
             side_delta = entry.flow_amount_cent

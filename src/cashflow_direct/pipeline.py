@@ -24,6 +24,7 @@ from cashflow_direct.components import (
     build_cashflow_components,
     confirm_cash_scope as make_cash_scope,
     discover_cash_scope,
+    flow_direction_source,
 )
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
 from cashflow_direct.intake import register_inputs, validate_materiality
@@ -38,7 +39,7 @@ from cashflow_direct.models import (
 )
 from cashflow_direct.materiality import build_review_batches
 from cashflow_direct.money import stable_id, statement_amount_cent, yuan_to_cent
-from cashflow_direct.normalization import normalize_dataset
+from cashflow_direct.normalization import normalize_dataset, subtotal_exclusion_warning
 from cashflow_direct.semantic_mapping import (
     DatasetMapping,
     MappingQuestion,
@@ -59,7 +60,7 @@ from cashflow_direct.validation import (
     validate_statement,
 )
 from cashflow_direct.workbook_output import WorkbookModel, build_output_workbook
-from cashflow_direct.workbook_structure import scan_workbook
+from cashflow_direct.workbook_structure import open_workbook_robust, scan_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -216,7 +217,7 @@ def _assert_inputs_unchanged(state: Mapping[str, object]) -> None:
 
 def _read_cash_balances(path: Path) -> dict[str, tuple[int, int]]:
     found: dict[str, tuple[int, int]] = {}
-    workbook = load_workbook(path, read_only=True, data_only=True, keep_vba=False)
+    workbook = open_workbook_robust(path)
     try:
         for sheet in workbook.worksheets:
             priority = 2 if "余额" in sheet.title else 1
@@ -268,6 +269,7 @@ def run_preflight(
     inputs: Sequence[Path],
     materiality: tuple[object, object, object],
     output_parent: Path | None = None,
+    statement_path: Path | None = None,
 ) -> PreflightResult:
     amounts = validate_materiality(*materiality)
     intake = register_inputs(inputs, output_parent=output_parent)
@@ -284,11 +286,22 @@ def run_preflight(
     normalization_issues: list[dict[str, object]] = []
     sheet_structures: list[dict[str, object]] = []
     existing_statement_path: str | None = None
+    designated_target = statement_path.resolve() if statement_path is not None else None
+    designated_hit = False
     balance_candidates: dict[str, tuple[int, int]] = {}
     for registered in intake.active_files:
         for key, candidate in _read_cash_balances(registered.path).items():
             if key not in balance_candidates or candidate[0] > balance_candidates[key][0]:
                 balance_candidates[key] = candidate
+        if designated_target is not None and registered.path.resolve() == designated_target:
+            designated_hit = True
+            existing = parse_existing_statement(registered.path, rules)
+            if isinstance(existing, ExistingStatementResult):
+                existing_statement_path = str(registered.path)
+                continue
+            raise ValueError(
+                f"指定的正表文件识别失败：{registered.path.name}（{existing.sample_values[0]}）"
+            )
         snapshot = scan_workbook(registered.path)
         sheet_structures.extend(
             {
@@ -325,6 +338,17 @@ def run_preflight(
                     }
                     for issue in (*normalized.errors, *normalized.exclusions)
                 )
+                warning = subtotal_exclusion_warning(normalized)
+                if warning is not None:
+                    normalization_issues.append(
+                        {
+                            "file_id": registered.file_id,
+                            "file": registered.path.name,
+                            "sheet": mapping.sheet_name,
+                            "cell": "",
+                            **warning,
+                        }
+                    )
             else:
                 questions.append(
                     {
@@ -336,6 +360,19 @@ def run_preflight(
                     }
                 )
         if detected:
+            continue
+        if designated_target is not None:
+            # 已指定正表文件：其余文件只按明细处理，不再自动尝试当正表
+            normalization_issues.append(
+                {
+                    "file_id": registered.file_id,
+                    "file": registered.path.name,
+                    "sheet": "",
+                    "cell": "",
+                    "kind": "提示",
+                    "message": "已指定正表文件，本文件仅按明细处理；未识别出明细数据集，已跳过",
+                }
+            )
             continue
         existing = parse_existing_statement(registered.path, rules)
         if isinstance(existing, ExistingStatementResult):
@@ -352,6 +389,8 @@ def run_preflight(
                 "kind": "statement",
             }
         )
+    if designated_target is not None and not designated_hit:
+        raise ValueError(f"指定的正表文件不在已选输入中：{statement_path}")
 
     proposal = discover_cash_scope(entries)
     recommended = {
@@ -967,6 +1006,9 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     dict.fromkeys(entry.source.cell_range for entry in source_entries)
                 ),
                 "来源占用键": "、".join(component.source_keys),
+                "方向依据": "、".join(
+                    dict.fromkeys(flow_direction_source(entry) for entry in source_entries)
+                ),
                 "异常": "、".join(component.anomalies),
             }
         )
@@ -989,6 +1031,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "来源工作表": "" if entry is None else entry.source.sheet_name,
                 "来源单元格": "" if entry is None else entry.source.cell_range,
                 "来源占用键": transfer["entry_id"],
+                "方向依据": "内部划转",
                 "异常": "内部划转已排除",
             }
         )

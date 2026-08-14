@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--performance", required=True, help="实际执行的重要性，单位元")
     preflight.add_argument("--trivial", required=True, help="明显微小错报临界值，单位元")
     preflight.add_argument("--output-parent", help="由 Skill 自动传递的输出父目录")
+    preflight.add_argument("--statement-path", help="客户现有现金流量表正表文件；指定后只认该文件，识别失败即报错")
     for name in (
         "confirm-mapping",
         "confirm-cash",
@@ -62,6 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 choose_input_files(),
                 (arguments.overall, arguments.performance, arguments.trivial),
                 None if arguments.output_parent is None else Path(arguments.output_parent),
+                None if arguments.statement_path is None else Path(arguments.statement_path),
             )
         elif arguments.command == "confirm-mapping":
             result = confirm_mapping(Path(arguments.run_dir), json.loads(arguments.decisions))

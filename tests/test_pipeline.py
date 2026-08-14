@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sqlite3
@@ -28,6 +28,73 @@ from tests.fixture_factory import (
 
 
 class PipelineTests(unittest.TestCase):
+    def test_statement_path_is_honored_and_failure_stops(self) -> None:
+        # 指定的文件识别不出正表 → 报错停下（不静默降级为编制模式）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (journal,) = write_end_to_end_case(root)
+            bogus = root / "指定但不是正表.xlsx"
+            workbook = Workbook()
+            workbook.active.append(["不是", "正表", "内容"])
+            workbook.save(bogus)
+            with self.assertRaises(ValueError):
+                run_preflight(
+                    [journal, bogus], ("1000000", "750000", "50000"), statement_path=bogus
+                )
+
+    def test_statement_path_success_skips_auto_detection_for_others(self) -> None:
+        # 指定合法正表：该文件走正表识别并登记，其余文件只按明细处理
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal, existing = write_end_to_end_case(root, include_existing_statement=True)
+            preflight = run_preflight(
+                [journal, existing],
+                ("1000000", "750000", "50000"),
+                output_parent=root,
+                statement_path=existing,
+            )
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            self.assertEqual(str(existing), state["existing_statement_path"])
+
+    def test_statement_path_outside_inputs_raises(self) -> None:
+        # 指定的正表文件不在已选输入中 → 必须报错，不得静默跳过
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (journal,) = write_end_to_end_case(root)
+            missing = root / "未选中的文件.xlsx"
+            with self.assertRaises(ValueError):
+                run_preflight(
+                    [journal], ("1000000", "750000", "50000"), statement_path=missing
+                )
+
+    def test_trace_marks_direction_source(self) -> None:
+        # 全量分类留痕表含"方向依据"列，序时账明细（无流量金额列）标"借贷差额"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = write_end_to_end_case(root)
+            preflight = run_preflight(
+                inputs, ("1000000", "750000", "50000"), output_parent=root
+            )
+            confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            run_classification(preflight.run_dir)
+            final = finalize_run(preflight.run_dir)
+            workbook = load_workbook(final.workbook_path, data_only=False)
+            try:
+                sheet = workbook["全量分类留痕"]
+                headers = [cell.value for cell in sheet[1]]
+                self.assertIn("方向依据", headers)
+                column = headers.index("方向依据") + 1
+                values = {
+                    sheet.cell(row, column).value for row in range(2, sheet.max_row + 1)
+                }
+                self.assertIn("借贷差额", values)
+            finally:
+                workbook.close()
+
     def test_multiple_statement_sheet_names_survive_preflight_for_user_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

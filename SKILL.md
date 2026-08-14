@@ -11,7 +11,7 @@ description: 编制或校验一般企业直接法现金流量表正表，理解�
 
 按以下最短流程执行，不向客户展示内部五类输入编号：
 
-1. 弹出 Windows 文件选择窗口，一次选择本期序时账、现流明细和可选的客户现有正表。
+1. 弹出 Windows 文件选择窗口，一次选择本期序时账、现流明细和可选的客户现有正表。有客户现流正表时，由用户明确告诉 agent 是哪个文件，用 `--statement-path` 传入；程序按内容识别，文件名任意，识别失败会报错停下，绝不自动去文件夹查找。
 2. 自动识别编制或校验场景、全部业务工作表、数据区合并单元格、多行表头、字段含义及现流项目所在侧。
 3. 只补问三项重要性和当前确实缺失的资料。
 4. 展示现金范围预选，对受限资金和保证金等候选一次确认。🔴 CHECKPOINT：现金范围只确认一次，先与客户核对完全部候选科目和受限资金决定。
@@ -65,7 +65,7 @@ description: 编制或校验一般企业直接法现金流量表正表，理解�
 
 主流程：`preflight`(选文件+填三项重要性) → 若 `mapping_question_count>0` 再 `confirm-mapping` → `confirm-cash` → `classify` → 若 `ai_tasks_missing>0` 走 AI 复核 → `finalize`。`status --run-dir` 可随时查看阶段。
 
-- **preflight** `--overall <整体:元> --performance <实际:元> --trivial <微小:元>` → 返回 `run_dir`、`mapping_question_count`、`recommended_cash_decisions`、`status`。
+- **preflight** `--overall <整体:元> --performance <实际:元> --trivial <微小:元> [--statement-path <客户现流正表文件>]` → 返回 `run_dir`、`mapping_question_count`、`recommended_cash_decisions`、`status`。客户提供现流正表核对时，由用户明确告知正表文件并用 `--statement-path` 传入；程序只对该文件做正表内容识别（文件名任意），识别失败即报错，不自动猜测其余文件。
 - **confirm-mapping** `--decisions '<JSON>'`：读 `运行状态.json` 的 `mapping_questions`，每项以键 `{file_id}:{sheet}:{role}`（或 `{file_id}:{role}`）传入列字母，如 `{"f1:序时账:摘要":"D"}`。
 - **confirm-cash** `--decisions '<JSON>'`：对全部候选科目逐个给 `include`/`exclude`，如 `{"库存现金":"include","保证金-受限":"exclude"}`。🔴 CHECKPOINT：一次确认完。
 - **classify** → 返回 `ai_tasks_missing`；>0 时生成 `AI复核请求_第NN批.jsonl`（≤25行/批）。

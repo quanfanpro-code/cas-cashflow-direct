@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from cashflow_direct.models import EvidenceProfile, NormalizedEntry, SourceLocator
 from cashflow_direct.money import stable_id, yuan_to_cent
 from cashflow_direct.semantic_mapping import DatasetMapping
+from cashflow_direct.workbook_structure import open_workbook_robust
 
 
 CASH_ACCOUNT_TERMS = ("库存现金", "银行存款", "其他货币资金", "现金等价物")
@@ -120,7 +120,7 @@ def infer_evidence_profile(entries: Sequence[NormalizedEntry]) -> EvidenceProfil
 
 def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> NormalizationResult:
     """把不同证据形态统一为逐行分录，并完整记录排除和错误。"""
-    workbook = load_workbook(path, read_only=True, data_only=True, keep_vba=False)
+    workbook = open_workbook_robust(path)
     entries: list[NormalizedEntry] = []
     exclusions: list[RowExclusion] = []
     errors: list[RowError] = []
@@ -153,6 +153,15 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
             source = _row_locator(file_id, worksheet.title, row_number, columns)
             if all(value in (None, "") for value in row):
                 exclusions.append(RowExclusion(source, "blank_structure"))
+                continue
+            if (
+                "voucher_date" in mapping.role_to_column
+                and "voucher_no" in mapping.role_to_column
+                and _cell_value(tuple(row), mapping, "voucher_date") in (None, "")
+                and _cell_value(tuple(row), mapping, "voucher_no") in (None, "")
+            ):
+                # 明细表中无日期且无凭证号的行视为小计/汇总行，剔除并留痕
+                exclusions.append(RowExclusion(source, "subtotal_row"))
                 continue
             if _is_repeated_header(tuple(row), mapping):
                 exclusions.append(RowExclusion(source, "repeated_header"))
@@ -247,3 +256,16 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
         tuple(errors),
         rows_read,
     )
+
+
+def subtotal_exclusion_warning(result: NormalizationResult) -> dict[str, object] | None:
+    """小计剔除占比超10%时返回核对报告提示，否则 None。"""
+    if not result.rows_read:
+        return None
+    count = sum(1 for item in result.exclusions if item.discard_reason == "subtotal_row")
+    if count / result.rows_read <= 0.10:
+        return None
+    return {
+        "kind": "提示",
+        "message": f"小计行剔除占比异常：{count}/{result.rows_read} 行被按小计剔除，请人工确认未误删明细",
+    }

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -160,6 +160,26 @@ def write_all_input_types(root: Path) -> tuple[Path, ...]:
         ],
     )
     return first, second, third, fourth, fifth
+
+
+def break_dimension(path: Path) -> None:
+    """把工作簿 dimension 元数据改成 A1，模拟导出工具写坏维度。"""
+    import re
+    import shutil
+    import zipfile
+
+    fixed = path.with_name(path.stem + "_fixed.xlsx")
+    with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(
+        fixed, "w", zipfile.ZIP_DEFLATED
+    ) as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename.endswith(".xml"):
+                text = data.decode("utf-8")
+                text = re.sub(r'<dimension ref="[^"]*"/>', '<dimension ref="A1"/>', text)
+                data = text.encode("utf-8")
+            target.writestr(item, data)
+    shutil.move(str(fixed), str(path))
 
 
 def _component_entry(

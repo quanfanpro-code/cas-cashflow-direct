@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
@@ -6,10 +6,16 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from cashflow_direct.normalization import normalize_dataset
+from cashflow_direct.models import SourceLocator
+from cashflow_direct.normalization import (
+    NormalizationResult,
+    RowExclusion,
+    normalize_dataset,
+    subtotal_exclusion_warning,
+)
 from cashflow_direct.semantic_mapping import DatasetMapping, infer_dataset_mapping
 from cashflow_direct.workbook_structure import scan_workbook
-from tests.fixture_factory import write_all_input_types
+from tests.fixture_factory import break_dimension, write_all_input_types
 
 
 class NormalizationTests(unittest.TestCase):
@@ -53,6 +59,54 @@ class NormalizationTests(unittest.TestCase):
             self.assertEqual(1, len(result.errors))
             self.assertIn("B2", result.errors[0].source.cell_range)
             self.assertIn("金额", result.errors[0].message)
+
+    def test_subtotal_rows_without_date_and_voucher_are_excluded_with_trace(self) -> None:
+        # 鼎弘式：小计行日期与凭证号双空 → 剔除留痕，数据行保留
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "鼎弘式小计.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "流量金额", "现流项目"])
+            sheet.append([None, None, None, None, 0, 0, 15593144.77, "经营活动现金流入小计"])
+            sheet.append(["2025-02-12", "记-5", "匿名结息", "财务费用", -85708.43, None, 85708.43, "收到其他经营现金"])
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+            result = normalize_dataset(path, "FSUB", mapping)
+            self.assertEqual(1, len(result.entries))
+            self.assertEqual(1, len(result.exclusions))
+            self.assertEqual("subtotal_row", result.exclusions[0].discard_reason)
+            self.assertIn("A2", result.exclusions[0].source.cell_range)
+
+    def test_subtotal_exclusion_warning_flags_only_abnormal_share(self) -> None:
+        def make_result(rows_read: int, subtotal_count: int) -> NormalizationResult:
+            exclusions = tuple(
+                RowExclusion(SourceLocator("F", "S", i, i, f"A{i}"), "subtotal_row")
+                for i in range(subtotal_count)
+            )
+            return NormalizationResult((), None, exclusions, (), rows_read)
+
+        flagged = subtotal_exclusion_warning(make_result(8, 1))  # 12.5% > 10%
+        self.assertIsNotNone(flagged)
+        self.assertIn("1/8", str(flagged["message"]))
+        quiet = subtotal_exclusion_warning(make_result(12, 1))  # 8.3% <= 10%
+        self.assertIsNone(quiet)
+
+    def test_normalize_dataset_tolerates_broken_dimension(self) -> None:
+        # dimension 损坏的文件仍应读出全部列与金额
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "坏维度明细.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方"])
+            sheet.append(["2026-01-01", "记-1", "匿名收款", "银行存款", 100, None])
+            workbook.save(path)
+            break_dimension(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+            result = normalize_dataset(path, "FBD", mapping)
+            self.assertEqual(1, len(result.entries))
+            self.assertEqual(100_00, result.entries[0].debit_cent)
 
     def test_merged_and_blank_voucher_fields_stay_in_one_voucher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

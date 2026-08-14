@@ -1,13 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from cashflow_direct.semantic_mapping import MappingQuestion
 from cashflow_direct.statement import (
+    ExistingStatementResult,
     aggregate_statement,
     compare_statement,
     parse_existing_statement,
@@ -112,6 +113,227 @@ class StatementTests(unittest.TestCase):
             write_existing_statement_fixture(path, 5, False, include_unknown=True)
             result = parse_existing_statement(path, classified_components().rules)
             self.assertIsInstance(result, MappingQuestion)
+
+    def test_existing_statement_accepts_period_range_header(self) -> None:
+        # 清平式表头：项目 | 行次 | 2026年1-6月（无"本期/本年"字样）
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "清平式正表.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["单位名称：匿名公司", None, "未审数"])
+            sheet.append(["项目", "行次", "2026年1-6月"])
+            row_index = 3
+            for item in rules.statement_items:
+                sheet.cell(row_index, 1, item.name)
+                sheet.cell(row_index, 2, item.display_order)
+                sheet.cell(row_index, 3, item.display_order / 100)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(1, result.values["CFO-01"])  # display_order=1 → 0.01元 → 1分
+
+    def test_sequential_integer_column_never_wins_amount(self) -> None:
+        # 序号列 1,2,3…（数值占比100%）不得抢金额列
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "带序号正表.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["序号", "项目", "金额"])
+            row_index = 2
+            for number, item in enumerate(rules.statement_items, 1):
+                sheet.cell(row_index, 1, number)
+                sheet.cell(row_index, 2, item.name)
+                sheet.cell(row_index, 3, item.display_order / 100)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(1, result.values["CFO-01"])  # 金额列选中，序号列排除
+
+    def test_statement_tie_prefers_period_words_then_asks(self) -> None:
+        rules = classified_components().rules
+        with tempfile.TemporaryDirectory() as tmp:
+            # 并列且无"本期/本年/金额"字样 → 提问
+            ambiguous = Path(tmp) / "并列无字样.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "2026年1-6月", "2026年1-5月"])
+            row_index = 2
+            for item in rules.statement_items:
+                sheet.cell(row_index, 1, item.name)
+                sheet.cell(row_index, 2, item.display_order / 100)
+                sheet.cell(row_index, 3, item.display_order / 100)
+                row_index += 1
+            workbook.save(ambiguous)
+            result = parse_existing_statement(ambiguous, rules)
+            self.assertIsInstance(result, MappingQuestion)
+            self.assertEqual("statement_header", result.role)
+            self.assertIn("并列", str(result.sample_values[0]))
+
+            # 并列时含"本期"字样的列胜出
+            tied = Path(tmp) / "并列有本期.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "累计数", "本期数"])
+            row_index = 2
+            for item in rules.statement_items:
+                sheet.cell(row_index, 1, item.name)
+                sheet.cell(row_index, 2, item.display_order / 10)
+                sheet.cell(row_index, 3, item.display_order / 100)
+                row_index += 1
+            workbook.save(tied)
+            result = parse_existing_statement(tied, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(1, result.values["CFO-01"])  # 本期数列 0.01 → 1分，非累计列 10分
+
+    def test_low_hit_rate_sheet_is_not_statement(self) -> None:
+        # 35 标准行 + 40 行"其中"自定义行 → 命中率 46.7% < 50% → 不当正表
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "低命中率.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "本期金额"])
+            row_index = 2
+            for item in rules.statement_items:
+                sheet.cell(row_index, 1, item.name)
+                sheet.cell(row_index, 2, item.display_order / 100)
+                row_index += 1
+            for index in range(40):
+                sheet.cell(row_index, 1, f"其中匿名明细{index + 1}")
+                sheet.cell(row_index, 2, 0.01)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertNotIsInstance(result, ExistingStatementResult)
+
+    def test_section_heading_rows_without_amount_are_skipped(self) -> None:
+        # 清平式正表带节标题行（金额为空）→ 跳过，不影响整表识别
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "带节标题正表.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "行次", "2026年1-6月"])
+            row_index = 3
+            sheet.cell(row_index, 1, "一、经营活动产生的现金流量：")
+            row_index += 1
+            for item in rules.statement_items:
+                sheet.cell(row_index, 1, item.name)
+                sheet.cell(row_index, 2, item.display_order)
+                sheet.cell(row_index, 3, item.display_order / 100)
+                row_index += 1
+            sheet.cell(row_index, 1, "经营活动现金流入小计")
+            sheet.cell(row_index, 3, 123.45)
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(1, result.values["CFO-01"])
+            self.assertEqual(35, len(result.values))
+
+    def test_ordinal_prefixed_item_names_still_match(self) -> None:
+        # 清平式：净额类项目带"四、五、六"序数前缀也要能匹配
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "序数前缀正表.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "2026年1-6月"])
+            row_index = 2
+            for item in rules.statement_items:
+                name = item.name
+                if item.item_id == "FX":
+                    name = "四、" + item.name
+                elif item.item_id == "NET-CASH":
+                    name = "五、" + item.name
+                elif item.item_id == "CASH-CLOSING":
+                    name = "六、" + item.name
+                sheet.cell(row_index, 1, name)
+                sheet.cell(row_index, 2, item.display_order / 100)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(35, len(result.values))
+
+    def test_hit_rate_gate_uses_ordinal_fallback(self) -> None:
+        # 全部项目名带序数前缀时，命中率统计也要用兜底匹配，不得误拒
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "全序数正表.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "本期金额"])
+            ordinals = "一二三四五六七八九十"
+            row_index = 2
+            for number, item in enumerate(rules.statement_items):
+                sheet.cell(row_index, 1, f"{ordinals[number % 10]}、" + item.name)
+                sheet.cell(row_index, 2, item.display_order / 100)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(35, len(result.values))
+
+    def test_two_char_ordinal_prefix_still_matches(self) -> None:
+        # "十一、"这类两位序数前缀也要能匹配（锁定既有正则行为）
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "两位序数正表.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "2026年1-6月"])
+            row_index = 2
+            for item in rules.statement_items:
+                name = item.name
+                if item.item_id == "FX":
+                    name = "十一、" + item.name
+                sheet.cell(row_index, 1, name)
+                sheet.cell(row_index, 2, item.display_order / 100)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, ExistingStatementResult)
+            self.assertEqual(35, len(result.values))
+
+    def test_low_hit_rate_reports_accurate_reason(self) -> None:
+        # 命中率不足时如实说明"匹配率过低"，而不是笼统的"未找到项目列"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "低命中率.xlsx"
+            rules = classified_components().rules
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "本期金额"])
+            row_index = 2
+            for item in rules.statement_items:
+                sheet.cell(row_index, 1, item.name)
+                sheet.cell(row_index, 2, item.display_order / 100)
+                row_index += 1
+            for index in range(40):
+                sheet.cell(row_index, 1, f"其中匿名明细{index + 1}")
+                sheet.cell(row_index, 2, 0.01)
+                row_index += 1
+            workbook.save(path)
+            result = parse_existing_statement(path, rules)
+            self.assertIsInstance(result, MappingQuestion)
+            self.assertIn("匹配率", str(result.sample_values[0]))
+
+    def test_zero_hit_sheet_with_project_column_is_not_statement(self) -> None:
+        # 项目列零命中 → 不当正表，通用提示，不产生"匹配率"提问
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "零命中.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["项目", "本期金额"])
+            sheet.append(["完全无关的内容", 1])
+            sheet.append(["另一个无关行", 2])
+            workbook.save(path)
+            result = parse_existing_statement(path, classified_components().rules)
+            self.assertIsInstance(result, MappingQuestion)
+            self.assertNotIn("匹配率", str(result.sample_values[0]))
 
     def test_cash_reconciliation_never_plugs_missing_fx(self) -> None:
         case = classified_components()

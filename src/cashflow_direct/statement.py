@@ -1,16 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from openpyxl import load_workbook
-
 from cashflow_direct.classification import RulePack
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
 from cashflow_direct.money import statement_amount_cent, yuan_to_cent
 from cashflow_direct.semantic_mapping import ColumnMapping, MappingQuestion
+from cashflow_direct.workbook_structure import open_workbook_robust
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,29 +157,97 @@ def _parse_statement_rows(
     )
     unit_multiplier = 10_000 if "万元" in unit_text else 1
     header_row = None
-    project_column = current_column = prior_column = None
+    project_column = None
+    header_texts: list[str] = []
     for row_index, row in enumerate(rows, 1):
         texts = [_normalize_item_name(str(value)) if value is not None else "" for value in row]
         project = next((index for index, text in enumerate(texts) if text == "项目"), None)
-        current = next(
-            (index for index, text in enumerate(texts) if "本期" in text or "本年" in text),
-            None,
-        )
-        if project is not None and current is not None:
+        if project is not None:
             header_row = row_index
             project_column = project
-            current_column = current
-            prior_column = next(
-                (index for index, text in enumerate(texts) if "上期" in text or "上年" in text),
-                None,
-            )
+            header_texts = texts
             break
-    if header_row is None or project_column is None or current_column is None:
+    if header_row is None or project_column is None:
         return None
 
     normalized_to_id = {
         _normalize_item_name(item.name): item.item_id for item in rules.statement_items
     }
+
+    def _match_item_id(normalized: str) -> str | None:
+        """匹配标准项目名；兼容"四、"等中文序数前缀（含"十一"两位序数）。"""
+        item_id = normalized_to_id.get(normalized)
+        if item_id is None:
+            item_id = normalized_to_id.get(re.sub(r"^[一二三四五六七八九十]+", "", normalized))
+        return item_id
+
+    item_rows = [
+        row for row in rows[header_row:]
+        if project_column < len(row) and row[project_column] not in (None, "")
+    ]
+    hits = sum(
+        1 for row in item_rows
+        if _match_item_id(_normalize_item_name(str(row[project_column]))) is not None
+    )
+    if not item_rows or hits == 0:
+        return None  # 项目列零命中，不是现流正表
+    if hits / len(item_rows) < 0.5:
+        return _mapping_question(
+            "statement_header",
+            f"项目列与标准现流项目匹配率过低（{hits}/{len(item_rows)}），未认定为现流正表",
+            header_row,
+            sheet_name,
+        )
+
+    prior_column = next(
+        (index for index, text in enumerate(header_texts) if "上期" in text or "上年" in text),
+        None,
+    )
+
+    def _numeric_share(column: int) -> float:
+        values = [
+            row[column] for row in item_rows
+            if column < len(row) and row[column] not in (None, "")
+        ]
+        if not values:
+            return 0.0
+        numeric = sum(
+            1 for value in values
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+        return numeric / len(values)
+
+    def _is_sequence_column(column: int) -> bool:
+        values = [
+            row[column] for row in item_rows
+            if column < len(row) and isinstance(row[column], (int, float)) and not isinstance(row[column], bool)
+        ]
+        return bool(values) and [int(value) for value in values] == list(range(1, len(values) + 1))
+
+    candidates = [
+        index
+        for index in range(len(header_texts))
+        if index != project_column
+        and index != prior_column
+        and "行次" not in header_texts[index]
+        and "序号" not in header_texts[index]
+        and _numeric_share(index) >= 0.6
+        and not _is_sequence_column(index)
+    ]
+    if not candidates:
+        return None
+    best_share = max(_numeric_share(index) for index in candidates)
+    tied = [index for index in candidates if _numeric_share(index) == best_share]
+    if len(tied) > 1:
+        preferred = [
+            index for index in tied
+            if any(word in header_texts[index] for word in ("本期", "本年", "金额"))
+        ]
+        if preferred:
+            tied = preferred
+    if len(tied) > 1:
+        return _mapping_question("statement_header", "本期金额列存在并列候选，无法确定", header_row, sheet_name)
+    current_column = tied[0]
     values: dict[str, int | None] = {}
     prior_values: dict[str, int | None] = {}
     custom_rows: list[ExistingCustomRow] = []
@@ -193,7 +260,7 @@ def _parse_statement_rows(
             continue
         name = str(raw_name).strip()
         normalized = _normalize_item_name(name)
-        item_id = normalized_to_id.get(normalized)
+        item_id = _match_item_id(normalized)
         current_value = row[current_column] if current_column < len(row) else None
         prior_value = row[prior_column] if prior_column is not None and prior_column < len(row) else None
         if item_id is not None:
@@ -201,6 +268,8 @@ def _parse_statement_rows(
             prior_values[item_id] = _amount_to_cent(prior_value, unit_multiplier)
             last_standard_id = item_id
             continue
+        if current_value in (None, ""):
+            continue  # 节标题等无金额行跳过
         last_item = rules.item_by_id.get(last_standard_id)
         if last_standard_id and (
             name.startswith("其中")
@@ -246,7 +315,7 @@ def parse_existing_statement(
     path: Path,
     rules: RulePack,
 ) -> ExistingStatementResult | MappingQuestion:
-    workbook = load_workbook(path, read_only=True, data_only=True, keep_vba=False)
+    workbook = open_workbook_robust(path)
     try:
         candidates = tuple(
             _parse_statement_rows(
@@ -267,7 +336,7 @@ def parse_existing_statement(
         if valid:
             return valid[0]
         question = next((item for item in candidates if isinstance(item, MappingQuestion)), None)
-        return question or _mapping_question("statement_header", "未找到项目和本期或本年金额列", 1)
+        return question or _mapping_question("statement_header", "未找到项目列或可用金额列", 1)
     finally:
         workbook.close()
 
