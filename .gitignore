@@ -9,3 +9,9 @@ dist/
 
 # 运行验证输出（含客户数据，不进仓库）
 运行验证*/
+
+# 过程文档与一次性脚本含客户信息，不进仓库
+docs/requirements/
+docs/reviews/
+docs/superpowers/
+scripts/export_misclass_*.py

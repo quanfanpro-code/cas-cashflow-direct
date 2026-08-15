@@ -187,7 +187,7 @@ def _voucher_non_cash_marks(entries: Sequence[NormalizedEntry]) -> tuple[str, ..
         and not any(term in entry.account_name for term in NOTE_BILL_TERMS)
         for entry in entries
     )
-    # 货币资金既可能出现在本行科目，也可能出现在对方科目（清平式对方科目侧明细），
+    # 货币资金既可能出现在本行科目，也可能出现在对方科目（对方科目侧明细），
     # 任何一侧出现现金科目都说明该凭证涉及真实现金流动，不得判为票据互抵非现金事项。
     has_cash = any(
         (entry.account_name and any(term in entry.account_name for term in CASH_TERMS))
