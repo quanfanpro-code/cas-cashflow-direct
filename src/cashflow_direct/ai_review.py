@@ -84,11 +84,12 @@ def select_ai_tasks(
             continue
         weak = component.evidence_strength == "weak" or decision.evidence_level == "low"
         anomaly = bool(component.anomalies)
+        label_conflict = decision.matched_rule_id == "LABEL-RULE-CONFLICT"
         unlabeled_ambiguous = not component.original_item_text and weak
         weak_labeled_selected = bool(component.original_item_text) and weak and (
             amount >= materiality.performance_cent or anomaly
         )
-        if unlabeled_ambiguous or weak_labeled_selected or anomaly or not decision.resolved:
+        if label_conflict or unlabeled_ambiguous or weak_labeled_selected or anomaly or not decision.resolved:
             selected.append(build_ai_task(component, decision))
     return tuple(selected)
 

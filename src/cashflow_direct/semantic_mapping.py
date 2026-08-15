@@ -168,13 +168,18 @@ def _map_band(
 def infer_dataset_mappings(
     snapshot: WorkbookSnapshot,
     overrides: Mapping[str, Mapping[str, int]] | None = None,
+    exclude_sheets: frozenset[str] = frozenset(),
 ) -> tuple[DatasetMapping | MappingQuestion, ...]:
-    """逐工作表识别数据集，避免按月或按账户分表被静默跳过。"""
+    """逐工作表识别数据集，避免按月或按账户分表被静默跳过。
+
+    exclude_sheets 用于把已确认为客户现有正表的 sheet 排除出明细推断，
+    支持"明细与正表同文件"双角色读取。
+    """
     sheets = {sheet.name: sheet for sheet in snapshot.sheets}
     results: list[DatasetMapping | MappingQuestion] = []
     completed: set[str] = set()
     for band in find_header_bands(snapshot):
-        if band.sheet_name in completed:
+        if band.sheet_name in completed or band.sheet_name in exclude_sheets:
             continue
         result = _map_band(
             sheets[band.sheet_name],

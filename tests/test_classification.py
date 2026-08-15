@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 from pathlib import Path
@@ -156,6 +156,73 @@ class ClassificationTests(unittest.TestCase):
         self.assertTrue(zero.excluded)
         self.assertTrue(internal.excluded)
         self.assertEqual("", zero.system_item_id)
+
+
+    def test_label_conflict_with_high_evidence_rule_marks_unresolved(self) -> None:
+        # 标签命中标准名称但高证据规则指向其他项目 → 冲突留痕，交 AI
+        rules = load_rule_pack(ROOT)
+        decision = classify_component(
+            cashflow_component(
+                "税收滞纳金",
+                -100,
+                ("营业外支出_罚款、滞纳金",),
+                original_item_text="支付的各项税费",
+                component_id="CFL-1",
+            ),
+            rules,
+        )
+        self.assertEqual("CFO-06", decision.system_item_id)
+        self.assertEqual("LABEL-RULE-CONFLICT", decision.matched_rule_id)
+        self.assertFalse(decision.resolved)
+        self.assertIn("CFO-07-PENALTY", decision.excluded_conflict_rule_ids)
+
+    def test_label_consistent_with_high_evidence_rule_keeps_exact(self) -> None:
+        # 规则与标签一致 → 维持 EXACT-STANDARD-LABEL
+        rules = load_rule_pack(ROOT)
+        decision = classify_component(
+            cashflow_component(
+                "销售商品收到货款",
+                100,
+                ("主营业务收入",),
+                original_item_text="销售商品、提供劳务收到的现金",
+                component_id="CFL-2",
+            ),
+            rules,
+        )
+        self.assertEqual("CFO-01", decision.system_item_id)
+        self.assertEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+        self.assertTrue(decision.resolved)
+
+    def test_label_with_only_low_evidence_rule_keeps_exact(self) -> None:
+        # 规则仅低证据命中 → 采信标签
+        rules = load_rule_pack(ROOT)
+        decision = classify_component(
+            cashflow_component(
+                "普通业务",
+                100,
+                original_item_text="收到其他与经营活动有关的现金",
+                component_id="CFL-3",
+            ),
+            rules,
+        )
+        self.assertEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+
+    def test_new_terms_classify_correctly(self) -> None:
+        # Task 2 Step 4 新增规则词条逐一核对
+        rules = load_rule_pack(ROOT)
+        cases = (
+            ("税收滞纳金", -100, ("营业外支出",), "CFO-07"),
+            ("缴纳车船税", -100, ("应交税费",), "CFO-06"),
+            ("收到结构性存款利息", 100, ("结构性存款",), "CFI-02"),
+            ("支付长期待摊费用装修款", -100, ("长期待摊费用",), "CFI-06"),
+            ("支付电费基金", -100, ("生产成本",), "CFO-04"),
+        )
+        for summary, amount, counterparts, expected in cases:
+            with self.subTest(summary=summary):
+                decision = classify_component(
+                    cashflow_component(summary, amount, counterparts), rules
+                )
+                self.assertEqual(expected, decision.system_item_id)
 
 
 if __name__ == "__main__":

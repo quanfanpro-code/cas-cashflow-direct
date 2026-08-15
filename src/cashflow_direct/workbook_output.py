@@ -45,6 +45,7 @@ class WorkbookModel:
     trace_rows: tuple[Mapping[str, object], ...]
     mapping_rows: tuple[Mapping[str, object], ...]
     overall_status: str
+    unconfirmed_statement: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +170,15 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         hard_draft = "输入存在未处理错误" in model.overall_status or (
             model.reconciliation is not None and not reconciliation_complete
         )
-        if hard_draft:
+        if model.unconfirmed_statement:
+            status.write("B3", "草稿：存在未核对的疑似正表", formats["error"])
+            status.write("A4", "提示", formats["header"])
+            status.write(
+                "B4",
+                "检测到疑似客户现有正表但未确认纳入核对，请返回确认后再生成最终结果。",
+                formats["note"],
+            )
+        elif hard_draft:
             status.write("B3", model.overall_status, formats["error"])
         elif model.review_batches or model.duplicate_groups or reconciliation_complete:
             review_end = max(2, len(model.review_batches) + 1)

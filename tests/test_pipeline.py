@@ -22,6 +22,7 @@ from tests.fixture_factory import (
     write_ai_batch_case,
     write_ai_end_to_end_case,
     write_ambiguous_money_fixture,
+    write_detail_plus_statement_fixture,
     write_end_to_end_case,
     write_existing_statement_fixture,
 )
@@ -243,6 +244,22 @@ class PipelineTests(unittest.TestCase):
             root = Path(tmp)
             inputs = write_end_to_end_case(root, include_existing_statement=True)
             preflight = run_preflight(inputs, ("1000000", "750000", "50000"), output_parent=root)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            statement_question = next(
+                question
+                for question in state["mapping_questions"]
+                if question.get("kind") == "statement"
+            )
+            confirm_mapping(
+                preflight.run_dir,
+                {
+                    f"{statement_question['file_id']}:statement:{statement_question['sheet']}": "use"
+                },
+            )
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
             classified = run_classification(preflight.run_dir)
             self.assertEqual(0, classified.ai_tasks_missing)
@@ -352,6 +369,90 @@ class PipelineTests(unittest.TestCase):
             updated = json.loads(state_path.read_text(encoding="utf-8-sig"))
             self.assertEqual([], updated["mapping_questions"])
             self.assertEqual(1, len(updated["entries"]))
+
+    def test_same_file_detail_and_statement_prompts_and_reconciles(self) -> None:
+        # 同一文件含明细+正表：不带 statement-path → 明细不丢，且产生疑似正表提问；确认 use 后生成核对报告
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "明细加正表.xlsx"
+            write_detail_plus_statement_fixture(source)
+            preflight = run_preflight(
+                [source], ("1000000", "750000", "50000"), output_parent=root
+            )
+            self.assertGreater(preflight.source_entry_count, 0)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            statement_questions = [
+                question
+                for question in state["mapping_questions"]
+                if question.get("kind") == "statement"
+            ]
+            self.assertEqual(1, len(statement_questions))
+            key = (
+                f"{statement_questions[0]['file_id']}:statement:"
+                f"{statement_questions[0]['sheet']}"
+            )
+            confirm_mapping(preflight.run_dir, {key: "use"})
+            confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            run_classification(preflight.run_dir)
+            final = finalize_run(preflight.run_dir)
+            workbook = load_workbook(final.workbook_path, data_only=False)
+            try:
+                self.assertIsNotNone(workbook["正表核对报告"]["A2"].value)
+            finally:
+                workbook.close()
+
+    def test_same_file_with_statement_path_keeps_detail(self) -> None:
+        # 同一文件带 --statement-path 指向自身 → 明细仍被读取，且正表路径已登记
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "明细加正表.xlsx"
+            write_detail_plus_statement_fixture(source)
+            preflight = run_preflight(
+                [source],
+                ("1000000", "750000", "50000"),
+                output_parent=root,
+                statement_path=source,
+            )
+            self.assertGreater(preflight.source_entry_count, 0)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            self.assertEqual(str(source), state["existing_statement_path"])
+
+    def test_unconfirmed_statement_blocks_final_usable(self) -> None:
+        # 疑似正表未纳入核对（确认 ignore）→ 不允许"最终可使用"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "明细加正表.xlsx"
+            write_detail_plus_statement_fixture(source)
+            preflight = run_preflight(
+                [source], ("1000000", "750000", "50000"), output_parent=root
+            )
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            statement_question = next(
+                question
+                for question in state["mapping_questions"]
+                if question.get("kind") == "statement"
+            )
+            key = (
+                f"{statement_question['file_id']}:statement:"
+                f"{statement_question['sheet']}"
+            )
+            confirm_mapping(preflight.run_dir, {key: "ignore"})
+            confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            run_classification(preflight.run_dir)
+            final = finalize_run(preflight.run_dir)
+            self.assertNotEqual("最终可使用", final.overall_status)
 
     def test_ai_conflict_and_adjudication_change_final_statement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

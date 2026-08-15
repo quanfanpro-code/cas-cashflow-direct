@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
@@ -135,6 +135,36 @@ class AIAndMaterialityTests(unittest.TestCase):
         self.assertNotIn("2026", first)
         self.assertNotIn("1000", first)
 
+
+    def test_label_rule_conflict_joins_ai_regardless_of_performance(self) -> None:
+        # 标签与高证据规则冲突（≥明显微小临界值）→ 入选 AI，不受 performance 门槛限制
+        from cashflow_direct.models import ClassificationDecision
+        from tests.fixture_factory import cashflow_component
+
+        component = cashflow_component("税收滞纳金", -6_000_000, ("营业外支出",),
+                                       original_item_text="支付的各项税费", component_id="CFLX")
+        decision = ClassificationDecision(
+            component_id="CFLX", system_item_id="CFO-06", system_item_name="支付的各项税费",
+            normal_direction="outflow", matched_rule_id="LABEL-RULE-CONFLICT",
+            reason="冲突", evidence_level="medium", resolved=False,
+        )
+        tasks = select_ai_tasks([component], [decision], self.materiality)
+        self.assertEqual(["CFLX"], [task.component_id for task in tasks])
+
+    def test_label_rule_conflict_below_trivial_is_not_sent(self) -> None:
+        # 冲突金额低于明显微小临界值 → 不送 AI
+        from cashflow_direct.models import ClassificationDecision
+        from tests.fixture_factory import cashflow_component
+
+        component = cashflow_component("税收滞纳金", -4_999_999, ("营业外支出",),
+                                       original_item_text="支付的各项税费", component_id="CFLY")
+        decision = ClassificationDecision(
+            component_id="CFLY", system_item_id="CFO-06", system_item_name="支付的各项税费",
+            normal_direction="outflow", matched_rule_id="LABEL-RULE-CONFLICT",
+            reason="冲突", evidence_level="medium", resolved=False,
+        )
+        tasks = select_ai_tasks([component], [decision], self.materiality)
+        self.assertEqual((), tasks)
 
 if __name__ == "__main__":
     unittest.main()

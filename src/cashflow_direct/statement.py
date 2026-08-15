@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from collections.abc import Sequence
@@ -311,34 +311,46 @@ def _parse_statement_rows(
     )
 
 
-def parse_existing_statement(
+def detect_statement_sheets(
     path: Path,
     rules: RulePack,
-) -> ExistingStatementResult | MappingQuestion:
+) -> dict[str, ExistingStatementResult | MappingQuestion | None]:
+    """逐工作表识别客户现有正表。键为工作表名，None 表示该表不是正表。
+
+    提供按工作表粒度的识别能力，供"明细与正表同文件"双角色读取使用，
+    避免一个文件只能被读成明细或正表中的单一角色。
+    """
     workbook = open_workbook_robust(path)
     try:
-        candidates = tuple(
-            _parse_statement_rows(
+        return {
+            worksheet.title: _parse_statement_rows(
                 list(worksheet.iter_rows(values_only=True)),
                 worksheet.title,
                 rules,
             )
             for worksheet in workbook.worksheets
-        )
-        valid = tuple(item for item in candidates if isinstance(item, ExistingStatementResult))
-        if len(valid) > 1:
-            names = "、".join(item.sheet_name for item in valid)
-            return _mapping_question(
-                "statement_sheet",
-                f"识别到多个现金流量表工作表：{names}",
-                1,
-            )
-        if valid:
-            return valid[0]
-        question = next((item for item in candidates if isinstance(item, MappingQuestion)), None)
-        return question or _mapping_question("statement_header", "未找到项目列或可用金额列", 1)
+        }
     finally:
         workbook.close()
+
+
+def parse_existing_statement(
+    path: Path,
+    rules: RulePack,
+) -> ExistingStatementResult | MappingQuestion:
+    candidates = tuple(detect_statement_sheets(path, rules).values())
+    valid = tuple(item for item in candidates if isinstance(item, ExistingStatementResult))
+    if len(valid) > 1:
+        names = "、".join(item.sheet_name for item in valid)
+        return _mapping_question(
+            "statement_sheet",
+            f"识别到多个现金流量表工作表：{names}",
+            1,
+        )
+    if valid:
+        return valid[0]
+    question = next((item for item in candidates if isinstance(item, MappingQuestion)), None)
+    return question or _mapping_question("statement_header", "未找到项目列或可用金额列", 1)
 
 
 def compare_statement(

@@ -4,7 +4,7 @@ import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from cashflow_direct.models import CashflowComponent, NormalizedEntry
 from cashflow_direct.money import stable_id
@@ -14,6 +14,9 @@ CASH_TERMS = ("库存现金", "银行存款", "其他货币资金", "现金等�
 RESTRICTED_TERMS = ("受限", "冻结", "保证金", "质押", "监管")
 INFLOW_ITEM_TERMS = ("收到", "收回", "取得借款", "吸收投资", "销售商品")
 OUTFLOW_ITEM_TERMS = ("支付", "购买", "购建", "偿还", "分配股利")
+# 非现金事项判定词条（保守：拿不准的不标 non_cash，宁可进 AI 复核）
+NONCASH_SUMMARY_TERMS = ("计提",)
+NOTE_BILL_TERMS = ("应收票据", "应付票据")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +168,60 @@ def _component(
         anomalies=anomalies,
         evidence_strength=evidence_strength,
     )
+
+
+def _voucher_non_cash_marks(entries: Sequence[NormalizedEntry]) -> tuple[str, ...]:
+    """按凭证判定是否非现金事项，返回新增 anomaly 标记（保守：拿不准不标）。"""
+    marks: list[str] = []
+    if entries and all(
+        any(term in entry.summary for term in NONCASH_SUMMARY_TERMS) for entry in entries
+    ):
+        marks.append("non_cash")
+    has_note = any(
+        any(term in entry.account_name for term in NOTE_BILL_TERMS) for entry in entries
+    )
+    # 票据腿必须与往来腿互抵才可能构成非现金背书抵账：
+    # 只有票据行、没有其他往来腿的凭证（如票据贴现/到期收款）保留真实现金流。
+    has_other_leg = any(
+        entry.account_name
+        and not any(term in entry.account_name for term in NOTE_BILL_TERMS)
+        for entry in entries
+    )
+    # 货币资金既可能出现在本行科目，也可能出现在对方科目（清平式对方科目侧明细），
+    # 任何一侧出现现金科目都说明该凭证涉及真实现金流动，不得判为票据互抵非现金事项。
+    has_cash = any(
+        (entry.account_name and any(term in entry.account_name for term in CASH_TERMS))
+        or (entry.counterpart_name and any(term in entry.counterpart_name for term in CASH_TERMS))
+        for entry in entries
+    )
+    if has_note and has_other_leg and not has_cash:
+        marks.append("non_cash")
+    return tuple(marks)
+
+
+def _annotate_voucher_components(
+    entries: Sequence[NormalizedEntry],
+    components: Sequence[CashflowComponent],
+) -> list[CashflowComponent]:
+    """为同一凭证的组件统一追加 non_cash / netting_suspect 标记。
+
+    netting_suspect：同凭证同时存在大额流入与流出，却全部挂在同一方向标签时，
+    标记送 AI 复核，不自动改分类。
+    """
+    extra = list(_voucher_non_cash_marks(entries))
+    directions = {1 if component.cash_delta_cent > 0 else -1 for component in components}
+    if 1 in directions and -1 in directions:
+        label_dirs = {
+            _keyword_direction(component.original_item_text)
+            for component in components
+            if component.original_item_text
+        }
+        if label_dirs and (label_dirs <= {1} or label_dirs <= {-1}):
+            extra.append("netting_suspect")
+    return [
+        replace(component, anomalies=tuple(dict.fromkeys((*component.anomalies, *extra))))
+        for component in components
+    ]
 
 
 def _build_one_sided(entry: NormalizedEntry) -> CashflowComponent:
@@ -361,9 +418,10 @@ def build_cashflow_components(
             if not cash_entries:
                 continue
             built, internal = _voucher_components(voucher_key, voucher_entries, cash_entries)
-            components.extend(built)
+            components.extend(_annotate_voucher_components(voucher_entries, built))
             excluded.extend(internal)
             continue
+        one_sided: list[CashflowComponent] = []
         for entry in voucher_entries:
             named_cash_counterpart = bool(
                 entry.counterpart_name
@@ -374,5 +432,6 @@ def build_cashflow_components(
                 and named_cash_counterpart
                 and (entry.debit_cent or entry.credit_cent)
             ):
-                components.append(_build_one_sided(entry))
+                one_sided.append(_build_one_sided(entry))
+        components.extend(_annotate_voucher_components(voucher_entries, one_sided))
     return ComponentBuildResult(tuple(components), tuple(excluded), 0)

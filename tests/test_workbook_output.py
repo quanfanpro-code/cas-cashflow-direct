@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
@@ -217,6 +217,55 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))
                 self.assertIn("现金范围与现金调节", workbook["使用说明与状态"]["B3"].value)
                 self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
+            finally:
+                workbook.close()
+
+
+    def test_trace_sheet_orders_human_columns_first_and_tags_technical(self) -> None:
+        # 人读列在前、系统项目为"名称（编号）"、四个技术列在最右且带"(技术)"
+        model = replace(
+            workbook_model(0, 0),
+            trace_rows=(
+                {
+                    "记录类型": "现金流业务组成",
+                    "摘要": "匿名业务",
+                    "现金变化": 100.0,
+                    "原现流项目": "支付其他与经营活动有关的现金",
+                    "对方科目": "普通往来科目",
+                    "系统项目": "支付其他与经营活动有关的现金（CFO-07）",
+                    "判断理由": "命中规则",
+                    "证据强度": "high",
+                    "异常": "",
+                    "方向依据": "借贷差额",
+                    "来源文件": "匿名输入.xlsx",
+                    "来源工作表": "匿名数据",
+                    "来源单元格": "A1:H1",
+                    "决策来源(技术)": "system",
+                    "命中规则(技术)": "CFO-07-FALLBACK",
+                    "业务组成编号(技术)": "C-1",
+                    "来源占用键(技术)": "E-1",
+                },
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "留痕分层.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                headers = [cell.value for cell in workbook["全量分类留痕"][1]]
+                self.assertEqual(
+                    [
+                        "记录类型", "摘要", "现金变化", "原现流项目", "对方科目", "系统项目",
+                        "判断理由", "证据强度", "异常", "方向依据", "来源文件", "来源工作表",
+                        "来源单元格", "决策来源(技术)", "命中规则(技术)", "业务组成编号(技术)",
+                        "来源占用键(技术)",
+                    ],
+                    headers,
+                )
+                self.assertEqual(
+                    "支付其他与经营活动有关的现金（CFO-07）",
+                    workbook["全量分类留痕"]["F2"].value,
+                )
             finally:
                 workbook.close()
 

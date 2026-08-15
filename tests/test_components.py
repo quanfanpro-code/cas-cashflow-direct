@@ -180,5 +180,89 @@ class ComponentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "等待现金范围确认"):
             confirm_cash_scope(proposal, {})
 
+
+    def test_accrual_summary_is_marked_non_cash_and_excluded(self) -> None:
+        # 摘要写"计提"的凭证 → non_cash anomaly → 分类 EXCLUDED
+        from pathlib import Path
+        from cashflow_direct.classification import classify_component, load_rule_pack
+
+        entries = (
+            _component_entry(1, "V1", "1002 银行存款", credit_cent=100_000, retained_side="cash", summary="计提坏账准备"),
+            _component_entry(2, "V1", "信用减值损失", debit_cent=100_000, retained_side="counterpart", summary="计提坏账准备"),
+        )
+        proposal = discover_cash_scope(entries)
+        scope = confirm_cash_scope(
+            proposal, {candidate.account_key: "include" for candidate in proposal.candidates}
+        )
+        result = build_cashflow_components(entries, scope)
+        self.assertEqual(1, len(result.components))
+        self.assertIn("non_cash", result.components[0].anomalies)
+        rules = load_rule_pack(Path(__file__).resolve().parents[1])
+        self.assertTrue(classify_component(result.components[0], rules).excluded)
+
+    def test_note_endorsement_settlement_without_cash_is_non_cash(self) -> None:
+        # 应收票据背书抵应付账款（无货币资金）→ non_cash anomaly
+        from pathlib import Path
+        from cashflow_direct.classification import classify_component, load_rule_pack
+
+        entries = (
+            _component_entry(1, "V2", "1121 应收票据", credit_cent=58_972_968_30, retained_side="counterpart", flow_amount_cent=-58_972_968_30, summary="票据背书抵应付账款"),
+            _component_entry(2, "V2", "2202 应付账款", debit_cent=58_972_968_30, retained_side="counterpart", flow_amount_cent=58_972_968_30, summary="票据背书抵应付账款"),
+        )
+        proposal = discover_cash_scope(entries)
+        scope = confirm_cash_scope(
+            proposal, {candidate.account_key: "include" for candidate in proposal.candidates}
+        )
+        result = build_cashflow_components(entries, scope)
+        self.assertTrue(result.components)
+        self.assertTrue(all("non_cash" in component.anomalies for component in result.components))
+        rules = load_rule_pack(Path(__file__).resolve().parents[1])
+        self.assertTrue(all(classify_component(component, rules).excluded for component in result.components))
+
+    def test_note_receipt_with_cash_counterpart_stays_real_cash(self) -> None:
+        # 票据贴现/到期收款：应收票据 + 银行存款对方科目 → 真实现金流，不得误标 non_cash
+        from pathlib import Path
+        from cashflow_direct.classification import classify_component, load_rule_pack
+
+        entries = (
+            _component_entry(
+                1, "V3", "1121 应收票据_银行承兑汇票",
+                credit_cent=1_000_000, flow_amount_cent=1_000_000,
+                retained_side="counterpart", counterpart_name="1002 银行存款",
+                summary="票据贴现收款",
+            ),
+        )
+        proposal = discover_cash_scope(entries)
+        scope = confirm_cash_scope(
+            proposal, {candidate.account_key: "include" for candidate in proposal.candidates}
+        )
+        result = build_cashflow_components(entries, scope)
+        self.assertEqual(1, len(result.components))
+        self.assertNotIn("non_cash", result.components[0].anomalies)
+        rules = load_rule_pack(Path(__file__).resolve().parents[1])
+        self.assertFalse(classify_component(result.components[0], rules).excluded)
+
+    def test_note_only_voucher_with_flow_label_is_not_auto_non_cash(self) -> None:
+        # 真实客户形态：票据贴现/到期收款凭证只有应收票据行、对方科目为空、带现流项目标签，
+        # 没有票据腿与往来腿互抵的证据，不得自动标 non_cash（保守：宁可进规则与 AI 复核）
+        from pathlib import Path
+        from cashflow_direct.classification import classify_component, load_rule_pack
+
+        entries = (
+            _component_entry(
+                1, "V4", "1121 应收票据_银行承兑汇票",
+                credit_cent=2_038_000_00, flow_amount_cent=2_038_000_00,
+                retained_side="counterpart", item="销售商品、提供劳务收到的现金",
+                summary="票据贴现",
+            ),
+        )
+        proposal = discover_cash_scope(entries)
+        scope = confirm_cash_scope(proposal, {})
+        result = build_cashflow_components(entries, scope)
+        self.assertEqual(1, len(result.components))
+        self.assertNotIn("non_cash", result.components[0].anomalies)
+        rules = load_rule_pack(Path(__file__).resolve().parents[1])
+        self.assertFalse(classify_component(result.components[0], rules).excluded)
+
 if __name__ == "__main__":
     unittest.main()

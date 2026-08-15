@@ -11,10 +11,15 @@ from cashflow_direct.statement import (
     ExistingStatementResult,
     aggregate_statement,
     compare_statement,
+    detect_statement_sheets,
     parse_existing_statement,
     reconcile_cash,
 )
-from tests.fixture_factory import classified_components, write_existing_statement_fixture
+from tests.fixture_factory import (
+    classified_components,
+    write_detail_plus_statement_fixture,
+    write_existing_statement_fixture,
+)
 
 
 class StatementTests(unittest.TestCase):
@@ -334,6 +339,31 @@ class StatementTests(unittest.TestCase):
             result = parse_existing_statement(path, classified_components().rules)
             self.assertIsInstance(result, MappingQuestion)
             self.assertNotIn("匹配率", str(result.sample_values[0]))
+
+    def test_detect_statement_sheets_returns_per_sheet_results(self) -> None:
+        # 明细页不是正表 → None；正表页唯一命中 → ExistingStatementResult
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "明细加正表.xlsx"
+            write_detail_plus_statement_fixture(path)
+            detected = detect_statement_sheets(path, classified_components().rules)
+            self.assertIsNone(detected.get("随机明细"))
+            self.assertIsInstance(detected.get("报表页_随机"), ExistingStatementResult)
+
+    def test_detect_statement_sheets_reports_multiple_statement_sheets(self) -> None:
+        # 多正表页 → 每个命中 sheet 都返回结果，由调用方做歧义判断
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "重复正表.xlsx"
+            write_existing_statement_fixture(path, header_row=7, with_custom_rows=False)
+            workbook = load_workbook(path)
+            duplicate = workbook.copy_worksheet(workbook.worksheets[0])
+            duplicate.title = "另一张现金流量表"
+            workbook.save(path)
+            workbook.close()
+            detected = detect_statement_sheets(path, classified_components().rules)
+            hits = [
+                item for item in detected.values() if isinstance(item, ExistingStatementResult)
+            ]
+            self.assertEqual(2, len(hits))
 
     def test_cash_reconciliation_never_plugs_missing_fx(self) -> None:
         case = classified_components()

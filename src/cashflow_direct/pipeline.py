@@ -49,6 +49,7 @@ from cashflow_direct.statement import (
     ExistingStatementResult,
     aggregate_statement,
     compare_statement,
+    detect_statement_sheets,
     parse_existing_statement,
     reconcile_cash,
 )
@@ -289,19 +290,36 @@ def run_preflight(
     designated_target = statement_path.resolve() if statement_path is not None else None
     designated_hit = False
     balance_candidates: dict[str, tuple[int, int]] = {}
+    statement_candidates: list[dict[str, object]] = []
     for registered in intake.active_files:
         for key, candidate in _read_cash_balances(registered.path).items():
             if key not in balance_candidates or candidate[0] > balance_candidates[key][0]:
                 balance_candidates[key] = candidate
-        if designated_target is not None and registered.path.resolve() == designated_target:
+        is_designated = designated_target is not None and registered.path.resolve() == designated_target
+        statement_by_sheet = detect_statement_sheets(registered.path, rules)
+        statement_hits = {
+            name: result
+            for name, result in statement_by_sheet.items()
+            if isinstance(result, ExistingStatementResult)
+        }
+        if is_designated:
             designated_hit = True
-            existing = parse_existing_statement(registered.path, rules)
-            if isinstance(existing, ExistingStatementResult):
-                existing_statement_path = str(registered.path)
-                continue
-            raise ValueError(
-                f"指定的正表文件识别失败：{registered.path.name}（{existing.sample_values[0]}）"
-            )
+            if not statement_hits:
+                question = next(
+                    (item for item in statement_by_sheet.values() if isinstance(item, MappingQuestion)),
+                    None,
+                )
+                raise ValueError(
+                    f"指定的正表文件识别失败：{registered.path.name}（{question.sample_values[0] if question is not None else '未找到项目列或可用金额列'}）"
+                )
+            if len(statement_hits) > 1:
+                raise ValueError(
+                    f"指定的正表文件识别到多个现金流量表工作表：{registered.path.name}"
+                )
+            existing_statement_path = str(registered.path)
+            exclude_sheets = frozenset(statement_hits)
+        else:
+            exclude_sheets = frozenset()
         snapshot = scan_workbook(registered.path)
         sheet_structures.extend(
             {
@@ -313,7 +331,10 @@ def run_preflight(
             }
             for sheet in snapshot.sheets
         )
-        detected = infer_dataset_mappings(snapshot)
+        detected = infer_dataset_mappings(snapshot, exclude_sheets=exclude_sheets)
+        mapped_dataset_sheets = {
+            mapping.sheet_name for mapping in detected if isinstance(mapping, DatasetMapping)
+        }
         for mapping in detected:
             if isinstance(mapping, DatasetMapping):
                 normalized = normalize_dataset(registered.path, registered.file_id, mapping)
@@ -359,36 +380,44 @@ def run_preflight(
                         "recommended": mapping.recommended.column_letter,
                     }
                 )
-        if detected:
-            continue
-        if designated_target is not None:
-            # 已指定正表文件：其余文件只按明细处理，不再自动尝试当正表
-            normalization_issues.append(
-                {
-                    "file_id": registered.file_id,
-                    "file": registered.path.name,
-                    "sheet": "",
-                    "cell": "",
-                    "kind": "提示",
-                    "message": "已指定正表文件，本文件仅按明细处理；未识别出明细数据集，已跳过",
-                }
-            )
-            continue
-        existing = parse_existing_statement(registered.path, rules)
-        if isinstance(existing, ExistingStatementResult):
-            existing_statement_path = str(registered.path)
-            continue
-        questions.append(
-            {
-                "file_id": registered.file_id,
-                "file": registered.path.name,
-                "sheet": existing.sheet_name,
-                "role": existing.role,
-                "recommended": existing.recommended.column_letter,
-                "message": existing.sample_values[0],
-                "kind": "statement",
+        if not is_designated:
+            auto_hits = {
+                name: result
+                for name, result in statement_hits.items()
+                if name not in mapped_dataset_sheets
             }
-        )
+            if len(auto_hits) == 1:
+                hit = next(iter(auto_hits.values()))
+                questions.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": hit.sheet_name,
+                        "role": "statement_sheet",
+                        "recommended": hit.sheet_name,
+                        "message": f"检测到疑似正表工作表《{hit.sheet_name}》，请确认是否作为客户现有正表核对",
+                        "kind": "statement",
+                    }
+                )
+                statement_candidates.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": hit.sheet_name,
+                    }
+                )
+            elif len(auto_hits) > 1:
+                questions.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": "",
+                        "role": "statement_sheet",
+                        "recommended": "",
+                        "message": f"识别到多个现金流量表工作表：{'、'.join(auto_hits)}",
+                        "kind": "statement",
+                    }
+                )
     if designated_target is not None and not designated_hit:
         raise ValueError(f"指定的正表文件不在已选输入中：{statement_path}")
 
@@ -420,6 +449,8 @@ def run_preflight(
         "cash_scope_proposal": asdict(proposal),
         "recommended_cash_decisions": recommended,
         "existing_statement_path": existing_statement_path,
+        "statement_candidates": statement_candidates,
+        "statement_confirmations": {},
         "cash_balances": {key: value for key, (_, value) in balance_candidates.items()},
         "normalization_issues": normalization_issues,
     }
@@ -468,13 +499,46 @@ def run_preflight(
 def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
-    if not state.get("mapping_questions"):
-        return StageResult(str(state["run_id"]), Path(run_dir), "mapping", "completed", "确认现金范围")
     confirmations = dict(state.get("mapping_confirmations", {}))
     confirmations.update(decisions)
     files_by_id = {str(item["file_id"]): Path(str(item["path"])) for item in state["files"]}
+
+    # ---- 疑似正表确认（取值 use / ignore）----
+    statement_candidates = list(state.get("statement_candidates", ()))
+    statement_confirmations = dict(state.get("statement_confirmations", {}))
+    for candidate in statement_candidates:
+        key = f"{candidate['file_id']}:statement:{candidate['sheet']}"
+        choice = confirmations.get(key)
+        if choice not in {"use", "ignore"}:
+            raise RuntimeError(f"等待疑似正表确认：{key}（取值 use 或 ignore）")
+        statement_confirmations[key] = choice
+    candidate_keys = {
+        f"{c['file_id']}:statement:{c['sheet']}" for c in statement_candidates
+    }
+    ambiguous_statements = [
+        question for question in state.get("mapping_questions", ())
+        if question.get("kind") == "statement"
+        and f"{question['file_id']}:statement:{question.get('sheet', '')}" not in candidate_keys
+    ]
+    if ambiguous_statements:
+        messages = "；".join(
+            str(question.get("message") or "存在多个现金流量表工作表")
+            for question in ambiguous_statements
+        )
+        raise RuntimeError(f"{messages}；请合并工作表或明确目标正表后重新预检")
+
+    # ---- 字段映射确认 ----
+    pending_questions = [
+        question for question in state.get("mapping_questions", ())
+        if question.get("kind") != "statement"
+    ]
+    if not pending_questions and not statement_candidates:
+        state["mapping_confirmations"] = confirmations
+        _save_state(run_dir, state)
+        return StageResult(str(state["run_id"]), Path(run_dir), "mapping", "completed", "确认现金范围")
+
     pending_by_file: dict[str, list[dict[str, object]]] = {}
-    for question in state["mapping_questions"]:
+    for question in pending_questions:
         pending_by_file.setdefault(str(question["file_id"]), []).append(question)
 
     new_questions: list[dict[str, object]] = []
@@ -485,15 +549,6 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
         (str(item["file_id"]), str(item["sheet"])) for item in state.get("mappings", ())
     }
     for file_id, questions in pending_by_file.items():
-        statement_questions = [
-            question for question in questions if question.get("kind") == "statement"
-        ]
-        if statement_questions:
-            messages = "；".join(
-                str(question.get("message") or "客户现有正表仍有无法映射的项目")
-                for question in statement_questions
-            )
-            raise RuntimeError(f"{messages}；请明确目标正表后重新预检")
         overrides_by_sheet: dict[str, dict[str, int]] = {}
         for question in questions:
             role = str(question["role"])
@@ -554,6 +609,15 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     state["normalization_issues"] = [*state.get("normalization_issues", ()), *new_issues]
     state["mapping_questions"] = new_questions
     state["mapping_confirmations"] = confirmations
+    state["statement_confirmations"] = statement_confirmations
+    use_paths = {
+        str(files_by_id[str(candidate["file_id"])])
+        for candidate in statement_candidates
+        if statement_confirmations.get(f"{candidate['file_id']}:statement:{candidate['sheet']}") == "use"
+    }
+    if len(use_paths) > 1:
+        raise RuntimeError("多个文件被确认为客户现有正表，请只保留一个")
+    state["existing_statement_path"] = next(iter(use_paths), None)
     state["cash_scope_proposal"] = asdict(proposal)
     state["recommended_cash_decisions"] = {
         candidate.account_key: candidate.system_suggestion
@@ -983,16 +1047,21 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         trace_rows_list.append(
             {
                 "记录类型": "现金流业务组成",
-                "业务组成编号": component.component_id,
                 "摘要": component.summary,
                 "现金变化": component.cash_delta_cent / 100,
                 "原现流项目": component.original_item_text,
                 "对方科目": "、".join(component.counterpart_accounts),
-                "系统项目": decision.system_item_id,
-                "命中规则": decision.matched_rule_id,
+                "系统项目": (
+                    f"{decision.system_item_name}（{decision.system_item_id}）"
+                    if decision.system_item_id
+                    else "不进入正表"
+                ),
                 "判断理由": decision.reason,
                 "证据强度": decision.evidence_level,
-                "决策来源": decision.decision_source,
+                "异常": "、".join(component.anomalies),
+                "方向依据": "、".join(
+                    dict.fromkeys(flow_direction_source(entry) for entry in source_entries)
+                ),
                 "来源文件": "、".join(
                     dict.fromkeys(
                         file_name_by_id.get(entry.source.file_id, entry.source.file_id)
@@ -1005,11 +1074,10 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "来源单元格": "、".join(
                     dict.fromkeys(entry.source.cell_range for entry in source_entries)
                 ),
-                "来源占用键": "、".join(component.source_keys),
-                "方向依据": "、".join(
-                    dict.fromkeys(flow_direction_source(entry) for entry in source_entries)
-                ),
-                "异常": "、".join(component.anomalies),
+                "决策来源(技术)": decision.decision_source,
+                "命中规则(技术)": decision.matched_rule_id,
+                "业务组成编号(技术)": component.component_id,
+                "来源占用键(技术)": "、".join(component.source_keys),
             }
         )
     for transfer in state.get("internal_transfers", ()):
@@ -1017,22 +1085,22 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         trace_rows_list.append(
             {
                 "记录类型": "内部划转排除",
-                "业务组成编号": transfer["entry_id"],
                 "摘要": "" if entry is None else entry.summary,
                 "现金变化": int(transfer["matched_cent"]) / 100,
                 "原现流项目": "" if entry is None else entry.original_flow_item,
                 "对方科目": "" if entry is None else entry.counterpart_name,
                 "系统项目": "不进入正表",
-                "命中规则": "INTERNAL-TRANSFER",
                 "判断理由": "现金及现金等价物内部划转",
                 "证据强度": "high",
-                "决策来源": "system",
+                "异常": "内部划转已排除",
+                "方向依据": "内部划转",
                 "来源文件": "" if entry is None else file_name_by_id.get(entry.source.file_id, entry.source.file_id),
                 "来源工作表": "" if entry is None else entry.source.sheet_name,
                 "来源单元格": "" if entry is None else entry.source.cell_range,
-                "来源占用键": transfer["entry_id"],
-                "方向依据": "内部划转",
-                "异常": "内部划转已排除",
+                "决策来源(技术)": "system",
+                "命中规则(技术)": "INTERNAL-TRANSFER",
+                "业务组成编号(技术)": transfer["entry_id"],
+                "来源占用键(技术)": transfer["entry_id"],
             }
         )
     trace_rows = tuple(trace_rows_list)
@@ -1053,7 +1121,15 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         }
         for item in state.get("normalization_issues", ())
     )
-    if any(item.get("kind") == "错误" for item in state.get("normalization_issues", ())):
+    statement_unconfirmed = any(
+        state.get("statement_confirmations", {}).get(
+            f"{item['file_id']}:statement:{item['sheet']}"
+        ) != "use"
+        for item in state.get("statement_candidates", ())
+    )
+    if statement_unconfirmed:
+        status = "草稿：存在未核对的疑似正表"
+    elif any(item.get("kind") == "错误" for item in state.get("normalization_issues", ())):
         status = "草稿：输入存在未处理错误"
     elif reconciliation.status != "现金调节完成":
         status = "草稿：现金调节未完成或存在差异"
@@ -1083,6 +1159,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         trace_rows=trace_rows,
         mapping_rows=mapping_rows,
         overall_status=status,
+        unconfirmed_statement=statement_unconfirmed,
     )
     sequence = 1
     while True:

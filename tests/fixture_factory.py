@@ -645,3 +645,36 @@ def write_ai_batch_case(root: Path, count: int = 26) -> Path:
     balance.append(["汇率变动对现金及现金等价物的影响", 0])
     workbook.save(path)
     return path
+
+
+def write_detail_plus_statement_fixture(path: Path) -> None:
+    """合成"明细数据集 + 客户现有正表"同属一个工作簿的情景，不包含真实客户信息。"""
+    from cashflow_direct.classification import load_rule_pack
+
+    root = Path(__file__).resolve().parents[1]
+    rules = load_rule_pack(root)
+    workbook = Workbook()
+    detail = workbook.active
+    detail.title = "随机明细"
+    detail.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "现流项目"])
+    detail.append(["2026-01-01", "记-1", "匿名销售收款", "1002 银行存款", 100, None, "销售商品收到的现金"])
+    detail.append(["2026-01-01", "记-1", "匿名销售收款", "主营业务收入", None, 100, "销售商品收到的现金"])
+    detail.append(["2026-01-02", "记-2", "匿名采购付款", "原材料", 40, None, "购买商品支付的现金"])
+    detail.append(["2026-01-02", "记-2", "匿名采购付款", "1002 银行存款", None, 40, "购买商品支付的现金"])
+    statement = workbook.create_sheet("报表页_随机")
+    statement.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+    statement.cell(1, 1, "现金流量表")
+    statement.cell(2, 1, "金额单位：万元")
+    header_row = 7
+    for column, value in enumerate(["项目", "行次", "本期金额", "上期金额"], 1):
+        statement.cell(header_row, column, value)
+    row = header_row + 1
+    for item in rules.statement_items:
+        current = 0 if item.item_id == "CFO-02" else item.display_order / 100
+        prior = None if item.item_id == "CFO-02" else item.display_order / 200
+        statement.cell(row, 1, item.name)
+        statement.cell(row, 2, item.display_order)
+        statement.cell(row, 3, current)
+        statement.cell(row, 4, prior)
+        row += 1
+    workbook.save(path)

@@ -130,7 +130,29 @@ def classify_component(
         ),
         None,
     )
+    matches = [rule for rule in rules.rules if _rule_matches(rule, component)]
+    if not matches:
+        raise ValueError(f"组成 {component.component_id} 未取得唯一系统首选")
+    chosen = matches[0]
     if exact_item is not None:
+        # 标签命中标准名称不再直接放行：高证据规则与标签冲突时留痕并交 AI 复核。
+        high_conflicts = [
+            rule for rule in matches
+            if rule.evidence_level == "high" and rule.item_id != exact_item.item_id
+        ]
+        if high_conflicts:
+            top = high_conflicts[0]
+            return ClassificationDecision(
+                component_id=component.component_id,
+                system_item_id=exact_item.item_id,
+                system_item_name=exact_item.name,
+                normal_direction=exact_item.normal_direction,
+                matched_rule_id="LABEL-RULE-CONFLICT",
+                reason=f"原标签为{exact_item.name}，规则{top.rule_id}高证据指向{top.item_id}",
+                evidence_level="medium",
+                resolved=False,
+                excluded_conflict_rule_ids=tuple(rule.rule_id for rule in high_conflicts),
+            )
         return ClassificationDecision(
             component_id=component.component_id,
             system_item_id=exact_item.item_id,
@@ -141,10 +163,6 @@ def classify_component(
             evidence_level="high",
         )
 
-    matches = [rule for rule in rules.rules if _rule_matches(rule, component)]
-    if not matches:
-        raise ValueError(f"组成 {component.component_id} 未取得唯一系统首选")
-    chosen = matches[0]
     item = rules.item_by_id[chosen.item_id]
     return ClassificationDecision(
         component_id=component.component_id,
