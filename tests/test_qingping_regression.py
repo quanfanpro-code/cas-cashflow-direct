@@ -58,7 +58,7 @@ class QingpingRegressionTests(unittest.TestCase):
             )
             confirm_cash_scope(preflight.run_dir, {})
             classified = run_classification(preflight.run_dir)
-            self.assertEqual(1, classified.ai_tasks_missing)
+            self.assertEqual(3, classified.ai_tasks_missing)
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
             self.assertEqual("相符", state["rough_reconciliation"]["status"])

@@ -61,7 +61,12 @@ class WorkbookOutputTests(unittest.TestCase):
             workbook = load_workbook(path, data_only=False, keep_links=True)
             try:
                 self.assertEqual(EXPECTED_SHEETS, workbook.sheetnames)
-                self.assertTrue(all(sheet.sheet_state == "visible" for sheet in workbook.worksheets))
+                hidden = {
+                    sheet.title
+                    for sheet in workbook.worksheets
+                    if sheet.sheet_state == "hidden"
+                }
+                self.assertEqual({"AI复核记录", "输入识别与字段映射"}, hidden)
                 self.assertEqual([], workbook._external_links)
             finally:
                 workbook.close()
@@ -99,9 +104,11 @@ class WorkbookOutputTests(unittest.TestCase):
         self.assertEqual(-10_000, adjustments["CFO-07"])
         self.assertEqual(10_000, adjustments["CFI-09"])
         self.assertEqual(-20_000, adjustments["CFO-03"])
-        formula = manual_adjustment_formula("CFO-07", 2, 2)
+        formula = manual_adjustment_formula("支付其他与经营活动有关的现金", 2, 2)
         self.assertIn("重要待复核事项", formula)
         self.assertIn("疑似重复事项", formula)
+        self.assertIn("支付其他与经营活动有关的现金", formula)
+        self.assertNotIn("CFO-07", formula)
 
     def test_invalid_pasted_review_text_is_neutral_and_cannot_complete_status(self) -> None:
         model = workbook_model(review_batches=1, duplicate_groups=0)
@@ -173,7 +180,8 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertFalse(review["C2"].protection.locked)
                 validation = review.data_validations.dataValidation[0].formula1
                 self.assertIn("认可自动判断", validation)
-                self.assertIn("CFI-09", validation)
+                self.assertIn("支付其他与投资活动有关的现金", validation)
+                self.assertNotIn("CFI-09", validation)
                 self.assertNotIn("CFO-01", validation)
                 self.assertTrue(review.protection.sheet)
                 self.assertTrue(workbook["现金流量表正表"].protection.sheet)
@@ -215,16 +223,27 @@ class WorkbookOutputTests(unittest.TestCase):
                 )
                 self.assertIn("现金流量表正表", cash_sheet.cell(net_row, 3).value)
                 self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))
+                self.assertIn("ROUND", cash_sheet.cell(difference_row, 3).value)
+                self.assertIn("ROUND", workbook["正表核对报告"]["F2"].value)
                 self.assertIn("现金范围与现金流量表与货币资金变动的勾稽核对", workbook["使用说明与状态"]["B3"].value)
                 self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
             finally:
                 workbook.close()
 
 
-    def test_trace_sheet_orders_human_columns_first_and_tags_technical(self) -> None:
-        # 人读列在前、系统项目为"名称（编号）"、四个技术列在最右且带"(技术)"
+    def test_human_sheets_show_names_and_hide_machine_columns(self) -> None:
         model = replace(
-            workbook_model(0, 0),
+            workbook_model(1, 1),
+            ai_records=(
+                {
+                    "阶段": "首次复核",
+                    "task_id": "TASK-1",
+                    "component_id": "COMP-1",
+                    "item_id": "CFO-03",
+                    "reason": "AI 与自动判断一致",
+                    "confidence": "high",
+                },
+            ),
             trace_rows=(
                 {
                     "记录类型": "现金流业务组成",
@@ -232,7 +251,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     "现金变化": 100.0,
                     "原现流项目": "支付其他与经营活动有关的现金",
                     "对方科目": "普通往来科目",
-                    "系统项目": "支付其他与经营活动有关的现金（CFO-07）",
+                    "自动判定现流项目": "支付其他与经营活动有关的现金",
                     "判断理由": "命中规则",
                     "证据强度": "high",
                     "异常": "",
@@ -255,7 +274,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 headers = [cell.value for cell in workbook["全量分类留痕"][1]]
                 self.assertEqual(
                     [
-                        "记录类型", "摘要", "现金变化", "原现流项目", "对方科目", "系统项目",
+                        "记录类型", "摘要", "现金变化", "原现流项目", "对方科目", "自动判定现流项目",
                         "判断理由", "证据强度", "异常", "方向依据", "来源文件", "来源工作表",
                         "来源单元格", "决策来源(技术)", "命中规则(技术)", "业务组成编号(技术)",
                         "来源占用键(技术)",
@@ -263,9 +282,59 @@ class WorkbookOutputTests(unittest.TestCase):
                     headers,
                 )
                 self.assertEqual(
-                    "支付其他与经营活动有关的现金（CFO-07）",
+                    "支付其他与经营活动有关的现金",
                     workbook["全量分类留痕"]["F2"].value,
                 )
+                trace = workbook["全量分类留痕"]
+                self.assertFalse(trace.column_dimensions["N"].hidden)
+                for column_index in (15, 16, 17):
+                    self.assertTrue(
+                        any(
+                            dimension.hidden
+                            and dimension.min <= column_index <= dimension.max
+                            for dimension in trace.column_dimensions.values()
+                        )
+                    )
+
+                review = workbook["重要待复核事项"]
+                self.assertEqual("支付其他与经营活动有关的现金", review["B2"].value)
+                self.assertTrue(review.column_dimensions["A"].hidden)
+                self.assertTrue(review.column_dimensions["L"].hidden)
+                self.assertNotIn("OR(FALSE)", review["J2"].value)
+
+                duplicate = workbook["疑似重复事项"]
+                self.assertEqual("收到其他与经营活动有关的现金", duplicate["B2"].value)
+
+                ai_sheet = workbook["AI复核记录"]
+                ai_headers = [cell.value for cell in ai_sheet[1]]
+                self.assertIn("现流项目", ai_headers)
+                item_column = ai_headers.index("现流项目") + 1
+                self.assertEqual(
+                    "收到其他与经营活动有关的现金",
+                    ai_sheet.cell(2, item_column).value,
+                )
+            finally:
+                workbook.close()
+
+    def test_comparison_uses_full_project_name_and_hides_support_column(self) -> None:
+        model = workbook_model(0, 0)
+        existing = ExistingStatementResult(
+            values=dict(model.statement.values),
+            prior_values=dict(model.statement.prior_values),
+            standardized_values=dict(model.statement.values),
+            custom_rows=(),
+            unit_multiplier=1,
+        )
+        model = replace(model, comparison=compare_statement(existing, model.statement))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "人类可读核对报告.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                sheet = workbook["正表核对报告"]
+                self.assertEqual("项目", sheet["A1"].value)
+                self.assertEqual(model.rules.statement_items[0].name, sheet["A2"].value)
+                self.assertTrue(sheet.column_dimensions["G"].hidden)
             finally:
                 workbook.close()
 

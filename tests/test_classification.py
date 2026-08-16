@@ -28,7 +28,7 @@ class ClassificationTests(unittest.TestCase):
         }
         self.assertEqual(expected_leaf_ids, {item.item_id for item in rules.statement_items if item.is_leaf})
 
-    def test_each_exact_standard_leaf_label_has_priority_over_keyword_rules(self) -> None:
+    def test_each_exact_standard_leaf_label_can_be_used_as_a_low_evidence_fallback(self) -> None:
         rules = load_rule_pack(ROOT)
         for item in (item for item in rules.statement_items if item.is_leaf):
             amount = 100 if item.normal_direction == "inflow" else -100
@@ -41,7 +41,8 @@ class ClassificationTests(unittest.TestCase):
             with self.subTest(item_id=item.item_id):
                 decision = classify_component(component, rules)
                 self.assertEqual(item.item_id, decision.system_item_id)
-                self.assertEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+                self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
+                self.assertEqual("low", decision.evidence_level)
 
     def test_exact_standard_label_does_not_ignore_meaningful_words(self) -> None:
         rules = load_rule_pack(ROOT)
@@ -57,6 +58,100 @@ class ClassificationTests(unittest.TestCase):
             rules,
         )
         self.assertNotEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+
+    def test_standard_original_label_is_only_a_low_evidence_fallback(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "普通业务",
+                -100,
+                ("普通科目",),
+                original_item_text="支付的各项税费",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-06", decision.system_item_id)
+        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
+        self.assertEqual("low", decision.evidence_level)
+        self.assertIn("保底分类", decision.reason)
+        self.assertNotIn("完全一致", decision.reason)
+
+    def test_high_business_evidence_beats_a_standard_but_wrong_original_label(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "税收滞纳金",
+                -100,
+                ("营业外支出_罚款、滞纳金",),
+                original_item_text="支付的各项税费",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("LABEL-BUSINESS-HIGH-CONFLICT", decision.matched_rule_id)
+        self.assertIn("滞纳金", decision.reason)
+        self.assertIn("原标签", decision.reason)
+
+    def test_business_reason_stays_primary_when_original_label_agrees(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "销售商品收到货款",
+                100,
+                ("主营业务收入",),
+                original_item_text="销售商品、提供劳务收到的现金",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-01", decision.system_item_id)
+        self.assertEqual("CFO-01-SALES", decision.matched_rule_id)
+        self.assertEqual("high", decision.evidence_level)
+        self.assertIn("销售商品", decision.reason)
+        self.assertIn("主营业务收入", decision.reason)
+        self.assertIn("原标签一致，仅作补充", decision.reason)
+        self.assertNotIn("CFO-01-SALES", decision.reason)
+
+    def test_unlabeled_business_gap_uses_a_readable_direction_fallback(self) -> None:
+        decision = classify_component(
+            cashflow_component("普通业务", -100, ("普通科目",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("CFO-07-FALLBACK", decision.matched_rule_id)
+        self.assertEqual("low", decision.evidence_level)
+        self.assertIn("现金为流出", decision.reason)
+        self.assertIn("证据较弱", decision.reason)
+
+    def test_different_high_business_rules_are_reported_as_a_conflict(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "购买机器设备并支付股权投资款",
+                -100,
+                ("固定资产", "长期股权投资"),
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-06", decision.system_item_id)
+        self.assertEqual("BUSINESS-RULE-CONFLICT", decision.matched_rule_id)
+        self.assertIn("购建固定资产、无形资产和其他长期资产支付的现金", decision.reason)
+        self.assertIn("投资支付的现金", decision.reason)
+
+    def test_medium_business_evidence_beats_the_original_label_without_becoming_high(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "支付保证金",
+                -100,
+                ("其他应收款",),
+                original_item_text="支付其他与投资活动有关的现金",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("LABEL-BUSINESS-MEDIUM-CONFLICT", decision.matched_rule_id)
+        self.assertEqual("medium", decision.evidence_level)
 
     def test_ordinary_current_account_defaults_to_other_operating_cash(self) -> None:
         rules = load_rule_pack(ROOT)
@@ -158,8 +253,8 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("", zero.system_item_id)
 
 
-    def test_label_conflict_with_high_evidence_rule_marks_unresolved(self) -> None:
-        # 标签命中标准名称但高证据规则指向其他项目 → 冲突留痕，交 AI
+    def test_label_conflict_with_high_evidence_rule_uses_the_business_candidate(self) -> None:
+        # 原标签与高证据业务规则冲突时，业务项目是自动候选，标签只作备选。
         rules = load_rule_pack(ROOT)
         decision = classify_component(
             cashflow_component(
@@ -171,10 +266,10 @@ class ClassificationTests(unittest.TestCase):
             ),
             rules,
         )
-        self.assertEqual("CFO-06", decision.system_item_id)
-        self.assertEqual("LABEL-RULE-CONFLICT", decision.matched_rule_id)
-        self.assertFalse(decision.resolved)
-        self.assertIn("CFO-07-PENALTY", decision.excluded_conflict_rule_ids)
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("LABEL-BUSINESS-HIGH-CONFLICT", decision.matched_rule_id)
+        self.assertTrue(decision.resolved)
+        self.assertIn("原标签", decision.reason)
 
     def test_label_consistent_with_high_evidence_rule_keeps_exact(self) -> None:
         # 规则与标签一致 → 维持 EXACT-STANDARD-LABEL
@@ -190,11 +285,11 @@ class ClassificationTests(unittest.TestCase):
             rules,
         )
         self.assertEqual("CFO-01", decision.system_item_id)
-        self.assertEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+        self.assertEqual("CFO-01-SALES", decision.matched_rule_id)
         self.assertTrue(decision.resolved)
+        self.assertIn("原标签一致，仅作补充", decision.reason)
 
-    def test_label_with_only_low_evidence_rule_keeps_exact(self) -> None:
-        # 规则仅低证据命中 → 采信标签
+    def test_label_with_no_business_evidence_is_a_low_evidence_fallback(self) -> None:
         rules = load_rule_pack(ROOT)
         decision = classify_component(
             cashflow_component(
@@ -205,7 +300,8 @@ class ClassificationTests(unittest.TestCase):
             ),
             rules,
         )
-        self.assertEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
+        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
+        self.assertEqual("low", decision.evidence_level)
 
     def test_new_terms_classify_correctly(self) -> None:
         # Task 2 Step 4 新增规则词条逐一核对
@@ -223,6 +319,72 @@ class ClassificationTests(unittest.TestCase):
                     cashflow_component(summary, amount, counterparts), rules
                 )
                 self.assertEqual(expected, decision.system_item_id)
+
+    def test_accounts_payable_alone_is_only_medium_purchase_evidence(self) -> None:
+        decision = classify_component(
+            cashflow_component("支付服务费", -100, ("应付账款_财务",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-04", decision.system_item_id)
+        self.assertEqual("medium", decision.evidence_level)
+
+    def test_input_vat_does_not_turn_a_purchase_payment_into_tax_payment(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "采购设备进项税额",
+                -100,
+                ("应交税费_应交增值税_进项税额",),
+                original_item_text="购建固定资产、无形资产和其他长期资产支付的现金",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-06", decision.system_item_id)
+        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
+        self.assertEqual("low", decision.evidence_level)
+
+    def test_loan_interest_expense_is_not_treated_as_principal_repayment(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "偿还银行贷款利息",
+                -100,
+                ("财务费用_利息支出_长期借款利息",),
+                original_item_text="分配股利、利润或偿付利息支付的现金",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFF-05", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_fixed_asset_clearing_does_not_mean_cash_was_used_to_build_an_asset(self) -> None:
+        decision = classify_component(
+            cashflow_component(
+                "地下电动铲运机评估费",
+                -100,
+                ("固定资产清理",),
+                original_item_text="处置固定资产、无形资产和其他长期资产收回的现金净额",
+            ),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-03", decision.system_item_id)
+        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
+
+    def test_common_sales_collection_and_advance_refund_have_business_rules(self) -> None:
+        rules = load_rule_pack(ROOT)
+        receipt = classify_component(
+            cashflow_component("销售收款", 100, ("合同负债_业务",)), rules
+        )
+        refund = classify_component(
+            cashflow_component("预收退款", -100, ("合同负债_业务",)), rules
+        )
+
+        self.assertEqual("CFO-01", receipt.system_item_id)
+        self.assertEqual("high", receipt.evidence_level)
+        self.assertEqual("CFO-01", refund.system_item_id)
+        self.assertEqual("high", refund.evidence_level)
 
 
 if __name__ == "__main__":

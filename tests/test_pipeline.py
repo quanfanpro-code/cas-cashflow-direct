@@ -480,6 +480,11 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("task_id", request_path.read_text(encoding="utf-8-sig"))
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            initial_decision = state["decisions"][0]
+            self.assertEqual("CFO-03", initial_decision["system_item_id"])
+            self.assertIn("摘要包含", initial_decision["reason"])
+            self.assertNotIn("CFO-03-CURRENT", initial_decision["reason"])
+            self.assertNotIn("完全一致", initial_decision["reason"])
             task = state["ai_tasks"][0]
             first_result = root / "AI首次结果.jsonl"
             first_result.write_text(
@@ -533,7 +538,15 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(3, ai_sheet.max_row)
                 self.assertIn("阶段", [cell.value for cell in ai_sheet[1]])
                 trace_headers = [cell.value for cell in workbook["全量分类留痕"][1]]
-                for header in ("原现流项目", "对方科目", "证据强度", "来源文件", "来源工作表", "来源单元格"):
+                for header in (
+                    "原现流项目",
+                    "对方科目",
+                    "自动判定现流项目",
+                    "证据强度",
+                    "来源文件",
+                    "来源工作表",
+                    "来源单元格",
+                ):
                     self.assertIn(header, trace_headers)
             finally:
                 workbook.close()
@@ -598,7 +611,10 @@ class PipelineTests(unittest.TestCase):
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
                 self.assertIsNone(workbook["重要待复核事项"]["C2"].value)
-                self.assertEqual("CFO-03", workbook["重要待复核事项"]["B2"].value)
+                self.assertEqual(
+                    "收到其他与经营活动有关的现金",
+                    workbook["重要待复核事项"]["B2"].value,
+                )
                 self.assertIn(
                     "匿名弱证据明细.xlsx",
                     workbook["重要待复核事项"]["O2"].value,

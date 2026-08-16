@@ -32,6 +32,11 @@ def build_review_batches(
             continue
         component_ids = tuple(item.component_id for item in items)
         alternatives = tuple(sorted(items[0].alternative_item_ids))
+        if not alternatives:
+            raise ValueError(
+                "重大待复核事项没有可供人工选择的备选现流项目："
+                + "、".join(component_ids)
+            )
         batches.append(
             ReviewBatch(
                 batch_id=stable_id("REV", *key, *component_ids),

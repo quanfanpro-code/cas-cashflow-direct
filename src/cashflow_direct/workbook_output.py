@@ -55,16 +55,16 @@ class WorkbookValidation:
 
 
 def manual_adjustment_formula(
-    item_id: str,
+    item_name: str,
     review_last_row: int,
     duplicate_last_row: int,
 ) -> str:
     review_end = max(2, review_last_row)
     duplicate_end = max(2, duplicate_last_row)
     return (
-        f'=SUMIFS(\'重要待复核事项\'!$G$2:$G${review_end},\'重要待复核事项\'!$B$2:$B${review_end},"{item_id}")'
-        f'+SUMIFS(\'重要待复核事项\'!$H$2:$H${review_end},\'重要待复核事项\'!$C$2:$C${review_end},"{item_id}")'
-        f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_id}")'
+        f'=SUMIFS(\'重要待复核事项\'!$G$2:$G${review_end},\'重要待复核事项\'!$B$2:$B${review_end},"{item_name}")'
+        f'+SUMIFS(\'重要待复核事项\'!$H$2:$H${review_end},\'重要待复核事项\'!$C$2:$C${review_end},"{item_name}")'
+        f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_name}")'
     )
 
 
@@ -149,11 +149,16 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         raise FileExistsError(f"输出文件已存在，不会覆盖：{target}")
     if len(model.trace_rows) > 100_000:
         raise ValueError("全量分类留痕超过本版本 100,000 行验收范围")
+    if any(not batch.alternative_item_codes for batch in model.review_batches):
+        raise ValueError("重要待复核事项存在没有备选现流项目的记录")
     target.parent.mkdir(parents=True, exist_ok=True)
     workbook = xlsxwriter.Workbook(str(target))
     workbook.set_calc_mode("auto")
     formats = _formats(workbook)
     sheets = {name: workbook.add_worksheet(name) for name in SHEET_NAMES}
+    item_name_by_id = {
+        item.item_id: item.name for item in model.rules.statement_items
+    }
     try:
         status = sheets["使用说明与状态"]
         status.set_default_row(18)
@@ -246,8 +251,13 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             review.write(0, column, header, formats["header"])
         if model.review_batches:
             for row_index, batch in enumerate(model.review_batches, 1):
+                proposed_name = item_name_by_id[batch.proposed_item_code]
+                alternative_names = tuple(
+                    item_name_by_id[item_id]
+                    for item_id in batch.alternative_item_codes
+                )
                 review.write(row_index, 0, batch.batch_id, formats["text"])
-                review.write(row_index, 1, batch.proposed_item_code, formats["text"])
+                review.write(row_index, 1, proposed_name, formats["text"])
                 review.write_blank(row_index, 2, None, formats["input"])
                 review.write_number(row_index, 3, batch.worst_case_impact_cent / 100, formats["money"])
                 review.write_number(
@@ -264,8 +274,8 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 )
                 excel_row = row_index + 1
                 valid_choices = ",".join(
-                    f'C{excel_row}="{item_id}"' for item_id in batch.alternative_item_codes
-                ) or "FALSE"
+                    f'C{excel_row}="{item_name}"' for item_name in alternative_names
+                )
                 review.write_formula(
                     row_index,
                     6,
@@ -274,11 +284,13 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     0,
                 )
                 target_formula = "0"
-                for alternative in reversed(batch.alternative_item_codes):
+                for alternative, alternative_name in reversed(
+                    tuple(zip(batch.alternative_item_codes, alternative_names, strict=True))
+                ):
                     direction = model.rules.item_by_id[alternative].normal_direction
                     amount = f'F{excel_row}' if direction == "inflow" else f'-F{excel_row}'
                     target_formula = (
-                        f'IF(C{excel_row}="{alternative}",{amount},{target_formula})'
+                        f'IF(C{excel_row}="{alternative_name}",{amount},{target_formula})'
                     )
                 review.write_formula(
                     row_index,
@@ -307,18 +319,20 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     2,
                     {
                         "validate": "list",
-                        "source": ["认可自动判断", *batch.alternative_item_codes],
+                        "source": ["认可自动判断", *alternative_names],
                     },
                 )
             review.autofilter(0, 0, len(model.review_batches), len(review_headers) - 1)
         else:
             review.write(1, 0, "本期无重大剩余不确定事项，无需人工复核。", formats["note"])
-        review.set_column("A:C", 18)
+        review.set_column("A:A", 18, None, {"hidden": True})
+        review.set_column("B:C", 36)
         review.set_column("D:H", 16)
         review.set_column("I:I", 46)
         review.set_column("J:J", 16)
         review.set_column("K:K", 12)
-        review.set_column("L:O", 32)
+        review.set_column("L:L", 32, None, {"hidden": True})
+        review.set_column("M:O", 32)
         _configure_sheet(review, len(review_headers), len(model.review_batches) + 1)
         review.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
@@ -338,7 +352,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         if model.duplicate_groups:
             for row_index, group in enumerate(model.duplicate_groups, 1):
                 duplicate.write(row_index, 0, group.group_id, formats["text"])
-                duplicate.write(row_index, 1, group.item_id, formats["text"])
+                duplicate.write(
+                    row_index,
+                    1,
+                    item_name_by_id[group.item_id],
+                    formats["text"],
+                )
                 duplicate.write_blank(row_index, 2, None, formats["input"])
                 duplicate.write_number(row_index, 3, group.worst_case_impact_cent / 100, formats["money"])
                 duplicate.write_number(
@@ -400,7 +419,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 main.write_formula(
                     row,
                     4,
-                    manual_adjustment_formula(item.item_id, review_last, duplicate_last),
+                    manual_adjustment_formula(item.name, review_last, duplicate_last),
                     formats["money"],
                     0,
                 )
@@ -433,7 +452,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
 
         comparison_rows = () if model.comparison is None else tuple(
             {
-                "项目编号": row.item_id,
+                "项目": item_name_by_id[row.item_id],
                 "客户金额": None if row.existing_cent is None else row.existing_cent / 100,
                 "自动基线": row.computed_cent / 100,
                 "人工调整": row.manual_adjustment_cent / 100,
@@ -445,12 +464,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         )
         comparison_sheet = sheets["正表核对报告"]
         if comparison_rows:
-            comparison_headers = ("项目编号", "客户金额", "自动基线", "人工调整", "最终金额", "差异", "支持组成")
+            comparison_headers = ("项目", "客户金额", "自动基线", "人工调整", "最终金额", "差异", "支持组成")
             for column, header in enumerate(comparison_headers):
                 comparison_sheet.write(0, column, header, formats["header"])
             for row_index, row in enumerate(comparison_rows, 1):
                 main_row = row_index + 3
-                comparison_sheet.write(row_index, 0, row["项目编号"], formats["text"])
+                comparison_sheet.write(row_index, 0, row["项目"], formats["text"])
                 if row["客户金额"] is None:
                     comparison_sheet.write_blank(row_index, 1, None, formats["money"])
                 else:
@@ -458,17 +477,40 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 comparison_sheet.write_formula(row_index, 2, f"='现金流量表正表'!D{main_row}", formats["money"], row["自动基线"])
                 comparison_sheet.write_formula(row_index, 3, f"='现金流量表正表'!E{main_row}", formats["money"], row["人工调整"])
                 comparison_sheet.write_formula(row_index, 4, f"='现金流量表正表'!F{main_row}", formats["money"], row["最终金额"])
-                comparison_sheet.write_formula(row_index, 5, f"=IF(B{row_index + 1}=\"\",\"\",E{row_index + 1}-B{row_index + 1})", formats["money"], row["差异"])
+                comparison_sheet.write_formula(
+                    row_index,
+                    5,
+                    f'=IF(B{row_index + 1}="","",ROUND(E{row_index + 1}-B{row_index + 1},2))',
+                    formats["money"],
+                    row["差异"],
+                )
                 comparison_sheet.write(row_index, 6, row["支持组成"], formats["text"])
             comparison_sheet.autofilter(0, 0, len(comparison_rows), len(comparison_headers) - 1)
-            comparison_sheet.set_column("A:A", 16)
+            comparison_sheet.set_column("A:A", 48)
             comparison_sheet.set_column("B:F", 18)
-            comparison_sheet.set_column("G:G", 40)
+            comparison_sheet.set_column("G:G", 40, None, {"hidden": True})
             _configure_sheet(comparison_sheet, len(comparison_headers), len(comparison_rows) + 1)
             comparison_sheet.protect("", {"autofilter": True, "sort": True})
         else:
             _write_dict_rows(comparison_sheet, (), formats, "本次为编制任务，未提供客户现有正表。")
-        _write_dict_rows(sheets["AI复核记录"], model.ai_records, formats, "本期没有需要 AI 复核的事项。")
+        ai_display_rows = tuple(
+            {
+                ("现流项目" if key == "item_id" else key): (
+                    item_name_by_id.get(str(value), value)
+                    if key == "item_id"
+                    else value
+                )
+                for key, value in row.items()
+            }
+            for row in model.ai_records
+        )
+        _write_dict_rows(
+            sheets["AI复核记录"],
+            ai_display_rows,
+            formats,
+            "本期没有需要 AI 复核的事项。",
+        )
+        sheets["AI复核记录"].hide()
 
         cash_rows = list(model.cash_scope_rows)
         if model.reconciliation is not None:
@@ -503,7 +545,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             cash_sheet.write_formula(
                 difference_row - 1,
                 2,
-                f'=C{closing_row}-C{opening_row}-C{net_row}',
+                f'=ROUND(C{closing_row}-C{opening_row}-C{net_row},2)',
                 formats["money"],
                 model.reconciliation.difference_cent / 100,
             )
@@ -515,7 +557,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 model.reconciliation.status,
             )
         _write_dict_rows(sheets["全量分类留痕"], model.trace_rows, formats, "没有现金流业务组成。")
+        for column in ("O:O", "P:P", "Q:Q"):
+            sheets["全量分类留痕"].set_column(
+                column, 20, None, {"hidden": True}
+            )
         _write_dict_rows(sheets["输入识别与字段映射"], model.mapping_rows, formats, "没有字段映射记录。")
+        sheets["输入识别与字段映射"].hide()
     finally:
         workbook.close()
     return target
@@ -527,8 +574,13 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
     try:
         if tuple(workbook.sheetnames) != SHEET_NAMES:
             errors.append("工作表名称或顺序不正确")
-        if any(sheet.sheet_state != "visible" for sheet in workbook.worksheets):
-            errors.append("存在隐藏的关键工作表")
+        hidden_sheets = {
+            sheet.title
+            for sheet in workbook.worksheets
+            if sheet.sheet_state == "hidden"
+        }
+        if hidden_sheets != {"AI复核记录", "输入识别与字段映射"}:
+            errors.append("机器工作表的默认隐藏状态不正确")
         if workbook._external_links:
             errors.append("工作簿包含外部链接")
         main = workbook["现金流量表正表"]

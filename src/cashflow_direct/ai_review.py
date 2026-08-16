@@ -82,14 +82,19 @@ def select_ai_tasks(
         amount = abs(component.cash_delta_cent)
         if amount < materiality.trivial_cent:
             continue
-        weak = component.evidence_strength == "weak" or decision.evidence_level == "low"
+        weak = component.evidence_strength == "weak"
         anomaly = bool(component.anomalies)
-        label_conflict = decision.matched_rule_id == "LABEL-RULE-CONFLICT"
-        unlabeled_ambiguous = not component.original_item_text and weak
-        weak_labeled_selected = bool(component.original_item_text) and weak and (
-            amount >= materiality.performance_cent or anomaly
+        urgent_conflict = decision.matched_rule_id in {
+            "LABEL-RULE-CONFLICT",
+            "LABEL-BUSINESS-HIGH-CONFLICT",
+            "BUSINESS-RULE-CONFLICT",
+        }
+        evidence_selected = (
+            decision.evidence_level in {"low", "medium"}
+            and amount >= materiality.performance_cent
         )
-        if label_conflict or unlabeled_ambiguous or weak_labeled_selected or anomaly or not decision.resolved:
+        weak_selected = weak and amount >= materiality.performance_cent
+        if urgent_conflict or evidence_selected or weak_selected or anomaly or not decision.resolved:
             selected.append(build_ai_task(component, decision))
     return tuple(selected)
 
@@ -226,8 +231,13 @@ def resolve_automatic_decisions(
     resolved: list[ClassificationDecision] = []
     for system in system_decisions:
         ai = ai_by_component.get(system.component_id)
-        if ai is None or ai.item_id == system.system_item_id:
+        if ai is None:
             resolved.append(system)
+            continue
+        if ai.item_id == system.system_item_id:
+            resolved.append(
+                replace(system, resolved=True, decision_source="ai_agreement")
+            )
             continue
         adjudicated = adjudicated_by_component.get(system.component_id)
         if adjudicated is None or not adjudicated.reason.strip():

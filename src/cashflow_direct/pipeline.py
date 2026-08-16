@@ -992,6 +992,12 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
             status = "AI 待裁决"
             missing_count = len(adjudication_tasks)
         else:
+            state["decisions"] = [
+                asdict(item)
+                for item in resolve_automatic_decisions(
+                    system_decisions, validation.valid_results, ()
+                )
+            ]
             state["classification_summary"]["ai_tasks_missing"] = 0
             state["stage"] = "ai_completed"
             status = validation.status
@@ -1077,10 +1083,6 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     adjudication_by_component = {
         str(item["component_id"]): item for item in state.get("adjudication_tasks", ())
     }
-    adjudication_result_by_component = {
-        str(item["component_id"]): item
-        for item in state.get("adjudication_validation", {}).get("valid_results", ())
-    }
     unresolved = tuple(
         UnresolvedDecision(
             component_id=decision.component_id,
@@ -1103,7 +1105,6 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     for item in (
                         str(adjudication_by_component.get(decision.component_id, {}).get("system_item_id", "")),
                         str(adjudication_by_component.get(decision.component_id, {}).get("ai_item_id", "")),
-                        str(adjudication_result_by_component.get(decision.component_id, {}).get("item_id", "")),
                     )
                     if item and item != decision.system_item_id
                 )
@@ -1139,11 +1140,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "现金变化": component.cash_delta_cent / 100,
                 "原现流项目": component.original_item_text,
                 "对方科目": "、".join(component.counterpart_accounts),
-                "系统项目": (
-                    f"{decision.system_item_name}（{decision.system_item_id}）"
-                    if decision.system_item_id
-                    else "不进入正表"
-                ),
+                "自动判定现流项目": decision.system_item_name or "不进入正表",
                 "判断理由": decision.reason,
                 "证据强度": decision.evidence_level,
                 "异常": "、".join(component.anomalies),
@@ -1177,7 +1174,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "现金变化": int(transfer["matched_cent"]) / 100,
                 "原现流项目": "" if entry is None else entry.original_flow_item,
                 "对方科目": "" if entry is None else entry.counterpart_name,
-                "系统项目": "不进入正表",
+                "自动判定现流项目": "不进入正表",
                 "判断理由": "现金及现金等价物内部划转",
                 "证据强度": "high",
                 "异常": "内部划转已排除",
