@@ -382,7 +382,7 @@ def reconcile_cash(
 ) -> ReconciliationResult:
     if opening_cent is None or closing_cent is None or fx_cent is None:
         return ReconciliationResult(
-            "现金调节未完成", opening_cent, closing_cent, fx_cent, None, None
+            "现金流量表与货币资金变动的勾稽核对：未完成", opening_cent, closing_cent, fx_cent, None, None
         )
     net_cash = (
         statement.values["CFO-NET"]
@@ -391,7 +391,7 @@ def reconcile_cash(
         + fx_cent
     )
     difference = closing_cent - opening_cent - net_cash
-    status = "现金调节完成" if difference == 0 else "现金调节存在差异"
+    status = "现金流量表与货币资金变动的勾稽核对：相符" if difference == 0 else "现金流量表与货币资金变动的勾稽核对：存在差异"
     return ReconciliationResult(
         status, opening_cent, closing_cent, fx_cent, net_cash, difference
     )

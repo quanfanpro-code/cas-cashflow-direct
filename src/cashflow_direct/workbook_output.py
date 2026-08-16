@@ -26,7 +26,7 @@ SHEET_NAMES = (
     "重要待复核事项",
     "疑似重复事项",
     "AI复核记录",
-    "现金范围与现金调节",
+    "现金范围与现金流量表与货币资金变动的勾稽核对",
     "全量分类留痕",
     "输入识别与字段映射",
 )
@@ -203,8 +203,8 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             if reconciliation_complete:
                 difference_row = len(model.cash_scope_rows) + 6
                 completed_value = (
-                    f'IF(\'现金范围与现金调节\'!C{difference_row}=0,'
-                    '"最终可使用","草稿：现金调节存在差异")'
+                    f'IF(\'现金范围与现金流量表与货币资金变动的勾稽核对\'!C{difference_row}=0,'
+                    '"最终可使用","草稿：现金流量表与货币资金变动的勾稽核对存在差异")'
                 )
             condition = "+".join(pending_terms) or "0"
             status.write_formula(
@@ -477,7 +477,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 ("汇率变动影响", model.reconciliation.fx_cent),
                 ("本期现金净增加额", model.reconciliation.net_cash_cent),
                 ("期末现金及现金等价物余额", model.reconciliation.closing_cent),
-                ("现金调节差异", model.reconciliation.difference_cent),
+                ("勾稽差异", model.reconciliation.difference_cent),
             ):
                 cash_rows.append(
                     {
@@ -486,7 +486,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         "金额（元）": None if amount is None else amount / 100,
                     }
                 )
-        cash_sheet = sheets["现金范围与现金调节"]
+        cash_sheet = sheets["现金范围与现金流量表与货币资金变动的勾稽核对"]
         _write_dict_rows(cash_sheet, tuple(cash_rows), formats, "现金范围尚未确认。")
         if reconciliation_complete:
             opening_row = len(model.cash_scope_rows) + 2
@@ -510,7 +510,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             cash_sheet.write_formula(
                 difference_row - 1,
                 1,
-                f'=IF(C{difference_row}=0,"现金调节完成","现金调节存在差异")',
+                f'=IF(C{difference_row}=0,"现金流量表与货币资金变动的勾稽核对：相符","现金流量表与货币资金变动的勾稽核对：存在差异")',
                 formats["pending"],
                 model.reconciliation.status,
             )

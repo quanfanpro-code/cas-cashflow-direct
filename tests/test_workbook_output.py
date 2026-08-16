@@ -29,7 +29,7 @@ EXPECTED_SHEETS = [
     "重要待复核事项",
     "疑似重复事项",
     "AI复核记录",
-    "现金范围与现金调节",
+    "现金范围与现金流量表与货币资金变动的勾稽核对",
     "全量分类留痕",
     "输入识别与字段映射",
 ]
@@ -195,27 +195,27 @@ class WorkbookOutputTests(unittest.TestCase):
                 model,
                 comparison=compare_statement(existing, model.statement),
                 reconciliation=ReconciliationResult(
-                    "现金调节完成", 100_000, 160_000, 0, 60_000, 0
+                    "现金流量表与货币资金变动的勾稽核对：相符", 100_000, 160_000, 0, 60_000, 0
                 ),
             )
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
                 self.assertIn("现金流量表正表", workbook["正表核对报告"]["E2"].value)
-                headers = [cell.value for cell in workbook["现金范围与现金调节"][1]]
+                headers = [cell.value for cell in workbook["现金范围与现金流量表与货币资金变动的勾稽核对"][1]]
                 self.assertIn("金额（元）", headers)
-                cash_sheet = workbook["现金范围与现金调节"]
+                cash_sheet = workbook["现金范围与现金流量表与货币资金变动的勾稽核对"]
                 net_row = next(
                     row for row in range(2, cash_sheet.max_row + 1)
                     if cash_sheet.cell(row, 1).value == "本期现金净增加额"
                 )
                 difference_row = next(
                     row for row in range(2, cash_sheet.max_row + 1)
-                    if cash_sheet.cell(row, 1).value == "现金调节差异"
+                    if cash_sheet.cell(row, 1).value == "勾稽差异"
                 )
                 self.assertIn("现金流量表正表", cash_sheet.cell(net_row, 3).value)
                 self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))
-                self.assertIn("现金范围与现金调节", workbook["使用说明与状态"]["B3"].value)
+                self.assertIn("现金范围与现金流量表与货币资金变动的勾稽核对", workbook["使用说明与状态"]["B3"].value)
                 self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
             finally:
                 workbook.close()
@@ -270,5 +270,25 @@ class WorkbookOutputTests(unittest.TestCase):
                 workbook.close()
 
 
+    def test_new_workbook_never_contains_legacy_reconciliation_term(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "无旧词.xlsx"
+            model = workbook_model(0, 0)
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                hits = [
+                    f"{sheet.title}!{cell.coordinate}"
+                    for sheet in workbook.worksheets
+                    for row in sheet.iter_rows()
+                    for cell in row
+                    if isinstance(cell.value, str) and "现金调节" in cell.value
+                ]
+                self.assertEqual([], hits)
+            finally:
+                workbook.close()
+
+
 if __name__ == "__main__":
+
     unittest.main()

@@ -35,9 +35,9 @@
     {"item_id":"CFF-OUT","name":"筹资活动现金流出小计","section":"筹资活动","display_order":30,"is_leaf":false,"normal_direction":"net","formula_components":[["CFF-04",1],["CFF-05",1],["CFF-06",1]]},
     {"item_id":"CFF-NET","name":"筹资活动产生的现金流量净额","section":"筹资活动","display_order":31,"is_leaf":false,"normal_direction":"net","formula_components":[["CFF-IN",1],["CFF-OUT",-1]]},
 
-    {"item_id":"FX","name":"汇率变动对现金及现金等价物的影响","section":"现金调节","display_order":32,"is_leaf":false,"normal_direction":"net","formula_components":[]},
-    {"item_id":"NET-CASH","name":"现金及现金等价物净增加额","section":"现金调节","display_order":33,"is_leaf":false,"normal_direction":"net","formula_components":[["CFO-NET",1],["CFI-NET",1],["CFF-NET",1],["FX",1]]},
-    {"item_id":"CASH-OPENING","name":"加：期初现金及现金等价物余额","section":"现金调节","display_order":34,"is_leaf":false,"normal_direction":"net","formula_components":[]},
-    {"item_id":"CASH-CLOSING","name":"期末现金及现金等价物余额","section":"现金调节","display_order":35,"is_leaf":false,"normal_direction":"net","formula_components":[["NET-CASH",1],["CASH-OPENING",1]]}
+    {"item_id":"FX","name":"汇率变动对现金及现金等价物的影响","section":"现金流量表与货币资金变动的勾稽核对","display_order":32,"is_leaf":false,"normal_direction":"net","formula_components":[]},
+    {"item_id":"NET-CASH","name":"现金及现金等价物净增加额","section":"现金流量表与货币资金变动的勾稽核对","display_order":33,"is_leaf":false,"normal_direction":"net","formula_components":[["CFO-NET",1],["CFI-NET",1],["CFF-NET",1],["FX",1]]},
+    {"item_id":"CASH-OPENING","name":"加：期初现金及现金等价物余额","section":"现金流量表与货币资金变动的勾稽核对","display_order":34,"is_leaf":false,"normal_direction":"net","formula_components":[]},
+    {"item_id":"CASH-CLOSING","name":"期末现金及现金等价物余额","section":"现金流量表与货币资金变动的勾稽核对","display_order":35,"is_leaf":false,"normal_direction":"net","formula_components":[["NET-CASH",1],["CASH-OPENING",1]]}
   ]
 }

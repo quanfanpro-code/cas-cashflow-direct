@@ -181,8 +181,8 @@ class ComponentTests(unittest.TestCase):
             confirm_cash_scope(proposal, {})
 
 
-    def test_accrual_summary_is_marked_non_cash_and_excluded(self) -> None:
-        # 摘要写"计提"的凭证 → non_cash anomaly → 分类 EXCLUDED
+    def test_accrual_with_real_cash_leg_goes_to_ai_not_excluded(self) -> None:
+        # 摘要写"计提"、但凭证有真实现金腿 → 打新标记送 AI，不再 EXCLUDED
         from pathlib import Path
         from cashflow_direct.classification import classify_component, load_rule_pack
 
@@ -196,12 +196,13 @@ class ComponentTests(unittest.TestCase):
         )
         result = build_cashflow_components(entries, scope)
         self.assertEqual(1, len(result.components))
-        self.assertIn("non_cash", result.components[0].anomalies)
+        self.assertIn("accrual_with_cash_leg", result.components[0].anomalies)
+        self.assertNotIn("non_cash", result.components[0].anomalies)
         rules = load_rule_pack(Path(__file__).resolve().parents[1])
-        self.assertTrue(classify_component(result.components[0], rules).excluded)
+        self.assertFalse(classify_component(result.components[0], rules).excluded)
 
-    def test_note_endorsement_settlement_without_cash_is_non_cash(self) -> None:
-        # 应收票据背书抵应付账款（无货币资金）→ non_cash anomaly
+    def test_single_sided_note_settlement_rows_are_kept_after_rule_two_removal(self) -> None:
+        # 规则②删除后：单边明细票据背书行逐行保留，不再打 non_cash、不再 EXCLUDED
         from pathlib import Path
         from cashflow_direct.classification import classify_component, load_rule_pack
 
@@ -210,14 +211,12 @@ class ComponentTests(unittest.TestCase):
             _component_entry(2, "V2", "2202 应付账款", debit_cent=58_972_968_30, retained_side="counterpart", flow_amount_cent=58_972_968_30, summary="票据背书抵应付账款"),
         )
         proposal = discover_cash_scope(entries)
-        scope = confirm_cash_scope(
-            proposal, {candidate.account_key: "include" for candidate in proposal.candidates}
-        )
+        scope = confirm_cash_scope(proposal, {})
         result = build_cashflow_components(entries, scope)
         self.assertTrue(result.components)
-        self.assertTrue(all("non_cash" in component.anomalies for component in result.components))
+        self.assertTrue(all("non_cash" not in c.anomalies for c in result.components))
         rules = load_rule_pack(Path(__file__).resolve().parents[1])
-        self.assertTrue(all(classify_component(component, rules).excluded for component in result.components))
+        self.assertTrue(all(not classify_component(c, rules).excluded for c in result.components))
 
     def test_note_receipt_with_cash_counterpart_stays_real_cash(self) -> None:
         # 票据贴现/到期收款：应收票据 + 银行存款对方科目 → 真实现金流，不得误标 non_cash
@@ -263,6 +262,97 @@ class ComponentTests(unittest.TestCase):
         self.assertNotIn("non_cash", result.components[0].anomalies)
         rules = load_rule_pack(Path(__file__).resolve().parents[1])
         self.assertFalse(classify_component(result.components[0], rules).excluded)
+    def test_single_sided_suppression_removes_non_cash_marks(self) -> None:
+        # 摘要带"计提"的单边凭证：抑制开启时移除 non_cash，不抑制时规则①仍打 non_cash
+        # （摘要必须含"计提"，否则规则②删除后 legacy 分支不再产生标记，断言失去鉴别力）
+        entries = (
+            _component_entry(
+                1, "V31", "2202 应付账款", debit_cent=58_972_968_30,
+                flow_amount_cent=58_972_968_30, retained_side="counterpart",
+                item="购建固定资产、无形资产和其他长期资产支付的现金", summary="计提-财务应付",
+            ),
+            _component_entry(
+                2, "V31", "1121 应收票据", credit_cent=48_972_968_30,
+                flow_amount_cent=-48_972_968_30, retained_side="counterpart",
+                item="购建固定资产、无形资产和其他长期资产支付的现金", summary="计提-票据红冲",
+            ),
+        )
+        scope = confirm_cash_scope(discover_cash_scope(entries), {})
+        suppressed = build_cashflow_components(
+            entries, scope, single_sided_file_ids=frozenset({"FSYN"})
+        )
+        self.assertTrue(suppressed.components)
+        self.assertTrue(all("non_cash" not in c.anomalies for c in suppressed.components))
+        legacy = build_cashflow_components(entries, scope)
+        self.assertTrue(legacy.components)
+        self.assertTrue(all("non_cash" in c.anomalies for c in legacy.components))
+
+    def test_red_flow_amount_does_not_trigger_netting_suspect(self) -> None:
+        entries = (
+            _component_entry(
+                1, "V41", "2202 应付账款", debit_cent=58_972_968_30,
+                flow_amount_cent=58_972_968_30, retained_side="counterpart",
+                item="购建固定资产、无形资产和其他长期资产支付的现金", summary="财务应付",
+            ),
+            _component_entry(
+                2, "V41", "1121 应收票据", credit_cent=48_972_968_30,
+                flow_amount_cent=-48_972_968_30, retained_side="counterpart",
+                item="购建固定资产、无形资产和其他长期资产支付的现金", summary="票据红冲",
+            ),
+        )
+        result = build_cashflow_components(
+            entries, confirm_cash_scope(discover_cash_scope(entries), {}),
+            single_sided_file_ids=frozenset({"FSYN"}),
+        )
+        self.assertTrue(result.components)
+        self.assertTrue(all("netting_suspect" not in c.anomalies for c in result.components))
+
+    def test_rough_reconciliation_applies_only_to_counterpart_flow_detail(self) -> None:
+        from cashflow_direct.components import compute_rough_reconciliation
+        from cashflow_direct.models import EvidenceProfile
+
+        entries = (
+            _component_entry(
+                1, "V51", "2202 应付账款", debit_cent=10_000_00,
+                flow_amount_cent=10_000_00, retained_side="counterpart",
+                item="购买商品、接受劳务支付的现金", summary="付款",
+            ),
+        )
+        detail_profile = EvidenceProfile(
+            False, False, True, frozenset(), frozenset({"counterpart"}), True, False, False
+        )
+        rough = compute_rough_reconciliation(
+            entries, {"FSYN": detail_profile}, opening_cent=20_000_00, closing_cent=10_000_00, fx_cent=0
+        )
+        self.assertTrue(rough.applicable)
+        self.assertEqual("相符", rough.status)
+        self.assertEqual(-10_000_00, rough.detail_sum_cent)
+        journal_profile = EvidenceProfile(
+            True, False, False, frozenset(), frozenset({"cash", "counterpart"}), False, False, False
+        )
+        journal_rough = compute_rough_reconciliation(
+            entries, {"f1": journal_profile}, opening_cent=20_000_00, closing_cent=10_000_00, fx_cent=0
+        )
+        self.assertFalse(journal_rough.applicable)
+        self.assertEqual("不适用", journal_rough.status)
+
+    def test_journal_note_endorsement_without_cash_produces_no_component(self) -> None:
+        # 序时账纯票据背书（票据腿+往来腿、无现金科目、无流量金额）不产生组件、不进正表
+        entries = (
+            _component_entry(
+                1, "V61", "1121 应收票据", credit_cent=10_000_00,
+                retained_side="counterpart", summary="票据背书",
+            ),
+            _component_entry(
+                2, "V61", "2202 应付账款", debit_cent=10_000_00,
+                retained_side="counterpart", summary="票据背书",
+            ),
+        )
+        result = build_cashflow_components(
+            entries, confirm_cash_scope(discover_cash_scope(entries), {})
+        )
+        self.assertEqual((), result.components)
+
 
 if __name__ == "__main__":
     unittest.main()

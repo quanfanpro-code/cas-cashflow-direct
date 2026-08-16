@@ -369,12 +369,12 @@ class StatementTests(unittest.TestCase):
         case = classified_components()
         statement = aggregate_statement(case.components, case.decisions, case.rules)
         incomplete = reconcile_cash(statement, opening_cent=1_000, closing_cent=2_000, fx_cent=None)
-        self.assertEqual("现金调节未完成", incomplete.status)
+        self.assertEqual("现金流量表与货币资金变动的勾稽核对：未完成", incomplete.status)
         self.assertIsNone(incomplete.fx_cent)
         fx = 100
         net = statement.values["CFO-NET"] + statement.values["CFI-NET"] + statement.values["CFF-NET"] + fx
         completed = reconcile_cash(statement, opening_cent=1_000, closing_cent=1_000 + net, fx_cent=fx)
-        self.assertEqual("现金调节完成", completed.status)
+        self.assertEqual("现金流量表与货币资金变动的勾稽核对：相符", completed.status)
         self.assertEqual(0, completed.difference_cent)
 
 

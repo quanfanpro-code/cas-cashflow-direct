@@ -60,6 +60,13 @@ class PipelineTests(unittest.TestCase):
                 )
             )
             self.assertEqual(str(existing), state["existing_statement_path"])
+            self.assertIn(str(state["files"][0]["file_id"]), state["evidence_profiles"])
+            profile = state["evidence_profiles"][str(state["files"][0]["file_id"])]
+            self.assertTrue(profile["has_flow_item"])
+            self.assertTrue(profile["full_voucher"])
+            self.assertEqual(340_000, state["cash_balances"]["opening_cent"])
+            self.assertEqual(350_000, state["cash_balances"]["closing_cent"])
+            self.assertEqual(320_000, state["cash_balances"]["fx_cent"])
 
     def test_statement_path_outside_inputs_raises(self) -> None:
         # 指定的正表文件不在已选输入中 → 必须报错，不得静默跳过
@@ -208,8 +215,10 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual({"一月", "二月"}, {item["sheet"] for item in state["mappings"]})
             self.assertTrue(any(item["kind"] == "错误" for item in state["normalization_issues"]))
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
-            run_classification(preflight.run_dir)
+            with self.assertRaisesRegex(RuntimeError, "补充期初、期末现金余额和汇率影响"):
+                run_classification(preflight.run_dir)
             supplement_cash_balances(preflight.run_dir, "0", "100", "0", "匿名余额资料")
+            run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
             self.assertEqual("草稿：输入存在未处理错误", final.overall_status)
 
@@ -260,6 +269,7 @@ class PipelineTests(unittest.TestCase):
                     f"{statement_question['file_id']}:statement:{statement_question['sheet']}": "use"
                 },
             )
+            supplement_cash_balances(preflight.run_dir, "1000", "1060", "0", "匿名余额资料")
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
             classified = run_classification(preflight.run_dir)
             self.assertEqual(0, classified.ai_tasks_missing)
@@ -314,7 +324,7 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "输入文件已被修改.*新运行目录"):
                 confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
 
-    def test_missing_cash_reconciliation_can_only_be_draft(self) -> None:
+    def test_missing_balances_block_classify_until_supplemented(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             preflight = run_preflight(
@@ -323,13 +333,12 @@ class PipelineTests(unittest.TestCase):
                 root,
             )
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            with self.assertRaisesRegex(RuntimeError, "补充期初、期末现金余额和汇率影响"):
+                run_classification(preflight.run_dir)
+            supplement_cash_balances(preflight.run_dir, "1000", "1060", "0", "客户盖章现金余额表")
             run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
-            self.assertEqual("草稿：现金调节未完成或存在差异", final.overall_status)
-            state = json.loads(
-                (final.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
-            )
-            self.assertEqual("现金调节未完成", state["reconciliation"]["status"])
+            self.assertEqual("最终可使用", final.overall_status)
 
     def test_missing_balances_can_be_supplemented_without_new_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -340,15 +349,14 @@ class PipelineTests(unittest.TestCase):
                 root,
             )
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
-            run_classification(preflight.run_dir)
-            first = finalize_run(preflight.run_dir)
-            self.assertIn("草稿", first.overall_status)
+            with self.assertRaisesRegex(RuntimeError, "补充期初、期末现金余额和汇率影响"):
+                run_classification(preflight.run_dir)
             supplement_cash_balances(
                 preflight.run_dir, "1000", "1060", "0", "客户盖章现金余额表"
             )
+            run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
             self.assertEqual("最终可使用", final.overall_status)
-            self.assertNotEqual(first.workbook_path, final.workbook_path)
 
     def test_mapping_confirmation_is_applied_without_restarting_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,6 +404,10 @@ class PipelineTests(unittest.TestCase):
                 f"{statement_questions[0]['sheet']}"
             )
             confirm_mapping(preflight.run_dir, {key: "use"})
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            self.assertIn("opening_cent", state["cash_balances"])
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
             run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
@@ -450,6 +462,7 @@ class PipelineTests(unittest.TestCase):
             )
             confirm_mapping(preflight.run_dir, {key: "ignore"})
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            supplement_cash_balances(preflight.run_dir, "0", "60", "0", "匿名余额资料")
             run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
             self.assertNotEqual("最终可使用", final.overall_status)
@@ -592,6 +605,50 @@ class PipelineTests(unittest.TestCase):
                 )
             finally:
                 workbook.close()
+
+    def test_classify_requires_balances_before_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            preflight = run_preflight(
+                write_end_to_end_case(root, include_cash_balances=False),
+                ("1000000", "750000", "50000"),
+                root,
+            )
+            confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            with self.assertRaisesRegex(RuntimeError, "补充期初、期末现金余额和汇率影响"):
+                run_classification(preflight.run_dir)
+            supplement_cash_balances(preflight.run_dir, "1000", "1060", "0", "客户盖章现金余额表")
+            classified = run_classification(preflight.run_dir)
+            self.assertEqual(0, classified.ai_tasks_missing)
+
+    def test_rough_reconciliation_runs_before_and_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "单边明细.xlsx"
+            workbook = Workbook()
+            detail = workbook.active
+            detail.title = "单边数据"
+            detail.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "流量金额", "现流项目"])
+            detail.append(["2026-01-01", "记-1", "匿名付款", "应付账款", 100, None, 100, "购买商品、接受劳务支付的现金"])
+            balance = workbook.create_sheet("现金余额资料")
+            balance.append(["项目", "金额"])
+            balance.append(["期初现金及现金等价物余额", 200])
+            balance.append(["期末现金及现金等价物余额", 100])
+            balance.append(["汇率变动对现金及现金等价物的影响", 0])
+            workbook.save(source)
+            preflight = run_preflight([source], ("1000000", "750000", "50000"), root)
+            confirm_cash_scope(preflight.run_dir, {})
+            run_classification(preflight.run_dir)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            rough = state["rough_reconciliation"]
+            self.assertTrue(rough["applicable"])
+            self.assertEqual("相符", rough["status"])
+            self.assertEqual(-10_000, rough["detail_sum_cent"])
+            trace = preflight.run_dir / "计算留痕数据" / "粗勾稽留痕.jsonl"
+            self.assertTrue(trace.is_file())
+            self.assertIn("detail_sum_cent", trace.read_text(encoding="utf-8-sig"))
 
 
 if __name__ == "__main__":

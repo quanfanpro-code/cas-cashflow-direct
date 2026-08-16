@@ -22,6 +22,7 @@ from cashflow_direct.classification import classify_all, load_rule_pack
 from cashflow_direct.components import (
     CashScope,
     build_cashflow_components,
+    compute_rough_reconciliation,
     confirm_cash_scope as make_cash_scope,
     discover_cash_scope,
     flow_direction_source,
@@ -34,6 +35,7 @@ from cashflow_direct.models import (
     AITask,
     MaterialityAmounts,
     NormalizedEntry,
+    EvidenceProfile,
     SourceLocator,
     UnresolvedDecision,
 )
@@ -216,6 +218,40 @@ def _assert_inputs_unchanged(state: Mapping[str, object]) -> None:
         raise RuntimeError("输入文件已被修改，请建立新运行目录后重新处理")
 
 
+def _profile_to_dict(profile: EvidenceProfile) -> dict[str, object]:
+    return {
+        "full_voucher": profile.full_voucher,
+        "matched_counterparty": profile.matched_counterparty,
+        "has_flow_item": profile.has_flow_item,
+        "label_sides": sorted(profile.label_sides),
+        "retained_side_values": sorted(profile.retained_side_values),
+        "has_flow_amount": profile.has_flow_amount,
+        "summary_only": profile.summary_only,
+        "split_duplication_risk": profile.split_duplication_risk,
+    }
+
+
+def _profile_from_dict(payload: Mapping[str, object]) -> EvidenceProfile:
+    return EvidenceProfile(
+        full_voucher=bool(payload["full_voucher"]),
+        matched_counterparty=bool(payload["matched_counterparty"]),
+        has_flow_item=bool(payload["has_flow_item"]),
+        label_sides=frozenset(str(item) for item in payload["label_sides"]),
+        retained_side_values=frozenset(str(item) for item in payload["retained_side_values"]),
+        has_flow_amount=bool(payload["has_flow_amount"]),
+        summary_only=bool(payload["summary_only"]),
+        split_duplication_risk=bool(payload["split_duplication_risk"]),
+    )
+
+
+def _balances_from_existing(result: ExistingStatementResult) -> dict[str, int | None]:
+    return {
+        "opening_cent": result.values.get("CASH-OPENING"),
+        "closing_cent": result.values.get("CASH-CLOSING"),
+        "fx_cent": result.values.get("FX"),
+    }
+
+
 def _read_cash_balances(path: Path) -> dict[str, tuple[int, int]]:
     found: dict[str, tuple[int, int]] = {}
     workbook = open_workbook_robust(path)
@@ -287,6 +323,7 @@ def run_preflight(
     normalization_issues: list[dict[str, object]] = []
     sheet_structures: list[dict[str, object]] = []
     existing_statement_path: str | None = None
+    profiles: dict[str, dict[str, object]] = {}
     designated_target = statement_path.resolve() if statement_path is not None else None
     designated_hit = False
     balance_candidates: dict[str, tuple[int, int]] = {}
@@ -318,6 +355,10 @@ def run_preflight(
                 )
             existing_statement_path = str(registered.path)
             exclude_sheets = frozenset(statement_hits)
+            hit = next(iter(statement_hits.values()))
+            for key, value in _balances_from_existing(hit).items():
+                if value is not None:
+                    balance_candidates[key] = (3, value)
         else:
             exclude_sheets = frozenset()
         snapshot = scan_workbook(registered.path)
@@ -339,6 +380,7 @@ def run_preflight(
             if isinstance(mapping, DatasetMapping):
                 normalized = normalize_dataset(registered.path, registered.file_id, mapping)
                 entries.extend(normalized.entries)
+                profiles[str(registered.file_id)] = _profile_to_dict(normalized.profile)
                 mappings.append(
                     {
                         "file_id": registered.file_id,
@@ -452,6 +494,7 @@ def run_preflight(
         "statement_candidates": statement_candidates,
         "statement_confirmations": {},
         "cash_balances": {key: value for key, (_, value) in balance_candidates.items()},
+        "evidence_profiles": profiles,
         "normalization_issues": normalization_issues,
     }
     _assert_inputs_unchanged(state)
@@ -543,6 +586,10 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
 
     new_questions: list[dict[str, object]] = []
     new_entries: list[NormalizedEntry] = []
+    profiles: dict[str, dict[str, object]] = {
+        str(file_id): dict(payload)
+        for file_id, payload in state.get("evidence_profiles", {}).items()
+    }
     new_mappings: list[dict[str, object]] = []
     new_issues: list[dict[str, object]] = []
     mapped_sheets = {
@@ -581,6 +628,7 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
                 continue
             normalized = normalize_dataset(path, file_id, mapping)
             new_entries.extend(normalized.entries)
+            profiles[file_id] = _profile_to_dict(normalized.profile)
             new_mappings.append(
                 {
                     "file_id": file_id,
@@ -610,6 +658,7 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     state["mapping_questions"] = new_questions
     state["mapping_confirmations"] = confirmations
     state["statement_confirmations"] = statement_confirmations
+    state["evidence_profiles"] = profiles
     use_paths = {
         str(files_by_id[str(candidate["file_id"])])
         for candidate in statement_candidates
@@ -618,6 +667,20 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     if len(use_paths) > 1:
         raise RuntimeError("多个文件被确认为客户现有正表，请只保留一个")
     state["existing_statement_path"] = next(iter(use_paths), None)
+    if state["existing_statement_path"] is not None:
+        parsed = parse_existing_statement(
+            Path(str(state["existing_statement_path"])), load_rule_pack(PROJECT_ROOT)
+        )
+        if isinstance(parsed, ExistingStatementResult):
+            balances = dict(state.get("cash_balances", {}))
+            balances.update(
+                {
+                    key: value
+                    for key, value in _balances_from_existing(parsed).items()
+                    if value is not None
+                }
+            )
+            state["cash_balances"] = balances
     state["cash_scope_proposal"] = asdict(proposal)
     state["recommended_cash_decisions"] = {
         candidate.account_key: candidate.system_suggestion
@@ -711,9 +774,34 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         return _result_from_classification(state, run_dir)
     if "cash_scope" not in state:
         raise RuntimeError("请确认现金范围后继续")
+    balances = state.get("cash_balances", {})
+    if not all(balances.get(key) is not None for key in ("opening_cent", "closing_cent", "fx_cent")):
+        raise RuntimeError("请先补充期初、期末现金余额和汇率影响后再分类")
     entries = tuple(_entry_from_dict(item) for item in state["entries"])
     scope = _scope_from_dict(state["cash_scope"])
-    build = build_cashflow_components(entries, scope)
+    profiles = {
+        str(file_id): _profile_from_dict(payload)
+        for file_id, payload in state.get("evidence_profiles", {}).items()
+    }
+    single_sided_file_ids = frozenset(
+        file_id
+        for file_id, profile in profiles.items()
+        if profile.has_flow_amount and profile.retained_side_values <= frozenset({"counterpart"})
+    )
+    rough = compute_rough_reconciliation(
+        entries,
+        profiles,
+        int(balances["opening_cent"]),
+        int(balances["closing_cent"]),
+        int(balances["fx_cent"]),
+    )
+    state["rough_reconciliation"] = asdict(rough)
+    state["single_sided_file_ids"] = sorted(single_sided_file_ids)
+    _write_trace_jsonl(run_dir, "粗勾稽留痕.jsonl", (asdict(rough),))
+    _save_state(run_dir, state)
+    build = build_cashflow_components(
+        entries, scope, single_sided_file_ids=single_sided_file_ids
+    )
     entry_by_id = {entry.entry_id: entry for entry in entries}
     components = tuple(
         replace(
@@ -1131,8 +1219,8 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         status = "草稿：存在未核对的疑似正表"
     elif any(item.get("kind") == "错误" for item in state.get("normalization_issues", ())):
         status = "草稿：输入存在未处理错误"
-    elif reconciliation.status != "现金调节完成":
-        status = "草稿：现金调节未完成或存在差异"
+    elif reconciliation.status != "现金流量表与货币资金变动的勾稽核对：相符":
+        status = "草稿：现金流量表与货币资金变动的勾稽核对未完成或存在差异"
     elif review_batches or any(group.blocks_manual_completion for group in duplicate_groups):
         status = "待完成人工确认"
     else:

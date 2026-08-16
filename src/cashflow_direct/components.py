@@ -16,7 +16,6 @@ INFLOW_ITEM_TERMS = ("收到", "收回", "取得借款", "吸收投资", "销售
 OUTFLOW_ITEM_TERMS = ("支付", "购买", "购建", "偿还", "分配股利")
 # 非现金事项判定词条（保守：拿不准的不标 non_cash，宁可进 AI 复核）
 NONCASH_SUMMARY_TERMS = ("计提",)
-NOTE_BILL_TERMS = ("应收票据", "应付票据")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +47,16 @@ class InternalTransferLeg:
     voucher_key: str
     entry_id: str
     matched_cent: int
+
+
+@dataclass(frozen=True, slots=True)
+class RoughReconciliation:
+    applicable: bool
+    status: str
+    detail_sum_cent: int | None
+    expected_cent: int | None
+    difference_cent: int | None
+    source_file_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +155,41 @@ def _signed_flow(entry: NormalizedEntry) -> int:
     return -side_delta if entry.retained_side == "counterpart" else side_delta
 
 
+def compute_rough_reconciliation(
+    entries: Sequence[NormalizedEntry],
+    profiles: Mapping[str, object],
+    opening_cent: int,
+    closing_cent: int,
+    fx_cent: int,
+) -> RoughReconciliation:
+    """单边现流明细在分类前与期末-期初-汇率影响对比；序时账形态不适用。"""
+    applicable_ids = tuple(
+        sorted(
+            file_id
+            for file_id, profile in profiles.items()
+            if profile.has_flow_amount
+            and profile.retained_side_values <= frozenset({"counterpart"})
+        )
+    )
+    if not applicable_ids:
+        return RoughReconciliation(False, "不适用", None, None, None, ())
+    detail_sum = sum(
+        _signed_flow(entry)
+        for entry in entries
+        if entry.source.file_id in applicable_ids
+    )
+    expected = closing_cent - opening_cent - fx_cent
+    difference = detail_sum - expected
+    return RoughReconciliation(
+        True,
+        "相符" if difference == 0 else "存在差异",
+        detail_sum,
+        expected,
+        difference,
+        applicable_ids,
+    )
+
+
 def _component(
     voucher_key: str,
     sequence: int,
@@ -170,53 +214,52 @@ def _component(
     )
 
 
-def _voucher_non_cash_marks(entries: Sequence[NormalizedEntry]) -> tuple[str, ...]:
+def _voucher_non_cash_marks(entries: Sequence[NormalizedEntry], has_cash_leg: bool = False) -> tuple[str, ...]:
     """按凭证判定是否非现金事项，返回新增 anomaly 标记（保守：拿不准不标）。"""
     marks: list[str] = []
     if entries and all(
         any(term in entry.summary for term in NONCASH_SUMMARY_TERMS) for entry in entries
     ):
-        marks.append("non_cash")
-    has_note = any(
-        any(term in entry.account_name for term in NOTE_BILL_TERMS) for entry in entries
-    )
-    # 票据腿必须与往来腿互抵才可能构成非现金背书抵账：
-    # 只有票据行、没有其他往来腿的凭证（如票据贴现/到期收款）保留真实现金流。
-    has_other_leg = any(
-        entry.account_name
-        and not any(term in entry.account_name for term in NOTE_BILL_TERMS)
-        for entry in entries
-    )
-    # 货币资金既可能出现在本行科目，也可能出现在对方科目（对方科目侧明细），
-    # 任何一侧出现现金科目都说明该凭证涉及真实现金流动，不得判为票据互抵非现金事项。
-    has_cash = any(
-        (entry.account_name and any(term in entry.account_name for term in CASH_TERMS))
-        or (entry.counterpart_name and any(term in entry.counterpart_name for term in CASH_TERMS))
-        for entry in entries
-    )
-    if has_note and has_other_leg and not has_cash:
-        marks.append("non_cash")
+        marks.append("non_cash" if not has_cash_leg else "accrual_with_cash_leg")
     return tuple(marks)
 
 
 def _annotate_voucher_components(
     entries: Sequence[NormalizedEntry],
     components: Sequence[CashflowComponent],
+    *,
+    suppress_non_cash: bool = False,
+    has_cash_leg: bool = False,
 ) -> list[CashflowComponent]:
     """为同一凭证的组件统一追加 non_cash / netting_suspect 标记。
 
     netting_suspect：同凭证同时存在大额流入与流出，却全部挂在同一方向标签时，
     标记送 AI 复核，不自动改分类。
     """
-    extra = list(_voucher_non_cash_marks(entries))
+    extra = list(_voucher_non_cash_marks(entries, has_cash_leg))
+    if suppress_non_cash:
+        extra = [marker for marker in extra if marker != "non_cash"]
     directions = {1 if component.cash_delta_cent > 0 else -1 for component in components}
     if 1 in directions and -1 in directions:
+        red_ids = {entry.entry_id for entry in entries if entry.flow_amount_cent < 0}
+        red_explains = bool(red_ids) and all(
+            (
+                _keyword_direction(component.original_item_text) is not None
+                and (
+                    component.cash_delta_cent > 0
+                    if _keyword_direction(component.original_item_text) == 1
+                    else component.cash_delta_cent < 0
+                )
+            )
+            or any(key in red_ids for key in component.source_keys)
+            for component in components
+        )
         label_dirs = {
             _keyword_direction(component.original_item_text)
             for component in components
             if component.original_item_text
         }
-        if label_dirs and (label_dirs <= {1} or label_dirs <= {-1}):
+        if not red_explains and label_dirs and (label_dirs <= {1} or label_dirs <= {-1}):
             extra.append("netting_suspect")
     return [
         replace(component, anomalies=tuple(dict.fromkeys((*component.anomalies, *extra))))
@@ -388,6 +431,7 @@ def _voucher_components(
 def build_cashflow_components(
     entries: Sequence[NormalizedEntry],
     scope: CashScope,
+    single_sided_file_ids: frozenset[str] = frozenset(),
 ) -> ComponentBuildResult:
     """按凭证构建现金流业务组成，并保持现金腿金额不变量。"""
     grouped: dict[str, list[NormalizedEntry]] = defaultdict(list)
@@ -397,6 +441,9 @@ def build_cashflow_components(
     components: list[CashflowComponent] = []
     excluded: list[InternalTransferLeg] = []
     for voucher_key, voucher_entries in grouped.items():
+        single_sided = all(
+            entry.source.file_id in single_sided_file_ids for entry in voucher_entries
+        )
         cash_entries = [
             entry
             for entry in voucher_entries
@@ -418,7 +465,11 @@ def build_cashflow_components(
             if not cash_entries:
                 continue
             built, internal = _voucher_components(voucher_key, voucher_entries, cash_entries)
-            components.extend(_annotate_voucher_components(voucher_entries, built))
+            components.extend(
+                _annotate_voucher_components(
+                    voucher_entries, built, suppress_non_cash=single_sided, has_cash_leg=True
+                )
+            )
             excluded.extend(internal)
             continue
         one_sided: list[CashflowComponent] = []
@@ -433,5 +484,9 @@ def build_cashflow_components(
                 and (entry.debit_cent or entry.credit_cent)
             ):
                 one_sided.append(_build_one_sided(entry))
-        components.extend(_annotate_voucher_components(voucher_entries, one_sided))
+        components.extend(
+            _annotate_voucher_components(
+                voucher_entries, one_sided, suppress_non_cash=single_sided, has_cash_leg=False
+            )
+        )
     return ComponentBuildResult(tuple(components), tuple(excluded), 0)
