@@ -64,6 +64,28 @@ class ReconciliationResult:
     difference_cent: int | None
 
 
+def _migrate_negative_net(
+    values: dict[str, int],
+    support: dict[str, list[str]],
+    source_id: str,
+    target_id: str,
+) -> None:
+    """净额类项目为负时按应用指南迁移到对应"其他"投资活动项目。
+
+    处置固定资产、无形资产和其他长期资产收回的现金净额（CFI-03）为负 →
+    移入"支付其他与投资活动有关的现金"（CFI-09）；
+    取得子公司及其他营业单位支付的现金净额（CFI-08）为负 →
+    移入"收到其他与投资活动有关的现金"（CFI-05）。
+    迁移连同支撑组成编号一并转移，保持留痕可追溯。
+    """
+    if values[source_id] >= 0:
+        return
+    values[target_id] += -values[source_id]
+    values[source_id] = 0
+    support[target_id].extend(support[source_id])
+    support[source_id] = []
+
+
 def aggregate_statement(
     components: Sequence[CashflowComponent],
     decisions: Sequence[ClassificationDecision],
@@ -88,6 +110,10 @@ def aggregate_statement(
             component.cash_delta_cent, item.normal_direction
         )
         support[item.item_id].append(component.component_id)
+
+    # 净额类项目为负时的列报迁移（须在汇总行公式计算之前执行）
+    _migrate_negative_net(values, support, "CFI-03", "CFI-09")
+    _migrate_negative_net(values, support, "CFI-08", "CFI-05")
 
     if fx_cent is not None:
         values["FX"] = fx_cent

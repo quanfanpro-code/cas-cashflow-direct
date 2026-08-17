@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import unittest
 from pathlib import Path
@@ -530,6 +530,85 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-02", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_lease_liability_payment_is_other_financing_outflow(self) -> None:
+        # 准则21号第53条：偿还租赁负债本金和利息的现金计入筹资活动
+        decision = classify_component(
+            cashflow_component("偿还租赁负债本金及利息", -100, ("租赁负债",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFF-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_finance_lease_payment_is_other_financing_outflow(self) -> None:
+        # 准则21号第53条：非简化处理的租赁付款计入筹资活动
+        decision = classify_component(
+            cashflow_component("支付融资租赁租金", -100, ("长期应付款",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFF-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_installment_payment_for_asset_is_other_financing_outflow(self) -> None:
+        # 应用指南：分期付款方式购建固定资产各期支付的现金计入筹资活动
+        decision = classify_component(
+            cashflow_component("分期付款购建设备款", -100, ("长期应付款",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFF-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_simple_office_rent_stays_operating_fallback(self) -> None:
+        # 回归保护：简化处理的普通经营租赁租金不进筹资活动
+        decision = classify_component(
+            cashflow_component("支付办公楼租金", -100, ("管理费用",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertNotEqual("CFF-06", decision.system_item_id)
+
+    def test_deed_tax_follows_asset_acquisition(self) -> None:
+        # 契税为取得不动产的直接相关税费，随资产购建归 CFI-06
+        decision = classify_component(
+            cashflow_component("缴纳契税", -100, ("应交税费_应交契税",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_vehicle_purchase_tax_follows_asset_acquisition(self) -> None:
+        # 车辆购置税为购置车辆的直接相关税费，随资产购建归 CFI-06
+        decision = classify_component(
+            cashflow_component("缴纳车辆购置税", -100, ("应交税费_应交车辆购置税",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_returned_vat_credit_refund_is_tax_payment(self) -> None:
+        # 应用指南：缴回留抵退税款属于"支付的各项税费"
+        decision = classify_component(
+            cashflow_component("缴回留抵退税款", -100, ("应交税费",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_received_vat_credit_refund_stays_tax_refund(self) -> None:
+        # 回归保护：收到留抵退税款仍归"收到的税费返还"
+        decision = classify_component(
+            cashflow_component("收到留抵退税款", 100, ("应交税费",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-02", decision.system_item_id)
         self.assertEqual("high", decision.evidence_level)
 
 

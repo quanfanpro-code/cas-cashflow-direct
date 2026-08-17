@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import unittest
@@ -6,6 +6,8 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
+from cashflow_direct.models import ClassificationDecision
+from cashflow_direct.classification import load_rule_pack
 from cashflow_direct.semantic_mapping import MappingQuestion
 from cashflow_direct.statement import (
     ExistingStatementResult,
@@ -16,10 +18,37 @@ from cashflow_direct.statement import (
     reconcile_cash,
 )
 from tests.fixture_factory import (
+    cashflow_component,
     classified_components,
     write_detail_plus_statement_fixture,
     write_existing_statement_fixture,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _single_decision_case(
+    component_id: str,
+    cash_delta_cent: int,
+    item_id: str,
+    item_name: str,
+    normal_direction: str,
+):
+    rules = load_rule_pack(ROOT)
+    component = cashflow_component(
+        "匿名净额事项", cash_delta_cent, component_id=component_id
+    )
+    decision = ClassificationDecision(
+        component_id=component_id,
+        system_item_id=item_id,
+        system_item_name=item_name,
+        normal_direction=normal_direction,
+        matched_rule_id="MANUAL-LABEL",
+        reason="匿名测试决策",
+        evidence_level="high",
+    )
+    return rules, (component,), (decision,)
 
 
 class StatementTests(unittest.TestCase):
@@ -37,6 +66,58 @@ class StatementTests(unittest.TestCase):
         self.assertEqual(expected, result.values["NET-CASH"])
         self.assertEqual(("S1",), result.support_component_ids["CFO-01"])
         self.assertIsNone(result.prior_values["CFO-01"])
+
+    def test_disposal_net_negative_moves_to_other_investing_outflow(self) -> None:
+        # 应用指南三(二)3：处置长期资产收回的现金净额为负数时，
+        # 在"支付其他与投资活动有关的现金"项目中反映
+        rules, components, decisions = _single_decision_case(
+            "NEG-DISP",
+            -50_000,
+            "CFI-03",
+            "处置固定资产、无形资产和其他长期资产收回的现金净额",
+            "inflow",
+        )
+
+        result = aggregate_statement(components, decisions, rules)
+
+        self.assertEqual(0, result.values["CFI-03"])
+        self.assertEqual(50_000, result.values["CFI-09"])
+        self.assertEqual(("NEG-DISP",), result.support_component_ids["CFI-09"])
+        self.assertEqual((), result.support_component_ids["CFI-03"])
+
+    def test_acquire_subsidiary_net_negative_moves_to_other_investing_inflow(self) -> None:
+        # 应用指南三(二)5：取得子公司支付的现金净额为负数时，
+        # 在"收到其他与投资活动有关的现金"项目中反映
+        rules, components, decisions = _single_decision_case(
+            "NEG-ACQ",
+            80_000,
+            "CFI-08",
+            "取得子公司及其他营业单位支付的现金净额",
+            "outflow",
+        )
+
+        result = aggregate_statement(components, decisions, rules)
+
+        self.assertEqual(0, result.values["CFI-08"])
+        self.assertEqual(80_000, result.values["CFI-05"])
+        self.assertEqual(("NEG-ACQ",), result.support_component_ids["CFI-05"])
+        self.assertEqual((), result.support_component_ids["CFI-08"])
+
+    def test_positive_net_items_are_not_migrated(self) -> None:
+        # 回归保护：净额为正时保持原项目，不发生迁移
+        rules, components, decisions = _single_decision_case(
+            "POS-DISP",
+            60_000,
+            "CFI-03",
+            "处置固定资产、无形资产和其他长期资产收回的现金净额",
+            "inflow",
+        )
+
+        result = aggregate_statement(components, decisions, rules)
+
+        self.assertEqual(60_000, result.values["CFI-03"])
+        self.assertEqual(0, result.values["CFI-09"])
+        self.assertEqual(("POS-DISP",), result.support_component_ids["CFI-03"])
 
     def test_opening_and_fx_are_injected_into_closing_cash_formula(self) -> None:
         case = classified_components()
