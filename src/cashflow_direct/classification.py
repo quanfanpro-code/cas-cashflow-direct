@@ -31,6 +31,7 @@ class ClassificationRule:
     exclude_terms: tuple[str, ...]
     account_exclude_terms: tuple[str, ...]
     evidence_level: str
+    sole_account_terms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,7 @@ def load_rule_pack(root: Path) -> RulePack:
             exclude_terms=tuple(rule["exclude_terms"]),
             account_exclude_terms=tuple(rule.get("account_exclude_terms", ())),
             evidence_level=rule["evidence_level"],
+            sole_account_terms=tuple(rule.get("sole_account_terms", ())),
         )
         for rule in rule_payload["rules"]
     )
@@ -114,6 +116,11 @@ def _rule_matches(rule: ClassificationRule, component: CashflowComponent) -> boo
         return False
     if any(term in account_text for term in rule.account_exclude_terms):
         return False
+    if rule.sole_account_terms:
+        counterpart = component.counterpart_accounts
+        if not counterpart or not all(term in rule.sole_account_terms for term in counterpart):
+            return False
+        return True
     if not rule.summary_terms and not rule.account_terms:
         return True
     summary_hits, account_hits = _matched_terms(rule, component)

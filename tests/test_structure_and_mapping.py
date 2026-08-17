@@ -9,6 +9,8 @@ from openpyxl import Workbook
 from cashflow_direct.semantic_mapping import (
     DatasetMapping,
     MappingQuestion,
+    _is_strict_date,
+    _strict_date_share,
     infer_dataset_mapping,
     infer_dataset_mappings,
 )
@@ -98,6 +100,33 @@ class StructureAndMappingTests(unittest.TestCase):
             self.assertEqual(3, len(result.sample_values))
             self.assertTrue(result.recommended.header_path)
             self.assertTrue(result.alternatives)
+
+    def test_strict_date_helpers_reject_non_dates_and_accept_common_formats(self) -> None:
+        self.assertTrue(_is_strict_date("2026-02-26"))
+        self.assertTrue(_is_strict_date("2026/02/06"))
+        self.assertTrue(_is_strict_date("2026.2.6"))
+        self.assertTrue(_is_strict_date("2026年2月6日"))
+        self.assertTrue(_is_strict_date("2026-02-26 10:30:00"))
+        self.assertFalse(_is_strict_date("-139311.41"))
+        self.assertFalse(_is_strict_date(12345))
+        self.assertFalse(_is_strict_date(None))
+        share = _strict_date_share(("2026-02-26", "2026-03-26", "-100"))
+        self.assertAlmostEqual(2 / 3, share)
+
+    def test_date_column_recognized_by_data_format_without_header_term(self) -> None:
+        # 表头“账期”不是词典日期词，但值全是日期 → 仍应识别为凭证日期
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "账期列.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["账期", "凭证编号", "摘要", "科目名称", "借方发生额", "贷方发生额"])
+            sheet.append(["2026-02-26", "记-1", "匿名收款", "银行存款", 100, None])
+            sheet.append(["2026-03-26", "记-2", "匿名付款", "管理费用", None, 50])
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+            self.assertIn("voucher_date", mapping.role_to_column)
+            self.assertEqual("A", mapping.role_to_column["voucher_date"].column_letter)
 
     def test_dinghong_headers_map_flow_amount_and_item(self) -> None:
         # 鼎弘式明细表头：分配金额 → flow_amount；现金流量表项 → flow_item，编码列不得抢答

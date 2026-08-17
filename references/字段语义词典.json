@@ -1,7 +1,7 @@
 ﻿{
   "schema_version": "1.0",
   "roles": {
-    "voucher_date": {"terms": ["记账日期", "凭证日期", "日期"], "value_types": ["date"]},
+    "voucher_date": {"terms": ["记账日期", "凭证日期", "日期", "会计月"], "value_types": ["date"]},
     "voucher_word": {"terms": ["凭证字", "凭证类别"], "value_types": ["text"]},
     "voucher_no": {"terms": ["凭证号", "凭证编号", "凭证号码", "字号"], "value_types": ["text", "integer"]},
     "summary": {"terms": ["摘要", "业务摘要"], "value_types": ["text"]},

@@ -4,10 +4,13 @@ import unittest
 from pathlib import Path
 
 from cashflow_direct.classification import (
+    _rule_matches,
+    ClassificationRule,
     classify_component,
     load_rule_pack,
     standardize_flow_item,
 )
+from cashflow_direct.models import CashflowComponent
 from cashflow_direct.validation import validate_classification
 from cashflow_direct.money import statement_amount_cent
 from tests.fixture_factory import cashflow_component
@@ -28,6 +31,59 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("CFO-06", standardized.item_id)
         self.assertIsNone(standardize_flow_item("客户自定义项目", rules))
         self.assertIsNone(standardize_flow_item("经营活动现金流入小计", rules))
+
+    def test_sole_account_terms_matches_only_when_sole_counterpart(self) -> None:
+        rule = ClassificationRule(
+            rule_id="CFO-06-SOLE",
+            item_id="CFO-06",
+            priority=20,
+            direction="outflow",
+            summary_terms=(),
+            account_terms=(),
+            exclude_terms=(),
+            account_exclude_terms=(),
+            evidence_level="medium",
+            sole_account_terms=("应交税费",),
+        )
+        component = CashflowComponent(
+            component_id="C1",
+            voucher_key="V1",
+            summary="支付款项",
+            cash_delta_cent=-1000,
+            counterpart_accounts=("应交税费",),
+        )
+        self.assertTrue(_rule_matches(rule, component))
+
+        component_with_trade = CashflowComponent(
+            component_id="C2",
+            voucher_key="V2",
+            summary="支付律师费",
+            cash_delta_cent=-1000,
+            counterpart_accounts=("应交税费", "管理费用"),
+        )
+        self.assertFalse(_rule_matches(rule, component_with_trade))
+
+        inflow = CashflowComponent(
+            component_id="C3",
+            voucher_key="V3",
+            summary="收到利息",
+            cash_delta_cent=1000,
+            counterpart_accounts=("应交税费",),
+        )
+        self.assertFalse(_rule_matches(rule, inflow))
+
+    def test_vat_accompanies_trade_classification(self) -> None:
+        rules = load_rule_pack(ROOT)
+        cases = [
+            (cashflow_component("支付律师费", -298496, counterpart_accounts=("管理费用", "应交税费")), "CFO-04"),
+            (cashflow_component("支付CS Fee", -152430, counterpart_accounts=("应付账款", "应交税费")), "CFO-04"),
+            (cashflow_component("收取物业租赁款", 209411655, counterpart_accounts=("预收账款", "应交税费")), "CFO-01"),
+            (cashflow_component("缴纳增值税", -1000, counterpart_accounts=("应交税费",)), "CFO-06"),
+            (cashflow_component("支付款项", -1000, counterpart_accounts=("应交税费",)), "CFO-06"),
+        ]
+        for component, expected in cases:
+            with self.subTest(summary=component.summary):
+                self.assertEqual(expected, classify_component(component, rules).system_item_id)
 
     def test_empty_component_set_cannot_pass_classification_validation(self) -> None:
         result = validate_classification((), ())

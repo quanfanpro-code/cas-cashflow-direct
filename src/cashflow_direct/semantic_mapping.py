@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -83,11 +84,30 @@ def _sample_values(sheet: SheetSnapshot, band: HeaderBand, column: int) -> tuple
     return tuple(values)
 
 
+_DATE_RE = re.compile(
+    r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$|^\d{4}年\d{1,2}月\d{1,2}日$"
+)
+
+
+def _is_strict_date(value: object) -> bool:
+    if isinstance(value, (date, datetime)):
+        return True
+    if isinstance(value, str):
+        return bool(_DATE_RE.match(value.strip()))
+    return False
+
+
+def _strict_date_share(values: tuple[object, ...]) -> float:
+    if not values:
+        return 0.0
+    return sum(1 for value in values if _is_strict_date(value)) / len(values)
+
+
 def _type_bonus(values: tuple[object, ...], expected: list[str]) -> int:
     if not values:
         return 0
     if "date" in expected:
-        hits = sum(isinstance(value, (date, datetime)) or (isinstance(value, str) and "-" in value) for value in values)
+        hits = sum(1 for value in values if _is_strict_date(value))
     elif "money" in expected:
         hits = sum(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values)
     elif "integer" in expected:
@@ -122,6 +142,8 @@ def _map_band(
         values = _sample_values(sheet, band, column)
         for role, spec in roles.items():
             score = _score(role, path, values, spec)
+            if role == "voucher_date" and _strict_date_share(values) >= 0.6 and score < 9:
+                score = 9
             if score >= 7:
                 candidates[role].append(
                     ColumnMapping(
