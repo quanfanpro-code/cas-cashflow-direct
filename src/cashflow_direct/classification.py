@@ -140,6 +140,18 @@ def _normalize_item_name(value: str) -> str:
     return re.sub(r"[\s，。；：、,.!！?？（）()《》\[\]【】]+", "", value)
 
 
+def standardize_flow_item(value: str, rules: RulePack) -> StatementItem | None:
+    normalized = _normalize_item_name(value)
+    return next(
+        (
+            item
+            for item in rules.statement_items
+            if item.is_leaf and normalized and _normalize_item_name(item.name) == normalized
+        ),
+        None,
+    )
+
+
 def classify_component(
     component: CashflowComponent,
     rules: RulePack,
@@ -158,15 +170,7 @@ def classify_component(
             excluded=True,
         )
 
-    normalized_label = _normalize_item_name(component.original_item_text)
-    exact_item = next(
-        (
-            item
-            for item in rules.statement_items
-            if item.is_leaf and normalized_label and _normalize_item_name(item.name) == normalized_label
-        ),
-        None,
-    )
+    exact_item = standardize_flow_item(component.original_item_text, rules)
     matches = [rule for rule in rules.rules if _rule_matches(rule, component)]
     if not matches:
         raise ValueError(f"组成 {component.component_id} 未取得唯一系统首选")

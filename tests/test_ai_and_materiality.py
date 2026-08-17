@@ -54,7 +54,7 @@ class AIAndMaterialityTests(unittest.TestCase):
         )
         self.assertEqual(["type_a"], [task.component_id for task in tasks])
 
-    def test_high_business_conflicts_use_the_5000_yuan_ai_threshold(self) -> None:
+    def test_high_business_conflicts_use_trivial_materiality_threshold(self) -> None:
         materiality = MaterialityAmounts(10_000_000, 5_000_000, 500_000)
         below = cashflow_component("冲突", 499_999, component_id="HIGH-BELOW")
         at = cashflow_component("冲突", 500_000, component_id="HIGH-AT")
@@ -78,7 +78,7 @@ class AIAndMaterialityTests(unittest.TestCase):
 
         self.assertEqual(["HIGH-AT"], [task.component_id for task in tasks])
 
-    def test_medium_and_low_evidence_use_the_50000_yuan_ai_threshold(self) -> None:
+    def test_medium_and_low_evidence_use_performance_materiality_threshold(self) -> None:
         materiality = MaterialityAmounts(10_000_000, 5_000_000, 500_000)
         components = [
             cashflow_component("往来款", 4_999_999, component_id="MEDIUM-BELOW"),

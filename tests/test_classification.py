@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from cashflow_direct.classification import classify_component, load_rule_pack
+from cashflow_direct.classification import (
+    classify_component,
+    load_rule_pack,
+    standardize_flow_item,
+)
 from cashflow_direct.validation import validate_classification
 from cashflow_direct.money import statement_amount_cent
 from tests.fixture_factory import cashflow_component
@@ -13,6 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClassificationTests(unittest.TestCase):
+    def test_standardize_flow_item_uses_leaf_names_and_ignores_format_punctuation(self) -> None:
+        rules = load_rule_pack(ROOT)
+
+        standardized = standardize_flow_item(
+            " 支付的各项税费，。 ", rules
+        )
+
+        self.assertIsNotNone(standardized)
+        self.assertEqual("CFO-06", standardized.item_id)
+        self.assertIsNone(standardize_flow_item("客户自定义项目", rules))
+        self.assertIsNone(standardize_flow_item("经营活动现金流入小计", rules))
+
     def test_empty_component_set_cannot_pass_classification_validation(self) -> None:
         result = validate_classification((), ())
         self.assertFalse(result.valid)

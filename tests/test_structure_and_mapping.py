@@ -22,6 +22,27 @@ from tests.fixture_factory import (
 
 
 class StructureAndMappingTests(unittest.TestCase):
+    def test_voucher_word_and_account_code_are_mapped_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "独立编码字段.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(
+                ["日期", "凭证字", "凭证号", "摘要", "科目编码", "科目名称", "借方", "贷方"]
+            )
+            sheet.append(
+                ["2026-01-01", "记", 1, "匿名收款", "1002.01", "银行存款", 100, None]
+            )
+            workbook.save(path)
+
+            mapping = infer_dataset_mapping(scan_workbook(path))
+
+            self.assertIsInstance(mapping, DatasetMapping)
+            self.assertEqual(2, mapping.role_to_column["voucher_word"].column_index)
+            self.assertEqual(3, mapping.role_to_column["voucher_no"].column_index)
+            self.assertEqual(5, mapping.role_to_column["account_code"].column_index)
+            self.assertEqual(6, mapping.role_to_column["account_name"].column_index)
+
     def test_every_data_sheet_gets_its_own_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "按月序时账.xlsx"

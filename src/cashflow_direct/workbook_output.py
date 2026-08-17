@@ -27,9 +27,30 @@ SHEET_NAMES = (
     "重要待复核事项",
     "疑似重复事项",
     "AI复核记录",
+    "原表与自动判定差异",
     "现金范围与现金流量表与货币资金变动的勾稽核对",
     "全量分类留痕",
     "输入识别与字段映射",
+)
+
+DIFFERENCE_HEADERS = (
+    "日期",
+    "凭证字",
+    "凭证号",
+    "摘要",
+    "科目编码",
+    "科目名称",
+    "借方",
+    "贷方",
+    "流量金额（原币）",
+    "主表项目名称",
+    "对方科目",
+    "原项目标准化结果",
+    "自动判定现流项目",
+    "差异说明",
+    "来源文件",
+    "来源工作表",
+    "来源单元格",
 )
 
 
@@ -46,6 +67,7 @@ class WorkbookModel:
     trace_rows: tuple[Mapping[str, object], ...]
     mapping_rows: tuple[Mapping[str, object], ...]
     overall_status: str
+    difference_rows: tuple[Mapping[str, object], ...] = ()
     unconfirmed_statement: bool = False
 
 
@@ -147,12 +169,44 @@ def _write_dict_rows(
     _configure_sheet(sheet, len(headers), len(rows) + 1)
 
 
+def _write_difference_rows(
+    sheet: xlsxwriter.worksheet.Worksheet,
+    rows: Sequence[Mapping[str, object]],
+    formats: dict[str, xlsxwriter.format.Format],
+) -> None:
+    money_headers = {"借方", "贷方", "流量金额（原币）"}
+    for column, header in enumerate(DIFFERENCE_HEADERS):
+        sheet.write(0, column, header, formats["header"])
+    if rows:
+        for row_index, row in enumerate(rows, 1):
+            for column, header in enumerate(DIFFERENCE_HEADERS):
+                value = row.get(header)
+                if header in money_headers:
+                    if value is None:
+                        sheet.write_blank(row_index, column, None, formats["money"])
+                    else:
+                        sheet.write_number(row_index, column, float(value), formats["money"])
+                else:
+                    sheet.write(row_index, column, value or "", formats["text"])
+        sheet.autofilter(0, 0, len(rows), len(DIFFERENCE_HEADERS) - 1)
+    else:
+        sheet.write(1, 0, "原表项目与自动判定项目无差异。", formats["note"])
+    sheet.set_column(0, 2, 14)
+    sheet.set_column(3, 5, 24)
+    sheet.set_column(6, 8, 16)
+    sheet.set_column(9, 13, 38)
+    sheet.set_column(14, 16, 24)
+    _configure_sheet(sheet, len(DIFFERENCE_HEADERS), len(rows) + 1)
+
+
 def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     target = Path(output_path)
     if target.exists():
         raise FileExistsError(f"输出文件已存在，不会覆盖：{target}")
     if len(model.trace_rows) > 100_000:
         raise ValueError("全量分类留痕超过本版本 100,000 行验收范围")
+    if len(model.difference_rows) > 100_000:
+        raise ValueError("原表与自动判定差异明细超过本版本 100,000 行验收范围")
     if any(not batch.alternative_item_codes for batch in model.review_batches):
         raise ValueError("重要待复核事项存在没有备选现流项目的记录")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -518,6 +572,13 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         )
         sheets["AI复核记录"].hide()
 
+        _write_difference_rows(
+            sheets["原表与自动判定差异"], model.difference_rows, formats
+        )
+        sheets["原表与自动判定差异"].protect(
+            "", {"autofilter": True, "sort": True}
+        )
+
         cash_rows = list(model.cash_scope_rows)
         if model.reconciliation is not None:
             for project, amount in (
@@ -598,6 +659,15 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
             errors.append("机器工作表的默认隐藏状态不正确")
         if workbook._external_links:
             errors.append("工作簿包含外部链接")
+        difference = workbook["原表与自动判定差异"]
+        if tuple(cell.value for cell in difference[1]) != DIFFERENCE_HEADERS:
+            errors.append("原表与自动判定差异表头不正确")
+        if difference.freeze_panes != "A2":
+            errors.append("原表与自动判定差异冻结窗格不正确")
+        if model.difference_rows and difference.auto_filter.ref is None:
+            errors.append("原表与自动判定差异未设置筛选")
+        if not difference.protection.sheet:
+            errors.append("原表与自动判定差异未设置只读保护")
         main = workbook["现金流量表正表"]
         if main.freeze_panes != "A4":
             errors.append("正表冻结窗格不正确")
@@ -615,6 +685,16 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
             errors.append("正表未引用疑似重复事项调整层")
         if any("[" in formula or "全量分类留痕" in formula for formula in formulas):
             errors.append("正表公式引用了外部工作簿或全量留痕")
+        if any("原表与自动判定差异" in formula for formula in formulas):
+            errors.append("正表公式引用了原表与自动判定差异")
+        status_formulas = [
+            cell.value
+            for row in workbook["使用说明与状态"].iter_rows()
+            for cell in row
+            if isinstance(cell.value, str) and cell.value.startswith("=")
+        ]
+        if any("原表与自动判定差异" in formula for formula in status_formulas):
+            errors.append("首页状态公式引用了原表与自动判定差异")
         for index, item in enumerate(sorted(model.rules.statement_items, key=lambda value: value.display_order), 4):
             actual = main.cell(index, 4).value
             expected = model.statement.values[item.item_id] / 100

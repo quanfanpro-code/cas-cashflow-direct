@@ -2,8 +2,10 @@
   "schema_version": "1.0",
   "roles": {
     "voucher_date": {"terms": ["记账日期", "凭证日期", "日期"], "value_types": ["date"]},
+    "voucher_word": {"terms": ["凭证字", "凭证类别"], "value_types": ["text"]},
     "voucher_no": {"terms": ["凭证号", "凭证编号", "凭证号码", "字号"], "value_types": ["text", "integer"]},
     "summary": {"terms": ["摘要", "业务摘要"], "value_types": ["text"]},
+    "account_code": {"terms": ["科目编码", "科目代码", "科目编号", "会计科目编码"], "value_types": ["text", "integer"]},
     "account_name": {"terms": ["科目名称", "会计科目", "一级科目", "科目"], "value_types": ["text"]},
     "counterpart_name": {"terms": ["对方科目名称", "对方科目"], "value_types": ["text"]},
     "debit": {"terms": ["借方发生额", "借方金额", "借方"], "value_types": ["money"]},

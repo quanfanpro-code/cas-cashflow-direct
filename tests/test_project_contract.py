@@ -39,6 +39,18 @@ class ProjectContractTests(unittest.TestCase):
         for token in forbidden:
             self.assertNotIn(token, text)
 
+    def test_user_documents_describe_the_ten_sheet_difference_output(self) -> None:
+        documents = (
+            ROOT / "README.md",
+            ROOT / "SKILL.md",
+            ROOT / "references" / "使用说明.md",
+        )
+        for path in documents:
+            text = path.read_text(encoding="utf-8-sig")
+            self.assertIn("十张", text, path.name)
+            self.assertIn("原表与自动判定差异", text, path.name)
+            self.assertNotIn("九张", text, path.name)
+
 
 if __name__ == "__main__":
     unittest.main()

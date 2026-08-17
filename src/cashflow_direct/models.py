@@ -40,6 +40,11 @@ class NormalizedEntry:
     original_flow_item: str
     label_side: str = "unknown"
     retained_side: str = "unknown"
+    voucher_word: str = ""
+    account_code: str = ""
+    source_debit_cent: int | None = None
+    source_credit_cent: int | None = None
+    source_flow_amount_cent: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

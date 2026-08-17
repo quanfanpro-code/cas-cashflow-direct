@@ -38,6 +38,7 @@ from cashflow_direct.consistency import (
     resolve_consistency_groups,
 )
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
+from cashflow_direct.differences import build_original_auto_differences
 from cashflow_direct.intake import register_inputs, validate_materiality
 from cashflow_direct.models import (
     CashflowComponent,
@@ -1295,10 +1296,8 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
 
     components = tuple(_component_from_dict(item) for item in state["components"])
     decisions = tuple(_decision_from_dict(item) for item in state["decisions"])
-    entry_by_id = {
-        entry.entry_id: entry
-        for entry in (_entry_from_dict(item) for item in state["entries"])
-    }
+    entries = tuple(_entry_from_dict(item) for item in state["entries"])
+    entry_by_id = {entry.entry_id: entry for entry in entries}
     rules = load_rule_pack(PROJECT_ROOT)
     comparison = None
     existing = None
@@ -1538,6 +1537,17 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             }
         )
     trace_rows = tuple(trace_rows_list)
+    difference_rows = build_original_auto_differences(
+        entries,
+        components,
+        decisions,
+        frozenset(
+            str(item["entry_id"])
+            for item in state.get("internal_transfers", ())
+        ),
+        rules,
+        file_name_by_id,
+    )
     mapping_rows = tuple(
         {
             "文件": item["file"],
@@ -1603,6 +1613,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         ),
         reconciliation=reconciliation,
         trace_rows=trace_rows,
+        difference_rows=difference_rows,
         mapping_rows=mapping_rows,
         overall_status=status,
         unconfirmed_statement=statement_unconfirmed,

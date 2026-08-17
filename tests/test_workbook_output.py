@@ -30,6 +30,7 @@ EXPECTED_SHEETS = [
     "重要待复核事项",
     "疑似重复事项",
     "AI复核记录",
+    "原表与自动判定差异",
     "现金范围与现金流量表与货币资金变动的勾稽核对",
     "全量分类留痕",
     "输入识别与字段映射",
@@ -37,6 +38,68 @@ EXPECTED_SHEETS = [
 
 
 class WorkbookOutputTests(unittest.TestCase):
+    def test_original_auto_difference_sheet_keeps_rows_visible_and_read_only(self) -> None:
+        difference_row = {
+            "日期": "2026-01-01",
+            "凭证字": "记",
+            "凭证号": "1",
+            "摘要": "匿名税费",
+            "科目编码": "1002.01",
+            "科目名称": "银行存款",
+            "借方": None,
+            "贷方": 100.0,
+            "流量金额（原币）": 100.0,
+            "主表项目名称": "支付的各项税费",
+            "对方科目": "营业外支出",
+            "原项目标准化结果": "支付的各项税费",
+            "自动判定现流项目": "支付其他与经营活动有关的现金",
+            "差异说明": "标准项目不一致",
+            "来源文件": "匿名输入.xlsx",
+            "来源工作表": "明细",
+            "来源单元格": "A2:L2",
+        }
+        model = replace(workbook_model(0, 0), difference_rows=(difference_row,))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "原表差异.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                sheet = workbook["原表与自动判定差异"]
+                self.assertEqual(
+                    list(difference_row), [cell.value for cell in sheet[1]]
+                )
+                self.assertEqual("A2", sheet.freeze_panes)
+                self.assertIsNotNone(sheet.auto_filter.ref)
+                self.assertEqual("支付的各项税费", sheet["J2"].value)
+                self.assertEqual(
+                    "支付其他与经营活动有关的现金", sheet["M2"].value
+                )
+                self.assertIn("#,##0.00", sheet["H2"].number_format)
+                self.assertIsNone(sheet["G2"].value)
+                self.assertTrue(sheet["A2"].protection.locked)
+                self.assertTrue(sheet.protection.sheet)
+            finally:
+                workbook.close()
+
+    def test_empty_difference_sheet_remains_visible_with_explanation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "无差异.xlsx"
+            build_output_workbook(workbook_model(0, 0), path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                sheet = workbook["原表与自动判定差异"]
+                self.assertEqual("visible", sheet.sheet_state)
+                self.assertIn("无差异", str(sheet["A2"].value))
+            finally:
+                workbook.close()
+
+    def test_more_than_100000_difference_rows_are_rejected(self) -> None:
+        row = {"主表项目名称": "支付的各项税费", "自动判定现流项目": "不进入正表"}
+        model = replace(workbook_model(0, 0), difference_rows=(row,) * 100_001)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "差异明细超过"):
+                build_output_workbook(model, Path(tmp) / "超限.xlsx")
+
     def test_generated_workbook_uses_consistent_professional_base_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "统一格式.xlsx"
@@ -93,6 +156,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertTrue(any("重要待复核事项" in formula for formula in formulas))
                 self.assertTrue(any("疑似重复事项" in formula for formula in formulas))
                 self.assertTrue(all("全量分类留痕" not in formula for formula in formulas))
+                self.assertTrue(all("原表与自动判定差异" not in formula for formula in formulas))
                 self.assertLess(len(formulas), 300)
                 self.assertTrue(workbook["现金流量表正表"].freeze_panes)
                 self.assertTrue(workbook["重要待复核事项"].data_validations.dataValidation)

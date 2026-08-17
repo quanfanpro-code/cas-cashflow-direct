@@ -172,15 +172,18 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
                 continue
 
             money: dict[str, int] = {}
+            source_money: dict[str, int | None] = {}
             failed = False
             for role in ("debit", "credit", "flow_amount"):
                 column = mapping.role_to_column.get(role)
                 value = _cell_value(tuple(row), mapping, role)
                 if column is None or value in (None, ""):
                     money[role] = 0
+                    source_money[role] = None
                     continue
                 try:
                     money[role] = yuan_to_cent(value)
+                    source_money[role] = money[role]
                 except ValueError:
                     errors.append(
                         RowError(
@@ -210,11 +213,13 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
                     continue
 
             account = _text(_cell_value(tuple(row), mapping, "account_name"))
+            account_code = _text(_cell_value(tuple(row), mapping, "account_code"))
             counterpart = _text(_cell_value(tuple(row), mapping, "counterpart_name"))
             retained_side = _retained_side(account)
             original_item = _text(_cell_value(tuple(row), mapping, "flow_item"))
             label_side = retained_side if original_item else "unknown"
             voucher_date = _date_text(_cell_value(tuple(row), mapping, "voucher_date"))
+            voucher_word = _text(_cell_value(tuple(row), mapping, "voucher_word"))
             voucher_no = _text(_cell_value(tuple(row), mapping, "voucher_no"))
             if "voucher_date" in mapping.role_to_column and not voucher_date:
                 voucher_date = previous_voucher_date
@@ -243,6 +248,11 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
                     original_flow_item=original_item,
                     label_side=label_side,
                     retained_side=retained_side,
+                    voucher_word=voucher_word,
+                    account_code=account_code,
+                    source_debit_cent=source_money["debit"],
+                    source_credit_cent=source_money["credit"],
+                    source_flow_amount_cent=source_money["flow_amount"],
                 )
             )
     finally:

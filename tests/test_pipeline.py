@@ -29,6 +29,87 @@ from tests.fixture_factory import (
 
 
 class PipelineTests(unittest.TestCase):
+    def test_original_and_auto_item_difference_is_exported_without_affecting_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "原项目与自动判定不一致.xlsx"
+            workbook = Workbook()
+            detail = workbook.active
+            detail.title = "序时账"
+            detail.append(
+                [
+                    "日期",
+                    "凭证字",
+                    "凭证号",
+                    "摘要",
+                    "科目编码",
+                    "科目名称",
+                    "借方",
+                    "贷方",
+                    "主表项目名称",
+                ]
+            )
+            detail.append(
+                ["2026/1/1", "记", "1", "支付税收滞纳金", "1002", "银行存款", None, 100, None]
+            )
+            detail.append(
+                [
+                    "2026/1/1",
+                    "记",
+                    "1",
+                    "支付税收滞纳金",
+                    "6711",
+                    "营业外支出",
+                    100,
+                    None,
+                    "支付的各项税费",
+                ]
+            )
+            balances = workbook.create_sheet("现金余额资料")
+            balances.append(["项目", "金额"])
+            balances.append(["期初现金及现金等价物余额", 1_000])
+            balances.append(["汇率变动影响", 0])
+            balances.append(["期末现金及现金等价物余额", 900])
+            workbook.save(source)
+            workbook.close()
+
+            preflight = run_preflight(
+                [source], ("1000000", "750000", "50000"), output_parent=root
+            )
+            confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            supplement_cash_balances(
+                preflight.run_dir, "1000", "900", "0", "测试现金余额"
+            )
+            run_classification(preflight.run_dir)
+            final = finalize_run(preflight.run_dir)
+
+            self.assertEqual("最终可使用", final.overall_status)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            self.assertEqual(0, state["reconciliation"]["difference_cent"])
+            workbook = load_workbook(final.workbook_path, data_only=False)
+            try:
+                sheet = workbook["原表与自动判定差异"]
+                headers = [cell.value for cell in sheet[1]]
+                row = {
+                    header: sheet.cell(2, column).value
+                    for column, header in enumerate(headers, start=1)
+                }
+                self.assertEqual(2, sheet.max_row)
+                self.assertEqual("记", row["凭证字"])
+                self.assertEqual("1", str(row["凭证号"]))
+                self.assertEqual("6711", str(row["科目编码"]))
+                self.assertEqual("支付的各项税费", row["主表项目名称"])
+                self.assertEqual("支付其他与经营活动有关的现金", row["自动判定现流项目"])
+                self.assertEqual(100, row["借方"])
+                self.assertIsNone(row["流量金额（原币）"])
+                self.assertEqual("标准项目不一致", row["差异说明"])
+            finally:
+                workbook.close()
+
     def test_unresolved_consistency_group_does_not_duplicate_human_review_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -19,6 +19,51 @@ from tests.fixture_factory import break_dimension, write_all_input_types
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_optional_source_fields_preserve_blank_zero_and_negative_amounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "原始字段.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(
+                [
+                    "日期",
+                    "凭证字",
+                    "凭证号",
+                    "摘要",
+                    "科目编码",
+                    "科目名称",
+                    "借方",
+                    "贷方",
+                    "流量金额",
+                    "主表项目",
+                ]
+            )
+            sheet.append(
+                [
+                    "2026-01-01",
+                    "记",
+                    1,
+                    "匿名红冲",
+                    "1002.01",
+                    "银行存款",
+                    0,
+                    None,
+                    -12.34,
+                    "销售商品、提供劳务收到的现金",
+                ]
+            )
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+
+            entry = normalize_dataset(path, "FRAW", mapping).entries[0]
+
+            self.assertEqual("记", entry.voucher_word)
+            self.assertEqual("1002.01", entry.account_code)
+            self.assertEqual(0, entry.source_debit_cent)
+            self.assertIsNone(entry.source_credit_cent)
+            self.assertEqual(-1_234, entry.source_flow_amount_cent)
+
     def test_five_input_shapes_normalize_without_template_numbers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             files = write_all_input_types(Path(tmp))
