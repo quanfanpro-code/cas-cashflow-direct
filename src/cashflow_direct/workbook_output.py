@@ -163,7 +163,12 @@ def _write_dict_rows(
         sheet.write(0, column, header, formats["header"])
     for row_index, row in enumerate(rows, 1):
         for column, header in enumerate(headers):
-            sheet.write(row_index, column, row.get(header, ""), formats["text"])
+            cell_format = (
+                formats["money"]
+                if header in {"金额（元）", "现金变化"}
+                else formats["text"]
+            )
+            sheet.write(row_index, column, row.get(header, ""), cell_format)
     sheet.autofilter(0, 0, len(rows), len(headers) - 1)
     sheet.set_column(0, len(headers) - 1, 20)
     _configure_sheet(sheet, len(headers), len(rows) + 1)

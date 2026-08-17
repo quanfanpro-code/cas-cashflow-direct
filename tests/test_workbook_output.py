@@ -38,6 +38,40 @@ EXPECTED_SHEETS = [
 
 
 class WorkbookOutputTests(unittest.TestCase):
+    def test_generic_money_columns_use_thousands_separators(self) -> None:
+        model = replace(
+            workbook_model(0, 0),
+            reconciliation=ReconciliationResult(
+                "现金流量表与货币资金变动的勾稽核对：相符",
+                123_456_789,
+                133_456_789,
+                0,
+                10_000_000,
+                0,
+            ),
+            trace_rows=({"摘要": "匿名业务", "现金变化": 1_234_567.89},),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "金额格式.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                cash = workbook["现金范围与现金流量表与货币资金变动的勾稽核对"]
+                amount_column = [cell.value for cell in cash[1]].index("金额（元）") + 1
+                opening_row = next(
+                    row
+                    for row in range(2, cash.max_row + 1)
+                    if cash.cell(row, 1).value == "期初现金及现金等价物余额"
+                )
+                self.assertIn(
+                    "#,##0.00", cash.cell(opening_row, amount_column).number_format
+                )
+                self.assertIn(
+                    "#,##0.00", workbook["全量分类留痕"]["B2"].number_format
+                )
+            finally:
+                workbook.close()
+
     def test_original_auto_difference_sheet_keeps_rows_visible_and_read_only(self) -> None:
         difference_row = {
             "日期": "2026-01-01",
