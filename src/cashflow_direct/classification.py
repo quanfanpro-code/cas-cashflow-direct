@@ -118,9 +118,14 @@ def _rule_matches(rule: ClassificationRule, component: CashflowComponent) -> boo
         return False
     if rule.sole_account_terms:
         counterpart = component.counterpart_accounts
-        if not counterpart or not all(term in rule.sole_account_terms for term in counterpart):
+        if not counterpart:
             return False
-        return True
+        # 唯一对方科目判断：每个对方科目名称只需包含任一 sole 词，
+        # 以兼容“应交税费_应交个人所得税”这类带明细级次的科目名
+        return all(
+            any(sole_term in account for sole_term in rule.sole_account_terms)
+            for account in counterpart
+        )
     if not rule.summary_terms and not rule.account_terms:
         return True
     summary_hits, account_hits = _matched_terms(rule, component)
@@ -197,17 +202,26 @@ def classify_component(
             )
         fallback = matches[0]
         item = rules.item_by_id[fallback.item_id]
+        if fallback.sole_account_terms:
+            # 唯一对方科目规则：摘要无业务线索，但对方科目全部属于某一类（如应交税费），
+            # 证据等级取规则自身声明（中证据），并走人工复核
+            reason = (
+                "摘要无明确业务线索，但对方科目唯一且均属"
+                f"“{'、'.join(fallback.sole_account_terms)}”类，因此判断为“{item.name}”"
+            )
+        else:
+            reason = (
+                "业务信息及原标签均不足以判断，暂按现金方向归入其他经营活动项目；"
+                f"现金为{'流入' if component.cash_delta_cent > 0 else '流出'}，证据较弱"
+            )
         return ClassificationDecision(
             component_id=component.component_id,
             system_item_id=item.item_id,
             system_item_name=item.name,
             normal_direction=item.normal_direction,
             matched_rule_id=fallback.rule_id,
-            reason=(
-                "业务信息及原标签均不足以判断，暂按现金方向归入其他经营活动项目；"
-                f"现金为{'流入' if component.cash_delta_cent > 0 else '流出'}，证据较弱"
-            ),
-            evidence_level="low",
+            reason=reason,
+            evidence_level=fallback.evidence_level,
         )
 
     chosen = business_matches[0]

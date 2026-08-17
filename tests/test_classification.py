@@ -458,6 +458,80 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("CFO-01", refund.system_item_id)
         self.assertEqual("high", refund.evidence_level)
 
+    def test_withheld_individual_income_tax_belongs_to_staff_payments(self) -> None:
+        # 应用指南三(一)5：代扣代缴的个人所得税款应在"支付给职工以及为职工支付的现金"
+        # 反映，不属于"支付的各项税费"
+        decision = classify_component(
+            cashflow_component("代扣个人所得税", -100, ("应交税费_应交个人所得税",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-05", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_plain_individual_income_tax_payment_uses_only_sole_account_rule(self) -> None:
+        # 未写明代扣的缴税不再命中 CFO-06 高证据摘要词，只保留应交税费唯一对方科目的中证据兜底
+        decision = classify_component(
+            cashflow_component("缴纳个人所得税", -100, ("应交税费_应交个人所得税",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-06-SOLE", decision.matched_rule_id)
+        self.assertEqual("medium", decision.evidence_level)
+
+    def test_enterprise_income_tax_still_uses_tax_payment_rule(self) -> None:
+        # 回归保护：企业所得税仍命中 CFO-06 高证据摘要词
+        decision = classify_component(
+            cashflow_component("缴纳企业所得税", -100, ("应交税费",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-06", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_note_discounting_is_not_high_evidence_sales_collection(self) -> None:
+        # 会计类第1号指引及上交所案例：贴现不符合终止确认条件时应列筹资流入并确认为借款，
+        # 不得高证据归入销售回款；证据不足时落低证据兜底并进入复核
+        decision = classify_component(
+            cashflow_component("票据贴现", 100, ("应收票据_银行承兑汇票",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-03", decision.system_item_id)
+        self.assertEqual("CFO-03-FALLBACK", decision.matched_rule_id)
+        self.assertEqual("low", decision.evidence_level)
+
+    def test_note_maturity_collection_stays_sales_collection(self) -> None:
+        # 回归保护：票据到期收款仍是销售回款
+        decision = classify_component(
+            cashflow_component("票据到期收款", 100, ("应收票据",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-01", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_wealth_management_redemption_principal_is_investment_recovery(self) -> None:
+        # 应用指南三(二)1：理财/结构性存款赎回本金入"收回投资收到的现金"，
+        # 只有收益部分才入"取得投资收益收到的现金"
+        decision = classify_component(
+            cashflow_component("赎回理财产品本金", 100, ("交易性金融资产",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-01", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
+    def test_structured_deposit_interest_stays_investment_income(self) -> None:
+        # 回归保护：结构性存款利息仍归 CFI-02，赎回排除词不能误伤收益场景
+        decision = classify_component(
+            cashflow_component("收到结构性存款利息", 100, ("结构性存款",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFI-02", decision.system_item_id)
+        self.assertEqual("high", decision.evidence_level)
+
 
 if __name__ == "__main__":
     unittest.main()
