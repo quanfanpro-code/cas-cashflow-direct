@@ -703,7 +703,12 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     }
     if len(use_paths) > 1:
         raise RuntimeError("多个文件被确认为客户现有正表，请只保留一个")
-    state["existing_statement_path"] = next(iter(use_paths), None)
+    if use_paths:
+        state["existing_statement_path"] = next(iter(use_paths))
+    elif statement_candidates:
+        # 存在待确认的疑似正表但均未确认纳入核对时，清空正表登记
+        state["existing_statement_path"] = None
+    # 无待确认疑似正表时，保留 preflight 通过 --statement-path 指定的正表
     if state["existing_statement_path"] is not None:
         parsed = parse_existing_statement(
             Path(str(state["existing_statement_path"])), load_rule_pack(PROJECT_ROOT)

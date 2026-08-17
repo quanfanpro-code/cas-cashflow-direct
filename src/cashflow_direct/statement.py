@@ -147,7 +147,7 @@ def aggregate_statement(
 
 def _normalize_item_name(value: str) -> str:
     text = re.sub(r"[\s，。；：、,.!！?？（）()《》\[\]【】]+", "", value)
-    return text.replace("和", "").replace("其中", "")
+    return text.replace("以及", "及").replace("和", "").replace("其中", "")
 
 
 def _mapping_question(
@@ -292,6 +292,19 @@ def _parse_statement_rows(
         item_id = _match_item_id(normalized)
         current_value = row[current_column] if current_column < len(row) else None
         prior_value = row[prior_column] if prior_column is not None and prior_column < len(row) else None
+        # 占位符（如"——"）视为无金额，节标题行才能正确跳过
+        if isinstance(current_value, str) and current_value.strip() in {"——", "—", "–", "-", "―"}:
+            current_value = None
+        if isinstance(prior_value, str) and prior_value.strip() in {"——", "—", "–", "-", "―"}:
+            prior_value = None
+        # 纯空白字符串金额视为无金额（注释行等）
+        if isinstance(current_value, str) and not current_value.strip():
+            current_value = None
+        if isinstance(prior_value, str) and not prior_value.strip():
+            prior_value = None
+        # 金融企业专用行（△ 前缀）金额全为零或无金额时不参与一般企业正表核对，直接跳过
+        if name.startswith("△") and not current_value and not prior_value:
+            continue
         if item_id is not None:
             values[item_id] = _amount_to_cent(current_value, unit_multiplier)
             prior_values[item_id] = _amount_to_cent(prior_value, unit_multiplier)
