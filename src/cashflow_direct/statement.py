@@ -74,6 +74,8 @@ def _migrate_negative_net(
 
     处置固定资产、无形资产和其他长期资产收回的现金净额（CFI-03）为负 →
     移入"支付其他与投资活动有关的现金"（CFI-09）；
+    处置子公司及其他营业单位收到的现金净额（CFI-04）为负 →
+    移入"支付其他与投资活动有关的现金"（CFI-09）；
     取得子公司及其他营业单位支付的现金净额（CFI-08）为负 →
     移入"收到其他与投资活动有关的现金"（CFI-05）。
     迁移连同支撑组成编号一并转移，保持留痕可追溯。
@@ -113,6 +115,7 @@ def aggregate_statement(
 
     # 净额类项目为负时的列报迁移（须在汇总行公式计算之前执行）
     _migrate_negative_net(values, support, "CFI-03", "CFI-09")
+    _migrate_negative_net(values, support, "CFI-04", "CFI-09")
     _migrate_negative_net(values, support, "CFI-08", "CFI-05")
 
     if fx_cent is not None:

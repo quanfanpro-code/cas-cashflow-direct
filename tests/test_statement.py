@@ -103,6 +103,24 @@ class StatementTests(unittest.TestCase):
         self.assertEqual(("NEG-ACQ",), result.support_component_ids["CFI-05"])
         self.assertEqual((), result.support_component_ids["CFI-08"])
 
+    def test_dispose_subsidiary_net_negative_moves_to_other_investing_outflow(self) -> None:
+        # 应用指南三(二)4：处置子公司及其他营业单位收到的现金净额为负数时，
+        # 填列至"支付其他与投资活动有关的现金"项目
+        rules, components, decisions = _single_decision_case(
+            "NEG-DISP-SUB",
+            -30_000,
+            "CFI-04",
+            "处置子公司及其他营业单位收到的现金净额",
+            "inflow",
+        )
+
+        result = aggregate_statement(components, decisions, rules)
+
+        self.assertEqual(0, result.values["CFI-04"])
+        self.assertEqual(30_000, result.values["CFI-09"])
+        self.assertEqual(("NEG-DISP-SUB",), result.support_component_ids["CFI-09"])
+        self.assertEqual((), result.support_component_ids["CFI-04"])
+
     def test_positive_net_items_are_not_migrated(self) -> None:
         # 回归保护：净额为正时保持原项目，不发生迁移
         rules, components, decisions = _single_decision_case(
