@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -90,7 +91,10 @@ def calculate_manual_adjustments(
 
 
 def _formats(workbook: xlsxwriter.Workbook) -> dict[str, xlsxwriter.format.Format]:
-    base = {"font_name": "Arial", "font_size": 11}
+    base = {
+        "font_name": "Times New Roman",
+        "font_size": 11,
+    }
     return {
         "title": workbook.add_format(
             {**base, "bold": True, "font_size": 16, "font_color": "#FFFFFF", "bg_color": "#17365D", "align": "center", "valign": "vcenter"}
@@ -498,6 +502,8 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 ("现流项目" if key == "item_id" else key): (
                     item_name_by_id.get(str(value), value)
                     if key == "item_id"
+                    else json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, (dict, list, tuple))
                     else value
                 )
                 for key, value in row.items()
@@ -556,11 +562,20 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 formats["pending"],
                 model.reconciliation.status,
             )
-        _write_dict_rows(sheets["全量分类留痕"], model.trace_rows, formats, "没有现金流业务组成。")
-        for column in ("O:O", "P:P", "Q:Q"):
-            sheets["全量分类留痕"].set_column(
-                column, 20, None, {"hidden": True}
-            )
+        trace_sheet = sheets["全量分类留痕"]
+        _write_dict_rows(trace_sheet, model.trace_rows, formats, "没有现金流业务组成。")
+        trace_headers = tuple(
+            dict.fromkeys(key for row in model.trace_rows for key in row.keys())
+        )
+        hidden_trace_headers = {
+            "命中规则(技术)",
+            "业务组成编号(技术)",
+            "来源占用键(技术)",
+            "业务组编号(技术)",
+        }
+        for column, header in enumerate(trace_headers):
+            if header in hidden_trace_headers:
+                trace_sheet.set_column(column, column, 20, None, {"hidden": True})
         _write_dict_rows(sheets["输入识别与字段映射"], model.mapping_rows, formats, "没有字段映射记录。")
         sheets["输入识别与字段映射"].hide()
     finally:

@@ -232,6 +232,28 @@ class AIAndMaterialityTests(unittest.TestCase):
         grouped = next(batch for batch in batches if set(batch.component_ids) == {"a", "b"})
         self.assertEqual(80_000_000, grouped.worst_case_impact_cent)
 
+    def test_material_consistency_group_keeps_each_real_component_in_human_review(self) -> None:
+        first = replace(
+            ai_case("group-a", 40_000_000, True, True).unresolved,
+            group_impact_cent=80_000_000,
+        )
+        second = replace(
+            ai_case(
+                "group-b",
+                40_000_000,
+                True,
+                True,
+                alternatives=("CFO-03", "CFI-01"),
+            ).unresolved,
+            system_item_id="CFI-01",
+            group_impact_cent=80_000_000,
+        )
+
+        batches = build_review_batches((first, second), 75_000_000)
+
+        self.assertEqual(2, len(batches))
+        self.assertEqual({"group-a", "group-b"}, {item.component_ids[0] for item in batches})
+
     def test_review_pattern_keeps_full_business_text_except_dates_and_numbers(self) -> None:
         first = _review_text_pattern("支付甲公司服务费 2026-01-01 1,000元")
         second = _review_text_pattern("支付乙公司服务费 2026-02-02 2,000元")

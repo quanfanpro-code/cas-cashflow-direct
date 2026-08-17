@@ -27,6 +27,16 @@ from cashflow_direct.components import (
     discover_cash_scope,
     flow_direction_source,
 )
+from cashflow_direct.consistency import (
+    ConsistencyGroup,
+    ConsistencyResult,
+    ConsistencyTask,
+    build_consistency_adjudication_tasks,
+    build_consistency_tasks,
+    find_consistency_groups,
+    merge_consistency_results,
+    resolve_consistency_groups,
+)
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
 from cashflow_direct.intake import register_inputs, validate_materiality
 from cashflow_direct.models import (
@@ -172,6 +182,32 @@ def _decision_from_dict(payload: Mapping[str, object]) -> ClassificationDecision
     data = dict(payload)
     data["excluded_conflict_rule_ids"] = tuple(data.get("excluded_conflict_rule_ids", ()))
     return ClassificationDecision(**data)
+
+
+def _consistency_group_from_dict(payload: Mapping[str, object]) -> ConsistencyGroup:
+    data = dict(payload)
+    data["component_ids"] = tuple(data["component_ids"])
+    data["current_assignments"] = tuple(
+        (str(item[0]), str(item[1])) for item in data["current_assignments"]
+    )
+    return ConsistencyGroup(**data)
+
+
+def _consistency_task_from_dict(payload: Mapping[str, object]) -> ConsistencyTask:
+    data = dict(payload)
+    data["component_ids"] = tuple(data["component_ids"])
+    data["current_assignments"] = tuple(
+        (str(item[0]), str(item[1])) for item in data["current_assignments"]
+    )
+    return ConsistencyTask(**data)
+
+
+def _consistency_result_from_dict(payload: Mapping[str, object]) -> ConsistencyResult:
+    data = dict(payload)
+    data["assignments"] = tuple(
+        (str(item[0]), str(item[1])) for item in data["assignments"]
+    )
+    return ConsistencyResult(**data)
 
 
 def _scope_from_dict(payload: Mapping[str, object]) -> CashScope:
@@ -767,6 +803,75 @@ def supplement_cash_balances(
     )
 
 
+def _write_consistency_task_batches(
+    run_dir: Path,
+    prefix: str,
+    tasks: Sequence[ConsistencyTask],
+) -> None:
+    for index in range(0, len(tasks), 25):
+        _write_trace_jsonl(
+            run_dir,
+            f"{prefix}_第{index // 25 + 1:02d}批.jsonl",
+            tasks[index : index + 25],
+        )
+
+
+def _store_consistency_resolution(
+    state: dict[str, object],
+    resolution: object,
+) -> None:
+    state["decisions"] = [asdict(item) for item in resolution.decisions]
+    state["consistency_resolution"] = {
+        "statuses": [
+            {
+                "group_id": group_id,
+                "status": status,
+                "reason": reason,
+                "tier": tier,
+            }
+            for group_id, status, reason, tier in resolution.statuses
+        ],
+        "unresolved": [asdict(item) for item in resolution.unresolved],
+    }
+
+
+def _prepare_consistency_stage(
+    state: dict[str, object],
+    run_dir: Path,
+) -> tuple[str, int]:
+    if "consistency_groups" in state:
+        missing = int(state["classification_summary"].get("ai_tasks_missing", 0))
+        return (
+            "AI 待一致性复核"
+            if state.get("stage") == "waiting_consistency"
+            else "AI 已完成",
+            missing,
+        )
+    components = tuple(_component_from_dict(item) for item in state["components"])
+    decisions = tuple(_decision_from_dict(item) for item in state["decisions"])
+    groups = find_consistency_groups(
+        components, decisions, _materiality_from_state(state)
+    )
+    tasks = build_consistency_tasks(groups)
+    state["consistency_schema_version"] = 1
+    state["consistency_groups"] = [asdict(item) for item in groups]
+    state["consistency_tasks"] = [asdict(item) for item in tasks]
+    if tasks:
+        _write_consistency_task_batches(run_dir, "一致性复核请求", tasks)
+        state["classification_summary"]["ai_tasks_missing"] = len(tasks)
+        state["classification_summary"]["status"] = "waiting_consistency"
+        state["stage"] = "waiting_consistency"
+        return "AI 待一致性复核", len(tasks)
+    resolution = resolve_consistency_groups(
+        groups, decisions, (), (), load_rule_pack(PROJECT_ROOT)
+    )
+    _store_consistency_resolution(state, resolution)
+    state["classification_summary"]["ai_tasks_missing"] = 0
+    state["classification_summary"]["status"] = "consistency_completed"
+    state["stage"] = "consistency_completed"
+    return "AI 已完成", 0
+
+
 def run_classification(run_dir: Path) -> ClassificationStageResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
@@ -878,8 +983,127 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     for batch_number, batch in enumerate(chunk_ai_tasks(tasks), 1):
         _write_trace_jsonl(run_dir, f"AI复核请求_第{batch_number:02d}批.jsonl", batch)
     _write_trace_jsonl(run_dir, "内部划转排除.jsonl", build.excluded_internal_transfers)
+    if not tasks:
+        _prepare_consistency_stage(state, run_dir)
     _save_state(run_dir, state)
     return _result_from_classification(state, run_dir)
+
+
+def _import_consistency_results(
+    state: dict[str, object],
+    run_dir: Path,
+    payloads: Sequence[Mapping[str, object]],
+    valid_item_ids: set[str],
+    *,
+    adjudication: bool,
+) -> AIStageResult:
+    task_key = (
+        "consistency_adjudication_tasks" if adjudication else "consistency_tasks"
+    )
+    validation_key = (
+        "consistency_adjudication_validation"
+        if adjudication
+        else "consistency_validation"
+    )
+    tasks = tuple(
+        _consistency_task_from_dict(item) for item in state.get(task_key, ())
+    )
+    prior_results = tuple(
+        _consistency_result_from_dict(item)
+        for item in state.get(validation_key, {}).get("valid_results", ())
+    )
+    validation = merge_consistency_results(
+        tasks, prior_results, payloads, valid_item_ids
+    )
+    state[validation_key] = {
+        "valid_results": [asdict(item) for item in validation.valid_results],
+        "missing_ids": validation.missing_ids,
+        "duplicate_ids": validation.duplicate_ids,
+        "invalid_ids": validation.invalid_ids,
+        "status": validation.status,
+    }
+    _write_trace_jsonl(
+        run_dir,
+        "一致性裁决结果.jsonl" if adjudication else "一致性复核结果.jsonl",
+        validation.valid_results,
+    )
+    state["classification_summary"]["ai_tasks_missing"] = len(
+        validation.missing_ids
+    )
+    if validation.status != "AI 已完成":
+        state["stage"] = (
+            "waiting_consistency_adjudication"
+            if adjudication
+            else "waiting_consistency"
+        )
+        state["classification_summary"]["status"] = state["stage"]
+        _save_state(run_dir, state)
+        return AIStageResult(
+            str(state["run_id"]),
+            Path(run_dir),
+            len(validation.valid_results),
+            len(validation.missing_ids),
+            validation.status,
+        )
+
+    groups = tuple(
+        _consistency_group_from_dict(item)
+        for item in state.get("consistency_groups", ())
+    )
+    first_results = (
+        tuple(
+            _consistency_result_from_dict(item)
+            for item in state.get("consistency_validation", {}).get(
+                "valid_results", ()
+            )
+        )
+        if adjudication
+        else validation.valid_results
+    )
+    if not adjudication:
+        second_tasks = build_consistency_adjudication_tasks(groups, first_results)
+        if second_tasks:
+            state["consistency_adjudication_tasks"] = [
+                asdict(item) for item in second_tasks
+            ]
+            _write_consistency_task_batches(
+                run_dir, "一致性裁决请求", second_tasks
+            )
+            state["classification_summary"]["ai_tasks_missing"] = len(second_tasks)
+            state["classification_summary"]["status"] = (
+                "waiting_consistency_adjudication"
+            )
+            state["stage"] = "waiting_consistency_adjudication"
+            _save_state(run_dir, state)
+            return AIStageResult(
+                str(state["run_id"]),
+                Path(run_dir),
+                len(validation.valid_results),
+                len(second_tasks),
+                "AI 待一致性裁决",
+            )
+
+    second_results = validation.valid_results if adjudication else ()
+    decisions = tuple(_decision_from_dict(item) for item in state["decisions"])
+    resolution = resolve_consistency_groups(
+        groups,
+        decisions,
+        first_results,
+        second_results,
+        load_rule_pack(PROJECT_ROOT),
+    )
+    _store_consistency_resolution(state, resolution)
+    state["classification_summary"]["ai_tasks_missing"] = 0
+    state["classification_summary"]["status"] = "consistency_completed"
+    state["stage"] = "consistency_completed"
+    _save_state(run_dir, state)
+    return AIStageResult(
+        str(state["run_id"]),
+        Path(run_dir),
+        len(validation.valid_results),
+        0,
+        "AI 已完成",
+    )
 
 
 def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
@@ -893,10 +1117,44 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
     leaf_ids = {
         item.item_id for item in load_rule_pack(PROJECT_ROOT).statement_items if item.is_leaf
     }
+    consistency_adjudication_ids = {
+        str(item["task_id"])
+        for item in state.get("consistency_adjudication_tasks", ())
+    }
+    consistency_task_ids = {
+        str(item["task_id"]) for item in state.get("consistency_tasks", ())
+    }
+    payload_task_ids = {
+        str(item.get("task_id", "")) for item in payloads if item.get("task_id")
+    }
+    if consistency_adjudication_ids and (
+        state.get("stage") == "waiting_consistency_adjudication"
+        or (
+            payload_task_ids
+            and payload_task_ids <= consistency_adjudication_ids
+        )
+    ):
+        return _import_consistency_results(
+            state,
+            run_dir,
+            payloads,
+            leaf_ids,
+            adjudication=True,
+        )
+    if consistency_task_ids and (
+        state.get("stage") == "waiting_consistency"
+        or (payload_task_ids and payload_task_ids <= consistency_task_ids)
+    ):
+        return _import_consistency_results(
+            state,
+            run_dir,
+            payloads,
+            leaf_ids,
+            adjudication=False,
+        )
     adjudication_task_ids = {
         str(item["task_id"]) for item in state.get("adjudication_tasks", ())
     }
-    payload_task_ids = {str(item.get("task_id", "")) for item in payloads if item.get("task_id")}
     is_adjudication_import = bool(
         adjudication_task_ids
         and (
@@ -949,16 +1207,18 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
                 for decision in resolved
             )
             state["decisions"] = [asdict(item) for item in resolved]
-            state["stage"] = "ai_completed"
+            status, missing_count = _prepare_consistency_stage(state, run_dir)
         else:
             state["stage"] = "waiting_adjudication"
+            status = validation.status
+            missing_count = len(validation.missing_ids)
         _save_state(run_dir, state)
         return AIStageResult(
             str(state["run_id"]),
             Path(run_dir),
             len(validation.valid_results),
-            len(validation.missing_ids),
-            validation.status,
+            missing_count,
+            status,
         )
 
     tasks = tuple(AITask(**item) for item in state.get("ai_tasks", ()))
@@ -999,9 +1259,7 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
                 )
             ]
             state["classification_summary"]["ai_tasks_missing"] = 0
-            state["stage"] = "ai_completed"
-            status = validation.status
-            missing_count = 0
+            status, missing_count = _prepare_consistency_stage(state, run_dir)
     else:
         state["classification_summary"]["ai_tasks_missing"] = len(validation.missing_ids)
         state["stage"] = "waiting_ai"
@@ -1083,7 +1341,15 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     adjudication_by_component = {
         str(item["component_id"]): item for item in state.get("adjudication_tasks", ())
     }
-    unresolved = tuple(
+    consistency_unresolved = tuple(
+        state.get("consistency_resolution", {}).get("unresolved", ())
+    )
+    consistency_unresolved_component_ids = {
+        str(component_id)
+        for payload in consistency_unresolved
+        for component_id in payload.get("component_ids", ())
+    }
+    unresolved_list = [
         UnresolvedDecision(
             component_id=decision.component_id,
             cash_delta_cent=component_by_id[decision.component_id].cash_delta_cent,
@@ -1123,15 +1389,88 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             ),
         )
         for decision in decisions
-        if not decision.resolved and not decision.excluded
-    )
+        if (
+            not decision.resolved
+            and not decision.excluded
+            and decision.component_id not in consistency_unresolved_component_ids
+        )
+    ]
+    for payload in consistency_unresolved:
+        candidate_by_component = {
+            str(item[0]): tuple(str(value) for value in item[1])
+            for item in payload.get("candidate_item_ids", ())
+        }
+        for component_id in payload.get("component_ids", ()):
+            component_id = str(component_id)
+            component = component_by_id[component_id]
+            decision = next(
+                item for item in decisions if item.component_id == component_id
+            )
+            unresolved_list.append(
+                UnresolvedDecision(
+                    component_id=component_id,
+                    cash_delta_cent=component.cash_delta_cent,
+                    cash_direction=(
+                        "inflow" if component.cash_delta_cent > 0 else "outflow"
+                    ),
+                    original_item=component.original_item_text,
+                    system_item_id=decision.system_item_id,
+                    adjudication_status=(
+                        "同一业务组一致性复核未收口："
+                        + str(payload["group_id"])
+                    ),
+                    counterpart_group=_review_text_pattern(
+                        "、".join(component.counterpart_accounts)
+                    ),
+                    summary_pattern=_review_text_pattern(component.summary),
+                    alternative_item_ids=tuple(
+                        item_id
+                        for item_id in candidate_by_component.get(component_id, ())
+                        if item_id != decision.system_item_id
+                    ),
+                    reason=str(payload["reason"]),
+                    system_statement_amount_cent=statement_amount_cent(
+                        component.cash_delta_cent,
+                        rules.item_by_id[decision.system_item_id].normal_direction,
+                    ),
+                    source_locations=tuple(
+                        dict.fromkeys(
+                            f"{file_name_by_id.get(entry_by_id[key].source.file_id, entry_by_id[key].source.file_id)}|{entry_by_id[key].source.sheet_name}|{entry_by_id[key].source.cell_range}"
+                            for key in component.source_keys
+                            if key in entry_by_id
+                        )
+                    ),
+                    group_impact_cent=int(payload["gross_cent"]),
+                )
+            )
+    unresolved = tuple(unresolved_list)
     review_batches = build_review_batches(
         unresolved, _materiality_from_state(state).performance_cent
     )
+    consistency_group_by_component: dict[str, Mapping[str, object]] = {}
+    for group in state.get("consistency_groups", ()):
+        for component_id in group.get("component_ids", ()):
+            consistency_group_by_component[str(component_id)] = group
+    consistency_status_by_group = {
+        str(item["group_id"]): item
+        for item in state.get("consistency_resolution", {}).get("statuses", ())
+    }
+    tier_names = {
+        "trace_only": "低于明显微小错报临界值",
+        "first_review": "明显微小至实际执行重要性",
+        "adjudication_required": "实际执行至整体重要性",
+        "double_high_required": "达到整体重要性",
+    }
     trace_rows_list: list[dict[str, object]] = []
     for component, decision in zip(components, decisions, strict=True):
         source_entries = tuple(
             entry_by_id[key] for key in component.source_keys if key in entry_by_id
+        )
+        consistency_group = consistency_group_by_component.get(
+            component.component_id, {}
+        )
+        consistency_status = consistency_status_by_group.get(
+            str(consistency_group.get("group_id", "")), {}
         )
         trace_rows_list.append(
             {
@@ -1159,10 +1498,16 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "来源单元格": "、".join(
                     dict.fromkeys(entry.source.cell_range for entry in source_entries)
                 ),
+                "一致性复核状态": consistency_status.get("status", ""),
+                "一致性复核理由": consistency_status.get("reason", ""),
+                "一致性重要性层级": tier_names.get(
+                    str(consistency_group.get("tier", "")), ""
+                ),
                 "决策来源(技术)": decision.decision_source,
                 "命中规则(技术)": decision.matched_rule_id,
                 "业务组成编号(技术)": component.component_id,
                 "来源占用键(技术)": "、".join(component.source_keys),
+                "业务组编号(技术)": consistency_group.get("group_id", ""),
             }
         )
     for transfer in state.get("internal_transfers", ()):
@@ -1182,10 +1527,14 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "来源文件": "" if entry is None else file_name_by_id.get(entry.source.file_id, entry.source.file_id),
                 "来源工作表": "" if entry is None else entry.source.sheet_name,
                 "来源单元格": "" if entry is None else entry.source.cell_range,
+                "一致性复核状态": "",
+                "一致性复核理由": "",
+                "一致性重要性层级": "",
                 "决策来源(技术)": "system",
                 "命中规则(技术)": "INTERNAL-TRANSFER",
                 "业务组成编号(技术)": transfer["entry_id"],
                 "来源占用键(技术)": transfer["entry_id"],
+                "业务组编号(技术)": "",
             }
         )
     trace_rows = tuple(trace_rows_list)
@@ -1233,6 +1582,18 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             for stage_name, records in (
                 ("首次复核", state.get("ai_validation", {}).get("valid_results", ())),
                 ("裁决", state.get("adjudication_validation", {}).get("valid_results", ())),
+                (
+                    "一致性复核",
+                    state.get("consistency_validation", {}).get(
+                        "valid_results", ()
+                    ),
+                ),
+                (
+                    "一致性裁决",
+                    state.get("consistency_adjudication_validation", {}).get(
+                        "valid_results", ()
+                    ),
+                ),
             )
             for item in records
         ),

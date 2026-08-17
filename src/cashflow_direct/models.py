@@ -140,6 +140,7 @@ class UnresolvedDecision:
     reason: str
     system_statement_amount_cent: int = 0
     source_locations: tuple[str, ...] = ()
+    group_impact_cent: int = 0
 
 
 def validate_materiality_order(amounts: MaterialityAmounts) -> MaterialityAmounts:

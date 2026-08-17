@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -49,7 +50,11 @@ class WorkbookOutputTests(unittest.TestCase):
                         for row in sheet.iter_rows():
                             for cell in row:
                                 if cell.value not in (None, ""):
-                                    self.assertEqual("Arial", cell.font.name)
+                                    self.assertEqual("Times New Roman", cell.font.name)
+                with zipfile.ZipFile(path) as package:
+                    theme = package.read("xl/theme/theme1.xml").decode("utf-8")
+                self.assertIn('script="Hans" typeface="宋体"', theme)
+                self.assertNotIn("MS Gothic", theme)
             finally:
                 workbook.close()
 
@@ -259,10 +264,14 @@ class WorkbookOutputTests(unittest.TestCase):
                     "来源文件": "匿名输入.xlsx",
                     "来源工作表": "匿名数据",
                     "来源单元格": "A1:H1",
+                    "一致性复核状态": "重大一致性复核已收口",
+                    "一致性复核理由": "整组业务实质一致",
+                    "一致性重要性层级": "达到整体重要性",
                     "决策来源(技术)": "system",
                     "命中规则(技术)": "CFO-07-FALLBACK",
                     "业务组成编号(技术)": "C-1",
                     "来源占用键(技术)": "E-1",
+                    "业务组编号(技术)": "CGR-1",
                 },
             ),
         )
@@ -276,8 +285,9 @@ class WorkbookOutputTests(unittest.TestCase):
                     [
                         "记录类型", "摘要", "现金变化", "原现流项目", "对方科目", "自动判定现流项目",
                         "判断理由", "证据强度", "异常", "方向依据", "来源文件", "来源工作表",
-                        "来源单元格", "决策来源(技术)", "命中规则(技术)", "业务组成编号(技术)",
-                        "来源占用键(技术)",
+                        "来源单元格", "一致性复核状态", "一致性复核理由", "一致性重要性层级",
+                        "决策来源(技术)", "命中规则(技术)", "业务组成编号(技术)",
+                        "来源占用键(技术)", "业务组编号(技术)",
                     ],
                     headers,
                 )
@@ -287,7 +297,14 @@ class WorkbookOutputTests(unittest.TestCase):
                 )
                 trace = workbook["全量分类留痕"]
                 self.assertFalse(trace.column_dimensions["N"].hidden)
-                for column_index in (15, 16, 17):
+                self.assertFalse(trace.column_dimensions["Q"].hidden)
+                for header in (
+                    "命中规则(技术)",
+                    "业务组成编号(技术)",
+                    "来源占用键(技术)",
+                    "业务组编号(技术)",
+                ):
+                    column_index = headers.index(header) + 1
                     self.assertTrue(
                         any(
                             dimension.hidden

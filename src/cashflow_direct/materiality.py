@@ -27,7 +27,10 @@ def build_review_batches(
 
     batches: list[ReviewBatch] = []
     for key, items in grouped.items():
-        worst_case = sum(abs(item.cash_delta_cent) for item in items)
+        worst_case = max(
+            sum(abs(item.cash_delta_cent) for item in items),
+            max((item.group_impact_cent for item in items), default=0),
+        )
         if worst_case < performance_cent:
             continue
         component_ids = tuple(item.component_id for item in items)

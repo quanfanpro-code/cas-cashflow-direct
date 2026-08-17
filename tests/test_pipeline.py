@@ -29,6 +29,259 @@ from tests.fixture_factory import (
 
 
 class PipelineTests(unittest.TestCase):
+    def test_unresolved_consistency_group_does_not_duplicate_human_review_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "未收口业务组.xlsx"
+            workbook = Workbook()
+            detail = workbook.active
+            detail.title = "明细"
+            detail.append(
+                ["日期", "凭证字", "凭证号", "分录号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"]
+            )
+            detail.append(
+                ["2026/6/15", "记", "70", "2", "同一项建设业务退款", "1123.03", "预付账款_财务", None, 717_600, 717_600, "收到其他与经营活动有关的现金"]
+            )
+            detail.append(
+                ["2026/6/15", "记", "70", "3", "同一项建设业务退款", "2202.03", "应付账款_财务", 217_600, None, -217_600, "收到其他与经营活动有关的现金"]
+            )
+            balances = workbook.create_sheet("现金余额资料")
+            balances.append(["项目", "金额"])
+            balances.append(["期初现金及现金等价物余额", 0])
+            balances.append(["汇率变动影响", 0])
+            balances.append(["期末现金及现金等价物余额", 500_000])
+            workbook.save(source)
+            workbook.close()
+
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_cash_scope(preflight.run_dir, {})
+            supplement_cash_balances(preflight.run_dir, "0", "500000", "0", "测试现金余额")
+            run_classification(preflight.run_dir)
+            state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            first_path = root / "逐条结果.jsonl"
+            first_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "task_id": task["task_id"],
+                            "component_id": task["component_id"],
+                            "item_id": task["system_item_id"],
+                            "reason": "保留逐条判断",
+                            "confidence": "high",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                    for task in state["ai_tasks"]
+                ),
+                encoding="utf-8-sig",
+            )
+            import_ai_results(preflight.run_dir, first_path)
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            task = state["consistency_tasks"][0]
+            group_first_path = root / "一致性首次结果.jsonl"
+            group_first_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task["task_id"],
+                        "group_id": task["group_id"],
+                        "assignments": dict(task["current_assignments"]),
+                        "reason": "首次复核仍不足以收口",
+                        "confidence": "low",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8-sig",
+            )
+            import_ai_results(preflight.run_dir, group_first_path)
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            task = state["consistency_adjudication_tasks"][0]
+            group_second_path = root / "一致性裁决结果.jsonl"
+            group_second_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task["task_id"],
+                        "group_id": task["group_id"],
+                        "assignments": dict(task["current_assignments"]),
+                        "reason": "第二轮仍不足以收口",
+                        "confidence": "low",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8-sig",
+            )
+            import_ai_results(preflight.run_dir, group_second_path)
+            final = finalize_run(preflight.run_dir)
+            workbook = load_workbook(final.workbook_path, data_only=False)
+            try:
+                review = workbook["重要待复核事项"]
+                self.assertEqual(3, review.max_row)
+            finally:
+                workbook.close()
+
+    def test_material_voucher_split_gets_two_group_reviews_before_unifying_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "同一业务组.xlsx"
+            workbook = Workbook()
+            detail = workbook.active
+            detail.title = "明细"
+            detail.append(
+                ["日期", "凭证字", "凭证号", "分录号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"]
+            )
+            detail.append(
+                ["2026/6/15", "记", "70", "2", "同一项建设业务退款", "1123.03", "预付账款_财务", None, 717_600, 717_600, "收到其他与经营活动有关的现金"]
+            )
+            detail.append(
+                ["2026/6/15", "记", "70", "3", "同一项建设业务退款", "2202.03", "应付账款_财务", 217_600, None, -217_600, "收到其他与经营活动有关的现金"]
+            )
+            balances = workbook.create_sheet("现金余额资料")
+            balances.append(["项目", "金额"])
+            balances.append(["期初现金及现金等价物余额", 0])
+            balances.append(["汇率变动影响", 0])
+            balances.append(["期末现金及现金等价物余额", 500_000])
+            workbook.save(source)
+            workbook.close()
+
+            preflight = run_preflight(
+                [source], ("100000", "50000", "5000"), root
+            )
+            confirm_cash_scope(preflight.run_dir, {})
+            supplement_cash_balances(
+                preflight.run_dir, "0", "500000", "0", "测试现金余额"
+            )
+            classified = run_classification(preflight.run_dir)
+            self.assertEqual(2, classified.ai_tasks_missing)
+            state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+
+            first_path = root / "逐条首次结果.jsonl"
+            first_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "task_id": task["task_id"],
+                            "component_id": task["component_id"],
+                            "item_id": task["system_item_id"],
+                            "reason": "先保留逐条系统判断",
+                            "confidence": "high",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                    for task in state["ai_tasks"]
+                ),
+                encoding="utf-8-sig",
+            )
+            first = import_ai_results(preflight.run_dir, first_path)
+            self.assertEqual("AI 待一致性复核", first.status)
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual("waiting_consistency", state["stage"])
+            self.assertEqual(1, len(state["consistency_tasks"]))
+
+            task = state["consistency_tasks"][0]
+            group_first_path = root / "一致性首次结果.jsonl"
+            group_first_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task["task_id"],
+                        "group_id": task["group_id"],
+                        "assignments": {
+                            component_id: "CFI-06"
+                            for component_id in task["component_ids"]
+                        },
+                        "reason": "整组属于同一项长期资产退款",
+                        "confidence": "high",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8-sig",
+            )
+            group_first = import_ai_results(preflight.run_dir, group_first_path)
+            self.assertEqual("AI 待一致性裁决", group_first.status)
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual("waiting_consistency_adjudication", state["stage"])
+
+            task = state["consistency_adjudication_tasks"][0]
+            group_second_path = root / "一致性裁决结果.jsonl"
+            group_second_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task["task_id"],
+                        "group_id": task["group_id"],
+                        "assignments": {
+                            component_id: "CFI-06"
+                            for component_id in task["component_ids"]
+                        },
+                        "reason": "独立整组裁决确认属于长期资产退款",
+                        "confidence": "high",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8-sig",
+            )
+            group_second = import_ai_results(preflight.run_dir, group_second_path)
+            self.assertEqual("AI 已完成", group_second.status)
+
+            final = finalize_run(preflight.run_dir)
+            self.assertEqual("最终可使用", final.overall_status)
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual(
+                {"CFI-06"},
+                {item["system_item_id"] for item in state["decisions"]},
+            )
+            self.assertEqual(0, state["reconciliation"]["difference_cent"])
+            workbook = load_workbook(final.workbook_path, data_only=True)
+            try:
+                sheet = workbook["现金流量表正表"]
+                values = {
+                    sheet.cell(row, 2).value: sheet.cell(row, 6).value
+                    for row in range(1, sheet.max_row + 1)
+                }
+                self.assertEqual(-500_000, values["购建固定资产、无形资产和其他长期资产支付的现金"])
+                trace = workbook["全量分类留痕"]
+                headers = [cell.value for cell in trace[1]]
+                for header in (
+                    "一致性复核状态",
+                    "一致性复核理由",
+                    "一致性重要性层级",
+                    "业务组编号(技术)",
+                ):
+                    self.assertIn(header, headers)
+                status_column = headers.index("一致性复核状态") + 1
+                self.assertEqual(
+                    {"重大一致性复核已收口"},
+                    {
+                        trace.cell(row, status_column).value
+                        for row in range(2, trace.max_row + 1)
+                    },
+                )
+                group_column = headers.index("业务组编号(技术)") + 1
+                self.assertTrue(
+                    any(
+                        dimension.hidden
+                        and dimension.min <= group_column <= dimension.max
+                        for dimension in trace.column_dimensions.values()
+                    )
+                )
+                ai_sheet = workbook["AI复核记录"]
+                ai_headers = [cell.value for cell in ai_sheet[1]]
+                stage_column = ai_headers.index("阶段") + 1
+                self.assertEqual(
+                    {"首次复核", "一致性复核", "一致性裁决"},
+                    {
+                        ai_sheet.cell(row, stage_column).value
+                        for row in range(2, ai_sheet.max_row + 1)
+                    },
+                )
+            finally:
+                workbook.close()
+
     def test_statement_path_is_honored_and_failure_stops(self) -> None:
         # 指定的文件识别不出正表 → 报错停下（不静默降级为编制模式）
         with tempfile.TemporaryDirectory() as tmp:
