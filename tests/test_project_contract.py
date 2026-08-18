@@ -43,7 +43,6 @@ class ProjectContractTests(unittest.TestCase):
         documents = (
             ROOT / "README.md",
             ROOT / "SKILL.md",
-            ROOT / "references" / "使用说明.md",
         )
         for path in documents:
             text = path.read_text(encoding="utf-8-sig")

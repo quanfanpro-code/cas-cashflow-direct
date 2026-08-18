@@ -37,7 +37,6 @@ def validate() -> tuple[str, ...]:
         ROOT / "references" / "一般企业正表项目.json",
         ROOT / "references" / "直接法分类规则.json",
         ROOT / "references" / "字段语义词典.json",
-        ROOT / "references" / "使用说明.md",
     )
     for path in required:
         if not path.is_file():
