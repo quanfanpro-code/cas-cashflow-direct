@@ -10,10 +10,44 @@ from cashflow_direct.money import stable_id
 def build_review_batches(
     unresolved: Sequence[UnresolvedDecision],
     performance_cent: int,
+    all_leaf_item_ids: Sequence[str] = (),
 ) -> tuple[ReviewBatch, ...]:
-    """只把达到实际执行重要性的严格同质剩余风险送人工。"""
-    grouped: dict[tuple[object, ...], list[UnresolvedDecision]] = defaultdict(list)
+    """只把达到实际执行重要性的严格同质剩余风险送人工；大额强制事项单独成批。
+
+    all_leaf_item_ids：全部叶子标准项目编号；强制人工复核批次据此生成
+    "可改选任一标准项目（除原判项目外）"的备选清单。
+    """
+    batches: list[ReviewBatch] = []
+    # 达到财务报表整体重要性的事项强制单独成批，备选为除原判外的全部叶子标准项目
     for item in unresolved:
+        if not item.mandatory:
+            continue
+        batches.append(
+            ReviewBatch(
+                batch_id=stable_id("REV", item.component_id, "MANDATORY"),
+                component_ids=(item.component_id,),
+                proposed_item_code=item.system_item_id,
+                alternative_item_codes=tuple(
+                    item_id
+                    for item_id in all_leaf_item_ids
+                    if item_id != item.system_item_id
+                ),
+                worst_case_impact_cent=abs(item.cash_delta_cent),
+                reason="达到财务报表整体重要性，强制人工复核（无论自动判断是否收口）",
+                baseline_statement_amount_cent=(
+                    item.system_statement_amount_cent or abs(item.cash_delta_cent)
+                ),
+                cash_delta_cent=item.cash_delta_cent,
+                representative_summary=item.summary_pattern,
+                counterpart_group=item.counterpart_group,
+                source_locations=item.source_locations,
+                mandatory=True,
+            )
+        )
+
+    regular = [item for item in unresolved if not item.mandatory]
+    grouped: dict[tuple[object, ...], list[UnresolvedDecision]] = defaultdict(list)
+    for item in regular:
         key = (
             item.cash_direction,
             item.original_item,
@@ -25,7 +59,6 @@ def build_review_batches(
         )
         grouped[key].append(item)
 
-    batches: list[ReviewBatch] = []
     for key, items in grouped.items():
         worst_case = max(
             sum(abs(item.cash_delta_cent) for item in items),

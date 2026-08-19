@@ -80,6 +80,9 @@ class ClassificationDecision:
     decision_source: str = "system"
     resolved: bool = True
     excluded: bool = False
+    evidence_score: int = 0
+    evidence_sources: tuple[str, ...] = ()
+    label_kept: bool = False
 
     @property
     def item_code(self) -> str:
@@ -115,6 +118,7 @@ class ReviewBatch:
     representative_summary: str = ""
     counterpart_group: str = ""
     source_locations: tuple[str, ...] = ()
+    mandatory: bool = False
 
     @property
     def alternative_item_code(self) -> str:
@@ -146,6 +150,7 @@ class UnresolvedDecision:
     system_statement_amount_cent: int = 0
     source_locations: tuple[str, ...] = ()
     group_impact_cent: int = 0
+    mandatory: bool = False
 
 
 def validate_materiality_order(amounts: MaterialityAmounts) -> MaterialityAmounts:

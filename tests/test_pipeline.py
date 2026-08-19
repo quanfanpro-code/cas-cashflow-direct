@@ -10,15 +10,19 @@ from openpyxl import Workbook
 from openpyxl import load_workbook
 
 from cashflow_direct.pipeline import (
+    confirm_company_notes,
     confirm_mapping,
     confirm_cash_scope,
     finalize_run,
     import_ai_results,
+    import_dictionary_results,
     run_classification,
     run_preflight,
+    scan_accounts,
     supplement_cash_balances,
 )
 from tests.fixture_factory import (
+    mark_dictionary_complete,
     write_ai_batch_case,
     write_ai_end_to_end_case,
     write_ambiguous_money_fixture,
@@ -62,7 +66,7 @@ class PipelineTests(unittest.TestCase):
                     "营业外支出",
                     100,
                     None,
-                    "支付的各项税费",
+                    "客户自定义项目",
                 ]
             )
             balances = workbook.create_sheet("现金余额资料")
@@ -80,6 +84,8 @@ class PipelineTests(unittest.TestCase):
             supplement_cash_balances(
                 preflight.run_dir, "1000", "900", "0", "测试现金余额"
             )
+            # 本用例不涉及词典机制，直接标记齐备（门禁通行）
+            mark_dictionary_complete(preflight.run_dir)
             run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
 
@@ -102,11 +108,12 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual("记", row["凭证字"])
                 self.assertEqual("1", str(row["凭证号"]))
                 self.assertEqual("6711", str(row["科目编码"]))
-                self.assertEqual("支付的各项税费", row["主表项目名称"])
+                self.assertEqual("客户自定义项目", row["主表项目名称"])
                 self.assertEqual("支付其他与经营活动有关的现金", row["自动判定现流项目"])
                 self.assertEqual(100, row["借方"])
                 self.assertIsNone(row["流量金额（原币）"])
-                self.assertEqual("标准项目不一致", row["差异说明"])
+                # 重构后口径：本组成自动判定(CFO-07 营业外支出/滞纳金)→支付其他经营；原标签客户自定义无法标准化
+                self.assertEqual("原项目无法标准化", row["差异说明"])
             finally:
                 workbook.close()
 
@@ -121,22 +128,24 @@ class PipelineTests(unittest.TestCase):
                 ["日期", "凭证字", "凭证号", "分录号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"]
             )
             detail.append(
-                ["2026/6/15", "记", "70", "2", "同一项建设业务退款", "1123.03", "预付账款_财务", None, 717_600, 717_600, "收到其他与经营活动有关的现金"]
+                ["2026/6/15", "记", "70", "2", "支付款项", "2001.03", "短期借款_财务", None, 60_000, 60_000, None]
             )
             detail.append(
-                ["2026/6/15", "记", "70", "3", "同一项建设业务退款", "2202.03", "应付账款_财务", 217_600, None, -217_600, "收到其他与经营活动有关的现金"]
+                ["2026/6/15", "记", "70", "3", "支付款项", "2211.03", "应付职工薪酬_财务", None, 60_000, 60_000, None]
             )
             balances = workbook.create_sheet("现金余额资料")
             balances.append(["项目", "金额"])
             balances.append(["期初现金及现金等价物余额", 0])
             balances.append(["汇率变动影响", 0])
-            balances.append(["期末现金及现金等价物余额", 500_000])
+            balances.append(["期末现金及现金等价物余额", 120_000])
             workbook.save(source)
             workbook.close()
 
             preflight = run_preflight([source], ("100000", "50000", "5000"), root)
             confirm_cash_scope(preflight.run_dir, {})
-            supplement_cash_balances(preflight.run_dir, "0", "500000", "0", "测试现金余额")
+            supplement_cash_balances(preflight.run_dir, "0", "120000", "0", "测试现金余额")
+            # 本用例不涉及词典机制，直接标记齐备（门禁通行）
+            mark_dictionary_complete(preflight.run_dir)
             run_classification(preflight.run_dir)
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
@@ -148,7 +157,7 @@ class PipelineTests(unittest.TestCase):
                             "task_id": task["task_id"],
                             "component_id": task["component_id"],
                             "item_id": task["system_item_id"],
-                            "reason": "保留逐条判断",
+                            "reason": "知识库第1行：保留逐条判断",
                             "confidence": "high",
                         },
                         ensure_ascii=False,
@@ -168,7 +177,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": task["task_id"],
                         "group_id": task["group_id"],
                         "assignments": dict(task["current_assignments"]),
-                        "reason": "首次复核仍不足以收口",
+                        "reason": "知识库第2行：首次复核仍不足以收口",
                         "confidence": "low",
                     },
                     ensure_ascii=False,
@@ -186,7 +195,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": task["task_id"],
                         "group_id": task["group_id"],
                         "assignments": dict(task["current_assignments"]),
-                        "reason": "第二轮仍不足以收口",
+                        "reason": "知识库第3行：第二轮仍不足以收口",
                         "confidence": "low",
                     },
                     ensure_ascii=False,
@@ -214,16 +223,16 @@ class PipelineTests(unittest.TestCase):
                 ["日期", "凭证字", "凭证号", "分录号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"]
             )
             detail.append(
-                ["2026/6/15", "记", "70", "2", "同一项建设业务退款", "1123.03", "预付账款_财务", None, 717_600, 717_600, "收到其他与经营活动有关的现金"]
+                ["2026/6/15", "记", "70", "2", "支付款项", "2001.03", "短期借款_财务", None, 60_000, 60_000, None]
             )
             detail.append(
-                ["2026/6/15", "记", "70", "3", "同一项建设业务退款", "2202.03", "应付账款_财务", 217_600, None, -217_600, "收到其他与经营活动有关的现金"]
+                ["2026/6/15", "记", "70", "3", "支付款项", "2211.03", "应付职工薪酬_财务", None, 60_000, 60_000, None]
             )
             balances = workbook.create_sheet("现金余额资料")
             balances.append(["项目", "金额"])
             balances.append(["期初现金及现金等价物余额", 0])
             balances.append(["汇率变动影响", 0])
-            balances.append(["期末现金及现金等价物余额", 500_000])
+            balances.append(["期末现金及现金等价物余额", 120_000])
             workbook.save(source)
             workbook.close()
 
@@ -232,8 +241,10 @@ class PipelineTests(unittest.TestCase):
             )
             confirm_cash_scope(preflight.run_dir, {})
             supplement_cash_balances(
-                preflight.run_dir, "0", "500000", "0", "测试现金余额"
+                preflight.run_dir, "0", "120000", "0", "测试现金余额"
             )
+            # 本用例不涉及词典机制，直接标记齐备（门禁通行）
+            mark_dictionary_complete(preflight.run_dir)
             classified = run_classification(preflight.run_dir)
             self.assertEqual(2, classified.ai_tasks_missing)
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
@@ -247,7 +258,7 @@ class PipelineTests(unittest.TestCase):
                             "task_id": task["task_id"],
                             "component_id": task["component_id"],
                             "item_id": task["system_item_id"],
-                            "reason": "先保留逐条系统判断",
+                            "reason": "知识库第4行：先保留逐条系统判断",
                             "confidence": "high",
                         },
                         ensure_ascii=False,
@@ -274,7 +285,7 @@ class PipelineTests(unittest.TestCase):
                             component_id: "CFI-06"
                             for component_id in task["component_ids"]
                         },
-                        "reason": "整组属于同一项长期资产退款",
+                        "reason": "知识库第5行：整组属于同一项长期资产退款",
                         "confidence": "high",
                     },
                     ensure_ascii=False,
@@ -298,7 +309,7 @@ class PipelineTests(unittest.TestCase):
                             component_id: "CFI-06"
                             for component_id in task["component_ids"]
                         },
-                        "reason": "独立整组裁决确认属于长期资产退款",
+                        "reason": "知识库第6行：独立整组裁决确认属于长期资产退款",
                         "confidence": "high",
                     },
                     ensure_ascii=False,
@@ -324,7 +335,7 @@ class PipelineTests(unittest.TestCase):
                     sheet.cell(row, 2).value: sheet.cell(row, 6).value
                     for row in range(1, sheet.max_row + 1)
                 }
-                self.assertEqual(-500_000, values["购建固定资产、无形资产和其他长期资产支付的现金"])
+                self.assertEqual(-120_000, values["购建固定资产、无形资产和其他长期资产支付的现金"])
                 trace = workbook["全量分类留痕"]
                 headers = [cell.value for cell in trace[1]]
                 for header in (
@@ -485,7 +496,7 @@ class PipelineTests(unittest.TestCase):
                                 "task_id": item["task_id"],
                                 "component_id": item["component_id"],
                                 "item_id": "CFO-03",
-                                "reason": "原标签与摘要一致",
+                                "reason": "知识库第7行：原标签与摘要一致",
                                 "confidence": "high",
                             },
                             ensure_ascii=False,
@@ -515,7 +526,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": tasks[0]["task_id"],
                         "component_id": tasks[0]["component_id"],
                         "item_id": "CFI-05",
-                        "reason": "与已导入结果冲突",
+                        "reason": "知识库第8行：与已导入结果冲突",
                         "confidence": "high",
                     },
                     ensure_ascii=False,
@@ -827,7 +838,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": task["task_id"],
                         "component_id": task["component_id"],
                         "item_id": "CFI-05",
-                        "reason": "摘要表明属于其他投资活动",
+                        "reason": "知识库第9行：摘要表明属于其他投资活动",
                         "confidence": "high",
                     },
                     ensure_ascii=False,
@@ -849,7 +860,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": adjudication["task_id"],
                         "component_id": adjudication["component_id"],
                         "item_id": "CFI-05",
-                        "reason": "裁决确认投资证据清楚",
+                        "reason": "知识库第10行：裁决确认投资证据清楚",
                         "confidence": "high",
                     },
                     ensure_ascii=False,
@@ -916,7 +927,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": task["task_id"],
                         "component_id": task["component_id"],
                         "item_id": "CFI-05",
-                        "reason": "可能属于投资活动",
+                        "reason": "知识库第11行：可能属于投资活动",
                         "confidence": "low",
                     },
                     ensure_ascii=False,
@@ -932,7 +943,7 @@ class PipelineTests(unittest.TestCase):
                         "task_id": adjudication["task_id"],
                         "component_id": adjudication["component_id"],
                         "item_id": "CFI-05",
-                        "reason": "证据仍然不足",
+                        "reason": "知识库第12行：证据仍然不足",
                         "confidence": "low",
                     },
                     ensure_ascii=False,
@@ -999,6 +1010,342 @@ class PipelineTests(unittest.TestCase):
             trace = preflight.run_dir / "计算留痕数据" / "粗勾稽留痕.jsonl"
             self.assertTrue(trace.is_file())
             self.assertIn("detail_sum_cent", trace.read_text(encoding="utf-8-sig"))
+
+    def test_classify_blocked_until_dictionary_completed(self) -> None:
+        # 含未知明细对方科目时，classify 必须先停在"待科目语义确认"；导入后放行（Task 5）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "含明细科目.xlsx"
+            workbook = Workbook()
+            journal = workbook.active
+            journal.title = "序时账"
+            journal.append(["日期", "凭证字", "凭证号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"])
+            journal.append(["2026/1/1", "记", "1", "支付设备款", "1002", "银行存款", None, 100000, None, "购建固定资产支付的现金"])
+            journal.append(["2026/1/1", "记", "1", "支付设备款", "2202", "应付账款_全新明细段XYZ", 100000, None, None, "购建固定资产支付的现金"])
+            balances = workbook.create_sheet("现金余额资料")
+            balances.append(["项目", "金额"])
+            balances.append(["期初现金及现金等价物余额", 0])
+            balances.append(["汇率变动对现金及现金等价物的影响", 0])
+            balances.append(["期末现金及现金等价物余额", 100000])
+            workbook.save(source)
+            workbook.close()
+
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+            result = run_classification(preflight.run_dir)
+            self.assertEqual("待科目语义确认", result.status)
+            self.assertGreater(result.ai_tasks_missing, 0)
+
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            tasks = state["account_dictionary"]["tasks"]
+            batch_files = list((preflight.run_dir / "计算留痕数据").glob("科目语义待判断_*.jsonl"))
+            self.assertTrue(batch_files)
+            result_path = root / "词典结果.jsonl"
+            result_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "task_id": task["task_id"],
+                            "account": task["account"],
+                            "semantic": "测试语义",
+                            "item_id": "CFI-06",
+                            "confidence": "high",
+                            "basis": "知识库第13行：测试依据",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                    for task in tasks
+                ),
+                encoding="utf-8-sig",
+            )
+            import_result = import_dictionary_results(preflight.run_dir, result_path)
+            self.assertEqual("科目语义已导入", import_result["status"])
+            second = run_classification(preflight.run_dir)
+            self.assertNotEqual("待科目语义确认", second.status)
+            self.assertEqual("科目语义词典说明.md", (preflight.run_dir / "科目语义词典说明.md").name)
+            self.assertTrue((preflight.run_dir / "科目语义词典说明.md").is_file())
+
+    def test_company_notes_gate_and_injection(self) -> None:
+        # 传入 --notes 后，未 confirm-notes 前 scan-accounts 停在待确认；确认后注意事项进入词典批次 context（Task 5B）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "含明细科目.xlsx"
+            workbook = Workbook()
+            journal = workbook.active
+            journal.title = "序时账"
+            journal.append(["日期", "凭证字", "凭证号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"])
+            journal.append(["2026/1/1", "记", "1", "支付设备款", "1002", "银行存款", None, 100000, None, "购建固定资产支付的现金"])
+            journal.append(["2026/1/1", "记", "1", "支付设备款", "2202", "应付账款_全新明细段XYZ", 100000, None, None, "购建固定资产支付的现金"])
+            balances = workbook.create_sheet("现金余额资料")
+            balances.append(["项目", "金额"])
+            balances.append(["期初现金及现金等价物余额", 0])
+            balances.append(["汇率变动对现金及现金等价物的影响", 0])
+            balances.append(["期末现金及现金等价物余额", 100000])
+            workbook.save(source)
+            workbook.close()
+
+            notes_text = "该公司把应付设备款做到其他应付款"
+            preflight = run_preflight(
+                [source], ("100000", "50000", "5000"), root, notes=notes_text
+            )
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+            blocked = scan_accounts(preflight.run_dir)
+            self.assertEqual("待确认公司特殊规则", blocked["status"])
+
+            confirmed = confirm_company_notes(
+                preflight.run_dir,
+                [
+                    {
+                        "note_id": "NOTE-01",
+                        "内容": "该公司把应付设备款做到其他应付款",
+                        "涉及科目或词": ["其他应付款", "设备款"],
+                        "建议处理": "其他应付款中的设备采购支出按购建固定资产判断",
+                        "依据": "管理层核算习惯说明",
+                    }
+                ],
+            )
+            self.assertEqual("completed", confirmed.status)
+
+            scan = scan_accounts(preflight.run_dir)
+            self.assertEqual("待科目语义确认", scan["status"])
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            task = state["account_dictionary"]["tasks"][0]
+            self.assertIn("company_notes", task)
+            self.assertTrue(task["company_notes"])
+
+    def test_confirm_notes_without_raw_text(self) -> None:
+        # 复核修复：无 --notes 文本时也可登记口述规则；缺省状态"采用"、自动生成 NOTE 编号
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _write_ledger_case(root)
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+
+            confirmed = confirm_company_notes(
+                preflight.run_dir,
+                [{"内容": "电费押金走其他应收", "涉及科目或词": ["押金"]}],
+            )
+
+            self.assertEqual("completed", confirmed.status)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            self.assertEqual("NOTE-01", state["company_notes"][0]["note_id"])
+            self.assertEqual("采用", state["company_notes"][0]["状态"])
+
+    def test_conflicted_notes_are_never_injected(self) -> None:
+        # 复核修复："冲突未采用"规则不得进入科目语义任务上下文与 AI 任务上下文
+        from cashflow_direct.ai_review import build_ai_task
+        from cashflow_direct.models import CashflowComponent, ClassificationDecision
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _write_ledger_case(root)
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_company_notes(
+                preflight.run_dir,
+                [
+                    {"note_id": "NOTE-01", "内容": "采用规则甲", "涉及科目或词": ["全新明细段XYZ"]},
+                    {"note_id": "NOTE-02", "内容": "冲突规则乙", "涉及科目或词": ["全新明细段XYZ"], "状态": "冲突未采用"},
+                ],
+            )
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+            scan = scan_accounts(preflight.run_dir)
+
+            self.assertEqual("待科目语义确认", scan["status"])
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            notes_in_tasks = str(
+                [task.get("company_notes") for task in state["account_dictionary"]["tasks"]]
+            )
+            self.assertIn("采用规则甲", notes_in_tasks)
+            self.assertNotIn("冲突规则乙", notes_in_tasks)
+
+            component = CashflowComponent(
+                component_id="C1", voucher_key="V1", summary="支付全新明细段XYZ款项",
+                cash_delta_cent=-100, counterpart_accounts=("应付账款_全新明细段XYZ",),
+            )
+            decision = ClassificationDecision(
+                component_id="C1", system_item_id="CFI-06",
+                system_item_name="购建固定资产、无形资产和其他长期资产支付的现金",
+                normal_direction="outflow", matched_rule_id="TEST",
+                reason="测试", evidence_level="medium",
+            )
+            ai_task = build_ai_task(component, decision, state["company_notes"])
+            self.assertIn("采用规则甲", ai_task.context)
+            self.assertNotIn("冲突规则乙", ai_task.context)
+
+    def test_dictionary_import_rejects_misaligned_account(self) -> None:
+        # 复核修复：结果行 account 与任务 account 不一致 → 该行无效并列入 missing（防张冠李戴）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _write_ledger_case(root)
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+            scan_accounts(preflight.run_dir)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            task = state["account_dictionary"]["tasks"][0]
+            result_path = root / "词典结果.jsonl"
+            result_path.write_text(
+                json.dumps({
+                    "task_id": task["task_id"],
+                    "account": "张冠李戴段",
+                    "semantic": "测试语义", "item_id": "CFI-06",
+                    "confidence": "high", "basis": "知识库第1行：测试依据",
+                }, ensure_ascii=False) + "\n",
+                encoding="utf-8-sig",
+            )
+
+            result = import_dictionary_results(preflight.run_dir, result_path)
+
+            self.assertEqual("AI 未完成", result["status"])
+            self.assertIn(task["task_id"], result["missing_ids"])
+
+    def test_dictionary_import_rejects_unknown_note_id(self) -> None:
+        # 复核修复：结果行 note_id 不在已登记"采用"清单 → 无效并列入 missing
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _write_ledger_case(root)
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+            scan_accounts(preflight.run_dir)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            task = state["account_dictionary"]["tasks"][0]
+            result_path = root / "词典结果.jsonl"
+            result_path.write_text(
+                json.dumps({
+                    "task_id": task["task_id"], "account": task["account"],
+                    "semantic": "测试语义", "item_id": "CFI-06",
+                    "confidence": "high", "basis": "依据公司特殊规则：NOTE-99",
+                    "note_id": "NOTE-99",
+                }, ensure_ascii=False) + "\n",
+                encoding="utf-8-sig",
+            )
+
+            result = import_dictionary_results(preflight.run_dir, result_path)
+
+            self.assertEqual("AI 未完成", result["status"])
+            self.assertIn(task["task_id"], result["missing_ids"])
+
+    def test_scan_accounts_forces_task_for_adopted_note_segment(self) -> None:
+        # 复核修复：通用词典已知的科目段被"采用"规则涉及词命中时，仍强制生成专属确认任务（防截断）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _write_ledger_case(root, account_name="其他应付款_设备款")
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+
+            first = scan_accounts(preflight.run_dir)
+            # "设备款"通用词典已知，无公司规则时不生成任务
+            self.assertEqual("科目语义已齐备", first["status"])
+
+            confirm_company_notes(
+                preflight.run_dir,
+                [{"note_id": "NOTE-01", "内容": "设备款实际为职工垫付报销", "涉及科目或词": ["设备款"]}],
+            )
+            second = scan_accounts(preflight.run_dir)
+
+            self.assertEqual("待科目语义确认", second["status"])
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            accounts = [task["account"] for task in state["account_dictionary"]["tasks"]]
+            self.assertIn("设备款", accounts)
+            # 设计 3.1.3：任务上下文必须注明对应 NOTE 编号，答题方才能在结果里留痕
+            task_notes = [
+                note
+                for task in state["account_dictionary"]["tasks"]
+                for note in task.get("company_notes", ())
+            ]
+            self.assertTrue(any("NOTE-01" in note for note in task_notes))
+            # 生成了待确认任务后，主流程必须重新等待词典导入，不得沿用"已齐备"标志
+            self.assertFalse(state.get("account_dictionary_completed", False))
+
+    def test_dictionary_note_id_flows_into_classification_reason(self) -> None:
+        # 复核修复：导入条目带 NOTE 编号，分类命中后理由须留痕"依据公司特殊规则：NOTE-01"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _write_ledger_case(root)
+            preflight = run_preflight([source], ("100000", "50000", "5000"), root)
+            confirm_company_notes(
+                preflight.run_dir,
+                [{"note_id": "NOTE-01", "内容": "全新明细段XYZ是设备采购款", "涉及科目或词": ["全新明细段XYZ"]}],
+            )
+            confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
+            scan_accounts(preflight.run_dir)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            task = state["account_dictionary"]["tasks"][0]
+            result_path = root / "词典结果.jsonl"
+            result_path.write_text(
+                json.dumps({
+                    "task_id": task["task_id"], "account": task["account"],
+                    "semantic": "设备采购对价", "item_id": "CFI-06",
+                    "confidence": "high", "basis": "依据公司特殊规则：NOTE-01",
+                    "note_id": "NOTE-01",
+                }, ensure_ascii=False) + "\n",
+                encoding="utf-8-sig",
+            )
+            imported = import_dictionary_results(preflight.run_dir, result_path)
+            self.assertEqual("科目语义已导入", imported["status"])
+
+            run_classification(preflight.run_dir)
+
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
+            )
+            reasons = json.dumps(state["decisions"], ensure_ascii=False)
+            self.assertIn("依据公司特殊规则：NOTE-01", reasons)
+
+
+def _write_ledger_case(root: Path, account_name: str = "应付账款_全新明细段XYZ") -> Path:
+    """最小运行态夹具：一张序时账（含指定对方科目明细段）+ 现金余额资料。"""
+    source = root / "最小夹具.xlsx"
+    workbook = Workbook()
+    journal = workbook.active
+    journal.title = "序时账"
+    journal.append(["日期", "凭证字", "凭证号", "摘要", "科目编码", "科目", "借方", "贷方", "流量金额", "现流项目"])
+    journal.append(["2026/1/1", "记", "1", "支付设备款", "1002", "银行存款", None, 100000, None, "购建固定资产支付的现金"])
+    journal.append(["2026/1/1", "记", "1", "支付设备款", "2202", account_name, 100000, None, None, "购建固定资产支付的现金"])
+    balances = workbook.create_sheet("现金余额资料")
+    balances.append(["项目", "金额"])
+    balances.append(["期初现金及现金等价物余额", 0])
+    balances.append(["汇率变动对现金及现金等价物的影响", 0])
+    balances.append(["期末现金及现金等价物余额", 100000])
+    workbook.save(source)
+    workbook.close()
+    return source
+
+
+def test_preflight_accepts_explicit_paths(tmp_path, monkeypatch):
+    """--paths 给定中文路径时不再弹窗（A1，Task 11）。"""
+    from cashflow_direct.cli import main
+    from tests.fixture_factory import write_end_to_end_case
+
+    inputs = write_end_to_end_case(tmp_path)
+    monkeypatch.setattr(
+        "cashflow_direct.cli.choose_input_files",
+        lambda: (_ for _ in ()).throw(AssertionError("不应弹窗")),
+    )
+    code = main(
+        [
+            "preflight",
+            "--overall", "1000000", "--performance", "500000", "--trivial", "50000",
+            "--paths", str(inputs[0]),
+            "--output-parent", str(tmp_path / "输出"),
+        ]
+    )
+    assert code == 0
 
 
 if __name__ == "__main__":

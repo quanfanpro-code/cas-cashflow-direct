@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
@@ -475,6 +475,40 @@ class StatementTests(unittest.TestCase):
         completed = reconcile_cash(statement, opening_cent=1_000, closing_cent=1_000 + net, fx_cent=fx)
         self.assertEqual("现金流量表与货币资金变动的勾稽核对：相符", completed.status)
         self.assertEqual(0, completed.difference_cent)
+
+
+def test_fuzzy_item_name_matching(tmp_path):
+    """正表措辞变体（"收到税收返还"）能模糊匹配到 CFO-02，不再直接失败（A2，Task 12）。"""
+    rules = load_rule_pack(ROOT)
+    path = Path(tmp_path) / "措辞变体正表.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "现流表"
+    ws.append(["项目", "行次", "本期金额", "上期金额"])
+    for item in rules.statement_items:
+        name = "收到的税收返还" if item.item_id == "CFO-02" else item.name
+        ws.append([name, item.display_order, 0, None])
+    wb.save(path)
+    result = parse_existing_statement(path, rules)
+    assert isinstance(result, ExistingStatementResult)
+    assert result.values["CFO-02"] == 0
+
+
+def test_multi_year_column_selected_by_reference_years(tmp_path):
+    """多时间列正表：结合明细日期年份选定本期列（2025），不再并列直停（A3，Task 13）。"""
+    rules = load_rule_pack(ROOT)
+    path = Path(tmp_path) / "多时间列正表.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "现流表"
+    ws.append(["项目", "行次", "2024年度金额", "2025年度金额"])
+    for item in rules.statement_items:
+        ws.append([item.name, item.display_order, 100, 200])
+    wb.save(path)
+    result = parse_existing_statement(path, rules, reference_years=frozenset({2025}))
+    assert isinstance(result, ExistingStatementResult)
+    # 选 2025 列，200 元=20000 分（结果以分计）
+    assert result.values["CFO-01"] == 20000
 
 
 if __name__ == "__main__":

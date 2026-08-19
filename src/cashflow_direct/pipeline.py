@@ -10,17 +10,27 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string
 
+from cashflow_direct.account_dictionary import (
+    AccountDictionary,
+    AccountSemanticEntry,
+    collect_detail_segments,
+    load_common_dictionary,
+    merge_dictionaries,
+)
 from cashflow_direct.ai_review import (
     AIResult,
     build_adjudication_tasks,
     chunk_ai_tasks,
     merge_ai_results,
     resolve_automatic_decisions,
+    review_text_pattern as _review_text_pattern,
     select_ai_tasks,
+    validate_basis_text,
 )
 from cashflow_direct.classification import classify_all, load_rule_pack
 from cashflow_direct.components import (
     CashScope,
+    _account_key,
     build_cashflow_components,
     compute_rough_reconciliation,
     confirm_cash_scope as make_cash_scope,
@@ -81,6 +91,26 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRACE_DIR_NAME = "计算留痕数据"
 STATE_FILE_NAME = "运行状态.json"
 DB_FILE_NAME = "计算留痕.sqlite3"
+# A4 输出中文化：人类可读列一律中文大白话（技术英文值只进隐藏技术列）
+_EVIDENCE_TIER_TEXT = {"high": "高", "medium": "中", "low": "低"}
+_ANOMALY_TEXT = {
+    "internal_transfer": "内部划转",
+    "non_cash": "非现金事项",
+    "accrual_with_cash_leg": "权责发生制事项（含现金腿）",
+    "netting_suspect": "疑似净额结算",
+    "voucher_unbalanced": "凭证借贷不平衡",
+    "unallocated_cash": "现金未分配",
+    "cash_allocation_mismatch": "现金分配不符",
+}
+_DECISION_SOURCE_TEXT = {
+    "system": "系统规则",
+    "ai_agreement": "AI复核一致",
+    "ai_adjudication": "AI裁决",
+    "ai_conflict": "AI未收口",
+    "consistency_review": "一致性复核",
+    "consistency_adjudication": "一致性裁决",
+    "manual": "人工确认",
+}
 @dataclass(frozen=True, slots=True)
 class PreflightResult:
     run_id: str
@@ -182,6 +212,9 @@ def _component_from_dict(payload: Mapping[str, object]) -> CashflowComponent:
 def _decision_from_dict(payload: Mapping[str, object]) -> ClassificationDecision:
     data = dict(payload)
     data["excluded_conflict_rule_ids"] = tuple(data.get("excluded_conflict_rule_ids", ()))
+    data["evidence_score"] = int(data.get("evidence_score", 0))
+    data["evidence_sources"] = tuple(data.get("evidence_sources", ()))
+    data["label_kept"] = bool(data.get("label_kept", False))
     return ClassificationDecision(**data)
 
 
@@ -222,13 +255,6 @@ def _scope_from_dict(payload: Mapping[str, object]) -> CashScope:
 
 def _materiality_from_state(state: Mapping[str, object]) -> MaterialityAmounts:
     return MaterialityAmounts(**state["materiality"])
-
-
-def _review_text_pattern(text: str) -> str:
-    without_dates = re.sub(r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?", "", text)
-    without_numbers = re.sub(r"\d[\d,，.]*", "", without_dates)
-    normalized = re.sub(r"[\s，。；：、,.!！?？（）()《》\[\]【】_-]+", "", without_numbers)
-    return normalized.lower() or "空白"
 
 
 def _persist_ai_results(
@@ -344,6 +370,7 @@ def run_preflight(
     materiality: tuple[object, object, object],
     output_parent: Path | None = None,
     statement_path: Path | None = None,
+    notes: str | None = None,
 ) -> PreflightResult:
     amounts = validate_materiality(*materiality)
     intake = register_inputs(inputs, output_parent=output_parent)
@@ -365,39 +392,13 @@ def run_preflight(
     designated_hit = False
     balance_candidates: dict[str, tuple[int, int]] = {}
     statement_candidates: list[dict[str, object]] = []
+    mapped_dataset_sheets_by_file: dict[str, frozenset[str]] = {}
     for registered in intake.active_files:
         for key, candidate in _read_cash_balances(registered.path).items():
             if key not in balance_candidates or candidate[0] > balance_candidates[key][0]:
                 balance_candidates[key] = candidate
         is_designated = designated_target is not None and registered.path.resolve() == designated_target
-        statement_by_sheet = detect_statement_sheets(registered.path, rules)
-        statement_hits = {
-            name: result
-            for name, result in statement_by_sheet.items()
-            if isinstance(result, ExistingStatementResult)
-        }
-        if is_designated:
-            designated_hit = True
-            if not statement_hits:
-                question = next(
-                    (item for item in statement_by_sheet.values() if isinstance(item, MappingQuestion)),
-                    None,
-                )
-                raise ValueError(
-                    f"指定的正表文件识别失败：{registered.path.name}（{question.sample_values[0] if question is not None else '未找到项目列或可用金额列'}）"
-                )
-            if len(statement_hits) > 1:
-                raise ValueError(
-                    f"指定的正表文件识别到多个现金流量表工作表：{registered.path.name}"
-                )
-            existing_statement_path = str(registered.path)
-            exclude_sheets = frozenset(statement_hits)
-            hit = next(iter(statement_hits.values()))
-            for key, value in _balances_from_existing(hit).items():
-                if value is not None:
-                    balance_candidates[key] = (3, value)
-        else:
-            exclude_sheets = frozenset()
+        # 第一遍：只收集余额、工作表结构、字段映射与明细归一化（疑似正表识别放第二遍，需明细日期年份）
         snapshot = scan_workbook(registered.path)
         sheet_structures.extend(
             {
@@ -409,10 +410,18 @@ def run_preflight(
             }
             for sheet in snapshot.sheets
         )
+        exclude_sheets = frozenset()
+        if is_designated:
+            # designated 文件归一化时需排除正表工作表；仅需工作表名，无需年份列选择，先用无年份识别取表名
+            exclude_sheets = frozenset(
+                name
+                for name, result in detect_statement_sheets(registered.path, rules).items()
+                if isinstance(result, ExistingStatementResult)
+            )
         detected = infer_dataset_mappings(snapshot, exclude_sheets=exclude_sheets)
-        mapped_dataset_sheets = {
+        mapped_dataset_sheets_by_file[registered.file_id] = frozenset(
             mapping.sheet_name for mapping in detected if isinstance(mapping, DatasetMapping)
-        }
+        )
         for mapping in detected:
             if isinstance(mapping, DatasetMapping):
                 normalized = normalize_dataset(registered.path, registered.file_id, mapping)
@@ -459,11 +468,45 @@ def run_preflight(
                         "recommended": mapping.recommended.column_letter,
                     }
                 )
-        if not is_designated:
+
+    # 第二遍：entries 收齐后，由明细日期区间推断本期年份，再逐文件识别正表（A3 多时间列选列）
+    reference_years = frozenset(
+        int(year.group(1))
+        for entry in entries
+        if (year := re.match(r"(\d{4})", entry.voucher_date))
+    )
+    for registered in intake.active_files:
+        is_designated = designated_target is not None and registered.path.resolve() == designated_target
+        statement_by_sheet = detect_statement_sheets(registered.path, rules, reference_years)
+        statement_hits = {
+            name: result
+            for name, result in statement_by_sheet.items()
+            if isinstance(result, ExistingStatementResult)
+        }
+        if is_designated:
+            designated_hit = True
+            if not statement_hits:
+                question = next(
+                    (item for item in statement_by_sheet.values() if isinstance(item, MappingQuestion)),
+                    None,
+                )
+                raise ValueError(
+                    f"指定的正表文件识别失败：{registered.path.name}（{question.sample_values[0] if question is not None else '未找到项目列或可用金额列'}）"
+                )
+            if len(statement_hits) > 1:
+                raise ValueError(
+                    f"指定的正表文件识别到多个现金流量表工作表：{registered.path.name}"
+                )
+            existing_statement_path = str(registered.path)
+            hit = next(iter(statement_hits.values()))
+            for key, value in _balances_from_existing(hit).items():
+                if value is not None:
+                    balance_candidates[key] = (3, value)
+        else:
             auto_hits = {
                 name: result
                 for name, result in statement_hits.items()
-                if name not in mapped_dataset_sheets
+                if name not in mapped_dataset_sheets_by_file.get(registered.file_id, frozenset())
             }
             if len(auto_hits) == 1:
                 hit = next(iter(auto_hits.values()))
@@ -534,6 +577,8 @@ def run_preflight(
         "evidence_profiles": profiles,
         "normalization_issues": normalization_issues,
     }
+    if notes:
+        state["company_notes_raw"] = notes
     _assert_inputs_unchanged(state)
     with store.stage("preflight") as connection:
         connection.execute(
@@ -633,7 +678,25 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
         (str(item["file_id"]), str(item["sheet"])) for item in state.get("mappings", ())
     }
     for file_id, questions in pending_by_file.items():
+        # 把所有已确认的字段映射一并作为列覆盖传回，避免只带"当前待确认项"
+        # 导致先确认过的字段在下一轮重新变回待确认、形成两字段来回切换死循环。
         overrides_by_sheet: dict[str, dict[str, int]] = {}
+        for record_key, record_choice in confirmations.items():
+            # 只取属于本文件、且为"工作表:字段"形式的角色键
+            prefix = f"{file_id}:"
+            if not record_key.startswith(prefix):
+                continue
+            remainder = record_key[len(prefix):]
+            if ":" not in remainder:
+                continue
+            sheet_part, _, role_part = remainder.partition(":")
+            if not sheet_part or not role_part or sheet_part == "statement":
+                continue
+            try:
+                col = column_index_from_string(str(record_choice).strip().upper())
+            except ValueError:
+                continue  # 不是字段列映射（如正表 use/ignore），跳过
+            overrides_by_sheet.setdefault(sheet_part, {})[role_part] = col
         for question in questions:
             role = str(question["role"])
             sheet_name = str(question.get("sheet", ""))
@@ -878,6 +941,272 @@ def _prepare_consistency_stage(
     return "AI 已完成", 0
 
 
+def _dictionary_from_state(state: Mapping[str, object]) -> AccountDictionary:
+    """由运行状态中的企业专属自定义条目 + 内置通用词典，合并出本次分类所用的语义词典。"""
+    common = load_common_dictionary(PROJECT_ROOT)
+    valid = state.get("account_dictionary", {}).get("valid_results", ())
+    custom_entries = tuple(
+        AccountSemanticEntry(
+            str(item["account"]),
+            str(item.get("semantic", "")),
+            str(item.get("item_id", "")),
+            str(item.get("basis", "")),
+            str(item.get("confidence", "low")),
+            "custom",
+            str(item.get("note_id", "")),
+        )
+        for item in valid
+    )
+    return merge_dictionaries(common, AccountDictionary(custom_entries))
+
+
+def _write_dictionary_batches(run_dir: Path, tasks: Sequence[dict[str, object]]) -> None:
+    for index in range(0, len(tasks), 25):
+        _write_trace_jsonl(
+            run_dir,
+            f"科目语义待判断_第{index // 25 + 1:02d}批.jsonl",
+            tasks[index : index + 25],
+        )
+
+
+def confirm_company_notes(
+    run_dir: Path,
+    entries: Sequence[Mapping[str, object]],
+) -> StageResult:
+    """登记经用户确认的公司特殊规则清单（B9）。
+
+    复核修复：无 --notes 文本时也可直接口述登记；每条带"状态"字段
+    （"采用"/"冲突未采用"，缺省"采用"），冲突未采用者仅留痕、不生效。
+    """
+    state = _load_state(run_dir)
+    _assert_inputs_unchanged(state)
+    validated: list[dict[str, object]] = []
+    for index, item in enumerate(entries):
+        text = str(item.get("内容", "")).strip()
+        if not text:
+            raise ValueError(f"公司特殊规则第 {index + 1} 条缺少内容")
+        status = str(item.get("状态", "") or "采用")
+        if status not in {"采用", "冲突未采用"}:
+            raise ValueError(
+                f"公司特殊规则第 {index + 1} 条状态非法：{status}（只接受「采用」或「冲突未采用」）"
+            )
+        terms = item.get("涉及科目或词") or item.get("涉及科目") or []
+        validated.append(
+            {
+                "note_id": str(item.get("note_id") or f"NOTE-{index + 1:02d}"),
+                "内容": text,
+                "涉及科目或词": list(terms) if isinstance(terms, (list, tuple)) else [str(terms)],
+                "建议处理": str(item.get("建议处理", "")),
+                "依据": str(item.get("依据", "")),
+                "状态": status,
+            }
+        )
+    state["company_notes"] = validated
+    _save_state(run_dir, state)
+    return StageResult(
+        str(state["run_id"]), Path(run_dir), "company_notes", "completed", "执行科目语义确认"
+    )
+
+
+def _write_dictionary_doc(run_dir: Path, valid: Sequence[dict[str, object]], company_notes: Sequence[Mapping[str, object]] = ()) -> None:
+    lines = ["# 科目语义词典说明", "", "本文件在导入本次运行的企业专属科目语义后自动生成，供人工查阅。", ""]
+    lines.append("| 科目段 | 语义 | 疑似项目 | 置信度 | 判断依据 |")
+    lines.append("|---|---|---|---|---|")
+    for item in valid:
+        lines.append(
+            f"| {item['account']} | {item.get('semantic', '')} | "
+            f"{item.get('item_id') or '已识别但不指向特定项目'} | "
+            f"{item.get('confidence', '')} | {item.get('basis', '')} |"
+        )
+    low = [item for item in valid if item.get("confidence") == "low"]
+    if low:
+        lines.append("")
+        lines.append("## 待人工确认")
+        for item in low:
+            lines.append(f"- {item['account']}（{item.get('semantic', '')}）：{item.get('basis', '')}")
+    if company_notes:
+        # 复核修复：公司特殊规则分"已采用"与"冲突未采用（仅说明，不生效）"两节列示
+        adopted = [note for note in company_notes if note.get("状态", "采用") == "采用"]
+        declined = [note for note in company_notes if note.get("状态", "采用") != "采用"]
+        lines.append("")
+        lines.append("## 公司特殊规则")
+        for heading, notes in (("### 已采用", adopted), ("### 冲突未采用（仅说明，不生效）", declined)):
+            if notes:
+                lines.append(heading)
+                for note in notes:
+                    lines.append(
+                        f"- {note.get('note_id', '')}：{note.get('内容', '')}（涉及科目或词："
+                        f"{'、'.join(note.get('涉及科目或词', ()) or ())}；建议处理：{note.get('建议处理', '')}）"
+                    )
+    (Path(run_dir) / "科目语义词典说明.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def scan_accounts(run_dir: Path) -> dict[str, object]:
+    """扫描本次运行全部对方科目明细段，生成科目语义待判断批次；无未知时标记齐备。"""
+    state = _load_state(run_dir)
+    _assert_inputs_unchanged(state)
+    if "cash_scope" not in state:
+        raise RuntimeError("请确认现金范围后继续")
+    if state.get("company_notes_raw") and not state.get("company_notes"):
+        return {"status": "待确认公司特殊规则", "missing": 0}
+    entries = tuple(_entry_from_dict(item) for item in state["entries"])
+    cash_keys = set(state.get("cash_scope", {}).get("included_keys", ()))
+    # 对方科目 = 分类时看到的 counterpart_accounts：显式 counterpart_name，或标准序时账中非现金侧的 account_name
+    effective_names: list[tuple[NormalizedEntry, str]] = []
+    for entry in entries:
+        if entry.counterpart_name:
+            effective_names.append((entry, entry.counterpart_name))
+        if entry.account_name and _account_key(entry.account_name) not in cash_keys:
+            effective_names.append((entry, entry.account_name))
+    all_detail = collect_detail_segments(name for _, name in effective_names)
+    common_known = {entry.account for entry in load_common_dictionary(PROJECT_ROOT).entries}
+    custom_known = {
+        item["account"]
+        for item in state.get("account_dictionary", {}).get("valid_results", ())
+    }
+    known = common_known | custom_known
+    unknown = [segment for segment in all_detail if segment not in known]
+    # 复核修复：只有"采用"状态的公司特殊规则才生效
+    adopted_notes = [
+        note for note in state.get("company_notes", ()) if note.get("状态", "采用") == "采用"
+    ]
+    # 防截断：通用词典已知的科目段，只要被"采用"规则涉及词命中，仍强制生成专属确认任务
+    forced = [
+        segment
+        for segment in all_detail
+        if segment in common_known
+        and segment not in custom_known
+        and any(
+            term and term in segment
+            for note in adopted_notes
+            for term in note.get("涉及科目或词", ())
+        )
+    ]
+    unknown = sorted(set(unknown) | set(forced))
+    if not unknown:
+        state["account_dictionary_completed"] = True
+        _save_state(run_dir, state)
+        return {"status": "科目语义已齐备", "missing": 0}
+    tasks: list[dict[str, object]] = []
+    for segment in unknown:
+        sample_contexts: list[str] = []
+        seen: set[str] = set()
+        for entry, name in effective_names:
+            summary = (entry.summary or "").strip()
+            if not summary or summary in seen:
+                continue
+            seen.add(summary)
+            if segment in name:
+                sample_contexts.append(summary)
+            if len(sample_contexts) >= 3:
+                break
+        task: dict[str, object] = {
+            "task_id": stable_id("ACC", segment), "account": segment, "sample_contexts": sample_contexts
+        }
+        if adopted_notes:
+            # 设计 3.1.3：任务上下文必须带 NOTE 编号，答题方才能在结果里留痕
+            relevant = [
+                f"{note.get('note_id', '')}：{note.get('内容', '')}"
+                for note in adopted_notes
+                if any(term and term in segment for term in note.get("涉及科目或词", ()))
+            ]
+            if not relevant:
+                relevant = [
+                    f"{note.get('note_id', '')}：{note.get('内容', '')}"
+                    for note in adopted_notes
+                ]
+            task["company_notes"] = relevant
+        tasks.append(task)
+    state["account_dictionary"] = {
+        "tasks": tasks,
+        "valid_results": [],
+        "missing_ids": [task["task_id"] for task in tasks],
+    }
+    # 复核修复：生成了待确认任务就必须重新等待词典导入，不得沿用此前的"已齐备"标志
+    state["account_dictionary_completed"] = False
+    _write_dictionary_batches(run_dir, tasks)
+    state["stage"] = "waiting_dictionary"
+    _save_state(run_dir, state)
+    return {"status": "待科目语义确认", "missing": len(tasks)}
+
+
+def import_dictionary_results(run_dir: Path, result_path: Path) -> dict[str, object]:
+    """校验并导入企业专属科目语义结果；全部有效后标记齐备并生成人读说明文档。"""
+    state = _load_state(run_dir)
+    _assert_inputs_unchanged(state)
+    pending = state.get("account_dictionary")
+    if not pending or not pending.get("tasks"):
+        raise RuntimeError("尚未生成科目语义待判断任务，请先执行 scan-accounts")
+    expected_by_id = {task["task_id"]: task for task in pending["tasks"]}
+    # 复核修复：NOTE 编号必须指向已登记且"采用"的公司特殊规则
+    adopted_note_ids = {
+        str(note.get("note_id", ""))
+        for note in state.get("company_notes", ())
+        if note.get("状态", "采用") == "采用"
+    }
+    leaf_ids = {
+        item.item_id for item in load_rule_pack(PROJECT_ROOT).statement_items if item.is_leaf
+    }
+    valid: list[dict[str, object]] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    with Path(result_path).open("r", encoding="utf-8-sig") as source:
+        for raw in source:
+            line = raw.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            task_id = str(record.get("task_id", ""))
+            account = str(record.get("account", ""))
+            item_id = str(record.get("item_id", ""))
+            confidence = str(record.get("confidence", ""))
+            basis = str(record.get("basis", ""))
+            note_id = str(record.get("note_id", ""))
+            if task_id not in expected_by_id or task_id in seen:
+                if task_id:
+                    missing.append(task_id)
+                continue
+            # 复核修复：科目段必须与任务一致，防止结果错行、张冠李戴
+            if account != expected_by_id[task_id]["account"]:
+                missing.append(task_id)
+                continue
+            if item_id not in ("",) and item_id not in leaf_ids:
+                missing.append(task_id)
+                continue
+            if (
+                confidence not in {"high", "medium", "low"}
+                or validate_basis_text(basis) is not None
+            ):
+                missing.append(task_id)
+                continue
+            if note_id and note_id not in adopted_note_ids:
+                missing.append(task_id)
+                continue
+            seen.add(task_id)
+            valid.append(
+                {
+                    "task_id": task_id,
+                    "account": account,
+                    "semantic": str(record.get("semantic", "")),
+                    "item_id": item_id,
+                    "confidence": confidence,
+                    "basis": basis.strip(),
+                    "note_id": note_id,
+                }
+            )
+    missing.extend(task_id for task_id in expected_by_id if task_id not in seen)
+    if missing:
+        return {"status": "AI 未完成", "missing_ids": sorted(set(missing))}
+    pending["valid_results"] = valid
+    pending["missing_ids"] = []
+    state["account_dictionary"] = pending
+    state["account_dictionary_completed"] = True
+    state["stage"] = "dictionary_completed"
+    _write_dictionary_doc(run_dir, valid, state.get("company_notes", ()))
+    _save_state(run_dir, state)
+    return {"status": "科目语义已导入", "count": len(valid)}
+
+
 def run_classification(run_dir: Path) -> ClassificationStageResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
@@ -885,6 +1214,25 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         return _result_from_classification(state, run_dir)
     if "cash_scope" not in state:
         raise RuntimeError("请确认现金范围后继续")
+    if not state.get("account_dictionary_completed"):
+        scan = scan_accounts(run_dir)
+        state = _load_state(run_dir)
+        if scan.get("status") == "待确认公司特殊规则":
+            return ClassificationStageResult(
+                str(state["run_id"]), Path(run_dir), 0, "", 0, 0, int(scan.get("missing", 0)),
+                "待确认公司特殊规则",
+            )
+        if not state.get("account_dictionary_completed"):
+            return ClassificationStageResult(
+                str(state["run_id"]),
+                Path(run_dir),
+                0,
+                "",
+                int(state.get("classification_summary", {}).get("source_entry_count", 0)),
+                0,
+                int(scan["missing"]),
+                "待科目语义确认",
+            )
     balances = state.get("cash_balances", {})
     if not all(balances.get(key) is not None for key in ("opening_cent", "closing_cent", "fx_cent")):
         raise RuntimeError("请先补充期初、期末现金余额和汇率影响后再分类")
@@ -926,11 +1274,14 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         for component in build.components
     )
     rules = load_rule_pack(PROJECT_ROOT)
-    decisions = classify_all(components, rules)
+    decisions = classify_all(components, rules, _dictionary_from_state(state))
     checked = validate_classification(components, decisions)
     if not checked.valid:
         raise RuntimeError("自动分类不变量失败：" + "；".join(checked.errors))
-    tasks = select_ai_tasks(components, decisions, _materiality_from_state(state))
+    tasks = select_ai_tasks(
+        components, decisions, _materiality_from_state(state),
+        company_notes=state.get("company_notes", ()),
+    )
     serialized_components = [asdict(item) for item in components]
     serialized_decisions = [asdict(item) for item in decisions]
     digest_source = json.dumps(serialized_components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -970,14 +1321,28 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             "INSERT INTO ai_task(record_id, payload_json) VALUES (?, ?)",
             ((item.task_id, json.dumps(asdict(item), ensure_ascii=False)) for item in tasks),
         )
+        # 同一凭证、同一现金腿、同一冲抵金额可能对应多条对等内部划转腿，
+        # 其 stable_id 会撞车。这里在基础编号后追加出现序号，保证每行 record_id 唯一，
+        # 既保留全量内部划转留痕，又避免 UNIQUE 约束导致整单失败。
+        transfer_tuples = [
+            (item.voucher_key, item.entry_id, item.matched_cent)
+            for item in build.excluded_internal_transfers
+        ]
+        transfer_ids: list[str] = []
+        seen_transfer_ids: dict[str, int] = {}
+        for item, tup in zip(build.excluded_internal_transfers, transfer_tuples):
+            base = stable_id("ITR", *tup)
+            occurrence = seen_transfer_ids.get(base, 0)
+            seen_transfer_ids[base] = occurrence + 1
+            transfer_ids.append(base if occurrence == 0 else f"{base}_{occurrence+1:02d}")
         connection.executemany(
             "INSERT INTO internal_transfer(record_id, payload_json) VALUES (?, ?)",
             (
                 (
-                    stable_id("ITR", item.voucher_key, item.entry_id, item.matched_cent),
+                    transfer_id,
                     json.dumps(asdict(item), ensure_ascii=False),
                 )
-                for item in build.excluded_internal_transfers
+                for transfer_id, item in zip(transfer_ids, build.excluded_internal_transfers)
             ),
         )
     state["components"] = serialized_components
@@ -1198,10 +1563,13 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
         if validation.status == "AI 已完成":
             system_decisions = tuple(_decision_from_dict(item) for item in state["system_decisions"])
             ai_results = tuple(AIResult(**item) for item in state["ai_validation"]["valid_results"])
-            resolved = resolve_automatic_decisions(
-                system_decisions, ai_results, validation.valid_results
-            )
             item_by_id = load_rule_pack(PROJECT_ROOT).item_by_id
+            resolved = resolve_automatic_decisions(
+                system_decisions,
+                ai_results,
+                validation.valid_results,
+                {key: item.name for key, item in item_by_id.items()},
+            )
             resolved = tuple(
                 replace(
                     decision,
@@ -1261,7 +1629,13 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
             state["decisions"] = [
                 asdict(item)
                 for item in resolve_automatic_decisions(
-                    system_decisions, validation.valid_results, ()
+                    system_decisions,
+                    validation.valid_results,
+                    (),
+                    {
+                        key: item.name
+                        for key, item in load_rule_pack(PROJECT_ROOT).item_by_id.items()
+                    },
                 )
             ]
             state["classification_summary"]["ai_tasks_missing"] = 0
@@ -1308,7 +1682,12 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     existing = None
     existing_path = state.get("existing_statement_path")
     if existing_path:
-        existing = parse_existing_statement(Path(str(existing_path)), rules)
+        reference_years = frozenset(
+            int(year.group(1))
+            for entry in entries
+            if (year := re.match(r"(\d{4})", entry.voucher_date))
+        )
+        existing = parse_existing_statement(Path(str(existing_path)), rules, reference_years)
         if isinstance(existing, MappingQuestion):
             raise RuntimeError("客户现有正表仍有无法映射的项目，请先确认")
 
@@ -1391,6 +1770,10 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     if key in entry_by_id
                 )
             ),
+            mandatory=(
+                abs(component_by_id[decision.component_id].cash_delta_cent)
+                >= _materiality_from_state(state).overall_cent
+            ),
         )
         for decision in decisions
         if (
@@ -1445,11 +1828,55 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                         )
                     ),
                     group_impact_cent=int(payload["gross_cent"]),
+                    mandatory=abs(component.cash_delta_cent) >= _materiality_from_state(state).overall_cent,
                 )
             )
     unresolved = tuple(unresolved_list)
+    # 大额强制人工复核：单笔达整体重要性且未收口/未列出者，无论自动判断是否收口一律进表（Task 8）
+    listed_ids = {item.component_id for item in unresolved_list}
+    for decision in decisions:
+        if decision.excluded or decision.component_id in listed_ids:
+            continue
+        component = component_by_id[decision.component_id]
+        if abs(component.cash_delta_cent) < _materiality_from_state(state).overall_cent:
+            continue
+        unresolved_list.append(
+            UnresolvedDecision(
+                component_id=component.component_id,
+                cash_delta_cent=component.cash_delta_cent,
+                cash_direction=(
+                    "inflow" if component.cash_delta_cent > 0 else "outflow"
+                ),
+                original_item=component.original_item_text,
+                system_item_id=decision.system_item_id,
+                adjudication_status="达到财务报表整体重要性，强制人工复核",
+                counterpart_group=_review_text_pattern(
+                    "、".join(component.counterpart_accounts)
+                ),
+                summary_pattern=_review_text_pattern(component.summary),
+                alternative_item_ids=(),
+                reason=decision.reason,
+                system_statement_amount_cent=statement_amount_cent(
+                    component.cash_delta_cent,
+                    rules.item_by_id[decision.system_item_id].normal_direction,
+                ),
+                source_locations=tuple(
+                    dict.fromkeys(
+                        f"{file_name_by_id.get(entry_by_id[key].source.file_id, entry_by_id[key].source.file_id)}|{entry_by_id[key].source.sheet_name}|{entry_by_id[key].source.cell_range}"
+                        for key in component.source_keys
+                        if key in entry_by_id
+                    )
+                ),
+                mandatory=True,
+            )
+        )
+    unresolved = tuple(unresolved_list)
     review_batches = build_review_batches(
-        unresolved, _materiality_from_state(state).performance_cent
+        unresolved,
+        _materiality_from_state(state).performance_cent,
+        all_leaf_item_ids=tuple(
+            item.item_id for item in rules.statement_items if item.is_leaf
+        ),
     )
     consistency_group_by_component: dict[str, Mapping[str, object]] = {}
     for group in state.get("consistency_groups", ()):
@@ -1460,7 +1887,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         for item in state.get("consistency_resolution", {}).get("statuses", ())
     }
     tier_names = {
-        "trace_only": "低于明显微小错报临界值",
+        "trace_only": "低于明显微小错报临界值（仍须复核）",
         "first_review": "明显微小至实际执行重要性",
         "adjudication_required": "实际执行至整体重要性",
         "double_high_required": "达到整体重要性",
@@ -1485,8 +1912,10 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "对方科目": "、".join(component.counterpart_accounts),
                 "自动判定现流项目": decision.system_item_name or "不进入正表",
                 "判断理由": decision.reason,
-                "证据强度": decision.evidence_level,
-                "异常": "、".join(component.anomalies),
+                "证据强度": _EVIDENCE_TIER_TEXT.get(decision.evidence_level, decision.evidence_level),
+                "证据得分": decision.evidence_score,
+                "异常": "、".join(_ANOMALY_TEXT.get(anomaly, anomaly) for anomaly in component.anomalies),
+                "决策来源": _DECISION_SOURCE_TEXT.get(decision.decision_source, decision.decision_source),
                 "方向依据": "、".join(
                     dict.fromkeys(flow_direction_source(entry) for entry in source_entries)
                 ),
@@ -1525,7 +1954,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "对方科目": "" if entry is None else entry.counterpart_name,
                 "自动判定现流项目": "不进入正表",
                 "判断理由": "现金及现金等价物内部划转",
-                "证据强度": "high",
+                "证据强度": "高",
                 "异常": "内部划转已排除",
                 "方向依据": "内部划转",
                 "来源文件": "" if entry is None else file_name_by_id.get(entry.source.file_id, entry.source.file_id),

@@ -8,12 +8,15 @@ from pathlib import Path
 
 from cashflow_direct.intake import choose_input_files
 from cashflow_direct.pipeline import (
+    confirm_company_notes,
     confirm_mapping,
     confirm_cash_scope,
     finalize_run,
     import_ai_results,
+    import_dictionary_results,
     run_classification,
     run_preflight,
+    scan_accounts,
     supplement_cash_balances,
 )
 
@@ -27,10 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--trivial", required=True, help="明显微小错报临界值，单位元")
     preflight.add_argument("--output-parent", help="由 Skill 自动传递的输出父目录")
     preflight.add_argument("--statement-path", help="客户现有现金流量表正表文件；指定后只认该文件，识别失败即报错")
+    preflight.add_argument("--notes", help="公司特殊规则注意事项文本文件路径（UTF-8），可选")
+    preflight.add_argument("--paths", nargs="+", help="直接给出输入文件路径（可多个）；给定后不弹文件选择窗口")
     for name in (
         "confirm-mapping",
         "confirm-cash",
+        "confirm-notes",
         "supplement-cash",
+        "scan-accounts",
+        "import-dictionary",
         "classify",
         "import-ai",
         "finalize",
@@ -42,11 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--decisions", required=True, help="字段映射确认 JSON")
         elif name == "confirm-cash":
             command.add_argument("--decisions", required=True, help="现金范围决定 JSON")
+        elif name == "confirm-notes":
+            command.add_argument("--decisions", required=True, help="公司特殊规则清单 JSON 数组")
         elif name == "supplement-cash":
             command.add_argument("--opening", required=True, help="期初现金余额，单位元")
             command.add_argument("--closing", required=True, help="期末现金余额，单位元")
             command.add_argument("--fx", required=True, help="汇率变动影响，单位元；没有则填零")
             command.add_argument("--source-note", required=True, help="补充数据的资料来源说明")
+        elif name == "import-dictionary":
+            command.add_argument("--result-path", required=True, help="科目语义 AI 返回结果 JSONL")
         elif name == "import-ai":
             command.add_argument("--result-path", required=True, help="AI 返回结果 JSONL")
     return parser
@@ -59,16 +71,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         if arguments.command == "preflight":
+            notes = (
+                Path(arguments.notes).read_text(encoding="utf-8")
+                if arguments.notes
+                else None
+            )
+            inputs = (
+                tuple(Path(item) for item in arguments.paths)
+                if arguments.paths
+                else choose_input_files()
+            )
             result = run_preflight(
-                choose_input_files(),
+                inputs,
                 (arguments.overall, arguments.performance, arguments.trivial),
                 None if arguments.output_parent is None else Path(arguments.output_parent),
                 None if arguments.statement_path is None else Path(arguments.statement_path),
+                notes=notes,
             )
         elif arguments.command == "confirm-mapping":
             result = confirm_mapping(Path(arguments.run_dir), json.loads(arguments.decisions))
         elif arguments.command == "confirm-cash":
             result = confirm_cash_scope(Path(arguments.run_dir), json.loads(arguments.decisions))
+        elif arguments.command == "confirm-notes":
+            result = confirm_company_notes(Path(arguments.run_dir), json.loads(arguments.decisions))
         elif arguments.command == "supplement-cash":
             result = supplement_cash_balances(
                 Path(arguments.run_dir),
@@ -77,6 +102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.fx,
                 arguments.source_note,
             )
+        elif arguments.command == "scan-accounts":
+            result = scan_accounts(Path(arguments.run_dir))
+        elif arguments.command == "import-dictionary":
+            result = import_dictionary_results(Path(arguments.run_dir), Path(arguments.result_path))
         elif arguments.command == "classify":
             result = run_classification(Path(arguments.run_dir))
         elif arguments.command == "import-ai":

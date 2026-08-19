@@ -212,7 +212,10 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         raise ValueError("全量分类留痕超过本版本 100,000 行验收范围")
     if len(model.difference_rows) > 100_000:
         raise ValueError("原表与自动判定差异明细超过本版本 100,000 行验收范围")
-    if any(not batch.alternative_item_codes for batch in model.review_batches):
+    if any(
+        not batch.alternative_item_codes and not batch.mandatory
+        for batch in model.review_batches
+    ):
         raise ValueError("重要待复核事项存在没有备选现流项目的记录")
     target.parent.mkdir(parents=True, exist_ok=True)
     workbook = xlsxwriter.Workbook(str(target))
@@ -313,6 +316,18 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         for column, header in enumerate(review_headers):
             review.write(0, column, header, formats["header"])
         if model.review_batches:
+            # 复核修复：强制人工复核批次可改选任一标准项目——全部叶子项目名写入隐藏 R 列，
+            # 下拉与状态公式改用区域引用（内联列表会超过 Excel 的 255 字符上限）；
+            # 只在确有强制批次时写 R 列，避免普通复核表多出无关行
+            leaf_names = tuple(
+                item.name for item in model.rules.statement_items if item.is_leaf
+            )
+            if any(batch.mandatory for batch in model.review_batches):
+                review.write(0, 17, "认可自动判断", formats["text"])
+                for name_index, leaf_name in enumerate(leaf_names, 1):
+                    review.write(name_index, 17, leaf_name, formats["text"])
+            leaf_list_range = f"$R$1:$R${1 + len(leaf_names)}"
+            leaf_names_range = f"$R$2:$R${1 + len(leaf_names)}"
             for row_index, batch in enumerate(model.review_batches, 1):
                 proposed_name = item_name_by_id[batch.proposed_item_code]
                 alternative_names = tuple(
@@ -336,13 +351,19 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     formats["money"],
                 )
                 excel_row = row_index + 1
-                valid_choices = ",".join(
-                    f'C{excel_row}="{item_name}"' for item_name in alternative_names
-                )
+                if batch.mandatory:
+                    condition = (
+                        f"COUNTIF('重要待复核事项'!{leaf_names_range},C{excel_row})>0"
+                    )
+                else:
+                    valid_choices = ",".join(
+                        f'C{excel_row}="{item_name}"' for item_name in alternative_names
+                    )
+                    condition = f"OR({valid_choices})"
                 review.write_formula(
                     row_index,
                     6,
-                    f'=IF(OR({valid_choices}),-E{excel_row},0)',
+                    f'=IF(AND({condition},C{excel_row}<>B{excel_row}),-E{excel_row},0)',
                     formats["money"],
                     0,
                 )
@@ -366,7 +387,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 review.write_formula(
                     row_index,
                     9,
-                    f'=IF(C{excel_row}="","待确认",IF(C{excel_row}="认可自动判断","认可自动判断",IF(OR({valid_choices}),"已重分类","无效选择")))',
+                    f'=IF(C{excel_row}="","待确认",IF(OR(C{excel_row}="认可自动判断",C{excel_row}=B{excel_row}),"认可自动判断",IF({condition},"已重分类","无效选择")))',
                     formats["pending"],
                     "待确认",
                 )
@@ -375,16 +396,28 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 review.write(row_index, 12, batch.representative_summary, formats["text"])
                 review.write(row_index, 13, batch.counterpart_group, formats["text"])
                 review.write(row_index, 14, "、".join(batch.source_locations), formats["text"])
-                review.data_validation(
-                    row_index,
-                    2,
-                    row_index,
-                    2,
-                    {
-                        "validate": "list",
-                        "source": ["认可自动判断", *alternative_names],
-                    },
-                )
+                if batch.mandatory:
+                    review.data_validation(
+                        row_index,
+                        2,
+                        row_index,
+                        2,
+                        {
+                            "validate": "list",
+                            "source": f"='重要待复核事项'!{leaf_list_range}",
+                        },
+                    )
+                else:
+                    review.data_validation(
+                        row_index,
+                        2,
+                        row_index,
+                        2,
+                        {
+                            "validate": "list",
+                            "source": ["认可自动判断", *alternative_names],
+                        },
+                    )
             review.autofilter(0, 0, len(model.review_batches), len(review_headers) - 1)
         else:
             review.write(1, 0, "本期无重大剩余不确定事项，无需人工复核。", formats["note"])
@@ -396,6 +429,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         review.set_column("K:K", 12)
         review.set_column("L:L", 32, None, {"hidden": True})
         review.set_column("M:O", 32)
+        review.set_column("R:R", None, None, {"hidden": True})
         _configure_sheet(review, len(review_headers), len(model.review_batches) + 1)
         review.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
@@ -638,6 +672,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             "业务组成编号(技术)",
             "来源占用键(技术)",
             "业务组编号(技术)",
+            "决策来源(技术)",
         }
         for column, header in enumerate(trace_headers):
             if header in hidden_trace_headers:
@@ -708,6 +743,22 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
                 break
         if model.review_batches and not workbook["重要待复核事项"].data_validations.dataValidation:
             errors.append("重要待复核事项缺少下拉选择")
+        # 设计第五节：强制人工复核批次的行必须使用区域引用下拉（内联列表会超 255 字符上限）
+        mandatory_excel_rows = [
+            index + 2
+            for index, batch in enumerate(model.review_batches)
+            if batch.mandatory
+        ]
+        if mandatory_excel_rows:
+            validations = workbook["重要待复核事项"].data_validations.dataValidation
+            for excel_row in mandatory_excel_rows:
+                if not any(
+                    "$R$" in str(validation.formula1 or "")
+                    and f"C{excel_row}" in str(validation.sqref)
+                    for validation in validations
+                ):
+                    errors.append(f"强制人工复核批次第 {excel_row} 行未使用区域引用下拉")
+                    break
         if model.duplicate_groups and not workbook["疑似重复事项"].data_validations.dataValidation:
             errors.append("疑似重复事项缺少下拉选择")
         if model.review_batches:

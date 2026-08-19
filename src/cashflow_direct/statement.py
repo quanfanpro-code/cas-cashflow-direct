@@ -150,6 +150,35 @@ def _normalize_item_name(value: str) -> str:
     return text.replace("以及", "及").replace("和", "").replace("其中", "")
 
 
+# 常见措辞变体：归一化后的写法 → 归一化后的标准名（A2 模糊匹配别名表）
+_ITEM_ALIASES = {
+    "收到的税收返还": "收到的税费返还",
+    "税收返还": "税费返还",
+    "支付的其他与经营活动有关的现金": "支付其他与经营活动有关的现金",
+    "收到的其他与经营活动有关的现金": "收到其他与经营活动有关的现金",
+    "收到的其他与投资活动有关的现金": "收到其他与投资活动有关的现金",
+    "支付的其他与投资活动有关的现金": "支付其他与投资活动有关的现金",
+    "收到的其他与筹资活动有关的现金": "收到其他与筹资活动有关的现金",
+    "支付的其他与筹资活动有关的现金": "支付其他与筹资活动有关的现金",
+}
+
+
+def _edit_distance_at_most(a: str, b: str, limit: int = 2) -> bool:
+    """判断 a、b 编辑距离是否 ≤ limit；长度差超限直接 False。"""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        current = [i]
+        for j, char_b in enumerate(b, 1):
+            cost = 0 if char_a == char_b else 1
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost))
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[len(b)] <= limit
+
+
 def _mapping_question(
     role: str,
     text: str,
@@ -177,6 +206,7 @@ def _parse_statement_rows(
     rows: list[tuple[object, ...]],
     sheet_name: str,
     rules: RulePack,
+    reference_years: frozenset[int] = frozenset(),
 ) -> ExistingStatementResult | MappingQuestion | None:
     unit_text = "|".join(
         str(value)
@@ -202,13 +232,46 @@ def _parse_statement_rows(
     normalized_to_id = {
         _normalize_item_name(item.name): item.item_id for item in rules.statement_items
     }
+    # 模糊匹配命中多个不同项目的歧义记录：(归一化后文字, 候选项目id)
+    ambiguities: list[tuple[str, tuple[str, ...]]] = []
 
     def _match_item_id(normalized: str) -> str | None:
-        """匹配标准项目名；兼容"四、"等中文序数前缀（含"十一"两位序数）。"""
+        """多级匹配标准项目名：精确 → 序数前缀 → 别名 → 包含 → 编辑距离；歧义记入但不武断选中。"""
         item_id = normalized_to_id.get(normalized)
-        if item_id is None:
-            item_id = normalized_to_id.get(re.sub(r"^[一二三四五六七八九十]+", "", normalized))
-        return item_id
+        if item_id is not None:
+            return item_id
+        stripped = re.sub(r"^[一二三四五六七八九十]+", "", normalized)
+        item_id = normalized_to_id.get(stripped)
+        if item_id is not None:
+            return item_id
+        alias = _ITEM_ALIASES.get(normalized) or _ITEM_ALIASES.get(stripped)
+        if alias is not None:
+            item_id = normalized_to_id.get(alias)
+            if item_id is not None:
+                return item_id
+        standards = [
+            (item.item_id, _normalize_item_name(item.name))
+            for item in rules.statement_items
+        ]
+        fuzzy: list[str] = []
+        for std_id, std in standards:
+            if not std:
+                continue
+            shorter, longer = (stripped, std) if len(stripped) <= len(std) else (std, stripped)
+            if len(shorter) >= 6 and shorter in longer:
+                fuzzy.append(std_id)
+        if not fuzzy:
+            for std_id, std in standards:
+                if not std:
+                    continue
+                if len(max(stripped, std, key=len)) >= 6 and _edit_distance_at_most(stripped, std):
+                    fuzzy.append(std_id)
+        unique = tuple(dict.fromkeys(fuzzy))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            ambiguities.append((stripped, unique))
+        return None
 
     item_rows = [
         row for row in rows[header_row:]
@@ -274,6 +337,14 @@ def _parse_statement_rows(
         ]
         if preferred:
             tied = preferred
+    # 多时间列：并列时结合明细日期区间推断本期年份，命中含该年份表头的列（A3）
+    if len(tied) > 1 and reference_years:
+        year = max(reference_years)
+        year_hits = [
+            index for index in tied if str(year) in str(header_texts[index])
+        ]
+        if year_hits:
+            tied = year_hits
     if len(tied) > 1:
         return _mapping_question("statement_header", "本期金额列存在并列候选，无法确定", header_row, sheet_name)
     current_column = tied[0]
@@ -289,7 +360,20 @@ def _parse_statement_rows(
             continue
         name = str(raw_name).strip()
         normalized = _normalize_item_name(name)
+        stripped = re.sub(r"^[一二三四五六七八九十]+", "", normalized)
         item_id = _match_item_id(normalized)
+        if item_id is None:
+            ambiguous = next(
+                (ids for text, ids in ambiguities if text == stripped), None
+            )
+            if ambiguous is not None:
+                names = " / ".join(rules.item_by_id[item_id].name for item_id in ambiguous)
+                return _mapping_question(
+                    "statement_item",
+                    f"该行可匹配多个标准项目：{names}，请确认",
+                    row_number,
+                    sheet_name,
+                )
         current_value = row[current_column] if current_column < len(row) else None
         prior_value = row[prior_column] if prior_column is not None and prior_column < len(row) else None
         # 占位符（如"——"）视为无金额，节标题行才能正确跳过
@@ -356,6 +440,7 @@ def _parse_statement_rows(
 def detect_statement_sheets(
     path: Path,
     rules: RulePack,
+    reference_years: frozenset[int] = frozenset(),
 ) -> dict[str, ExistingStatementResult | MappingQuestion | None]:
     """逐工作表识别客户现有正表。键为工作表名，None 表示该表不是正表。
 
@@ -369,6 +454,7 @@ def detect_statement_sheets(
                 list(worksheet.iter_rows(values_only=True)),
                 worksheet.title,
                 rules,
+                reference_years,
             )
             for worksheet in workbook.worksheets
         }
@@ -379,8 +465,9 @@ def detect_statement_sheets(
 def parse_existing_statement(
     path: Path,
     rules: RulePack,
+    reference_years: frozenset[int] = frozenset(),
 ) -> ExistingStatementResult | MappingQuestion:
-    candidates = tuple(detect_statement_sheets(path, rules).values())
+    candidates = tuple(detect_statement_sheets(path, rules, reference_years).values())
     valid = tuple(item for item in candidates if isinstance(item, ExistingStatementResult))
     if len(valid) > 1:
         names = "、".join(item.sheet_name for item in valid)

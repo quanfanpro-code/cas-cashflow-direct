@@ -13,12 +13,47 @@ from cashflow_direct.ai_review import (
     resolve_automatic_decisions,
     select_ai_tasks,
     validate_ai_results,
+    validate_basis_text,
     write_ai_tasks_jsonl,
 )
+from cashflow_direct.classification import load_rule_pack
 from cashflow_direct.materiality import build_review_batches
-from cashflow_direct.models import ClassificationDecision, MaterialityAmounts
+from cashflow_direct.models import (
+    ClassificationDecision,
+    MaterialityAmounts,
+    UnresolvedDecision,
+)
 from cashflow_direct.pipeline import _review_text_pattern
 from tests.fixture_factory import ai_case, cashflow_component
+
+
+# 裁决改判后名称修复用的项目名映射（与正表项目一致的中文名）
+ITEM_NAMES = {
+    "CFO-03": "收到其他与经营活动有关的现金",
+    "CFI-05": "支付其他与投资活动有关的现金",
+    "CFF-01": "吸收投资收到的现金",
+}
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _routing_case(component_id, amount, *, score, label_kept=False,
+                  rule_id="LABEL-KEPT-INSUFFICIENT-EVIDENCE", anomaly=False, weak=False,
+                  summary="同类业务", original="购买商品、接受劳务支付的现金"):
+    """复核路由用例夹具：默认"保留原标签的冲突"场景，流出方向。"""
+    component = cashflow_component(
+        summary, amount, ("应付账款_甲",), original_item_text=original,
+        anomalies=("direction_anomaly",) if anomaly else (),
+        evidence_strength="weak" if weak else "strong",
+        component_id=component_id,
+    )
+    decision = ClassificationDecision(
+        component_id=component_id, system_item_id="CFO-04",
+        system_item_name="购买商品、接受劳务支付的现金", normal_direction="outflow",
+        matched_rule_id=rule_id, reason="测试", evidence_level="medium",
+        evidence_score=score, label_kept=label_kept, resolved=False,
+    )
+    return component, decision
 
 
 class AIAndMaterialityTests(unittest.TestCase):
@@ -67,10 +102,12 @@ class AIAndMaterialityTests(unittest.TestCase):
                 matched_rule_id,
                 "业务证据冲突",
                 "medium",
+                # 复核路由新口径：冲突 40–69 分档才适用明显微小临界值门槛
+                evidence_score=55,
             )
             for component, matched_rule_id in (
                 (below, "BUSINESS-RULE-CONFLICT"),
-                (at, "LABEL-BUSINESS-HIGH-CONFLICT"),
+                (at, "BUSINESS-RULE-CONFLICT"),
             )
         ]
 
@@ -135,7 +172,7 @@ class AIAndMaterialityTests(unittest.TestCase):
     def test_validation_closes_every_id_and_jsonl_is_bom_encoded(self) -> None:
         tasks = tuple(ai_case(str(index), 80_000_000, weak=True, anomaly=False).task for index in range(3))
         payloads = [
-            {"task_id": tasks[0].task_id, "component_id": "0", "item_id": "CFO-03", "reason": "摘要支持", "confidence": "high"},
+            {"task_id": tasks[0].task_id, "component_id": "0", "item_id": "CFO-03", "reason": "知识库第3行：往来款性质", "confidence": "high"},
             {"task_id": tasks[1].task_id, "component_id": "1", "item_id": ["CFO-03", "CFI-05"], "reason": "多选", "confidence": "low"},
         ]
         validation = validate_ai_results(tasks, payloads, {"CFO-03", "CFI-05"})
@@ -161,7 +198,7 @@ class AIAndMaterialityTests(unittest.TestCase):
         adjudications = build_adjudication_tasks([case.decision], [ai_result])
         self.assertEqual(1, len(adjudications))
         adjudicated = AIResult(adjudications[0].task_id, "conflict", "CFI-05", "投资证据明确", "high")
-        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudicated])
+        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudicated], ITEM_NAMES)
         self.assertTrue(resolved[0].resolved)
         self.assertEqual("CFI-05", resolved[0].system_item_id)
 
@@ -176,7 +213,7 @@ class AIAndMaterialityTests(unittest.TestCase):
             "high",
         )
 
-        resolved = resolve_automatic_decisions([pending], [ai_result], [])
+        resolved = resolve_automatic_decisions([pending], [ai_result], [], ITEM_NAMES)
 
         self.assertTrue(resolved[0].resolved)
         self.assertEqual("ai_agreement", resolved[0].decision_source)
@@ -185,7 +222,7 @@ class AIAndMaterialityTests(unittest.TestCase):
         case = ai_case("guard-third", 80_000_000, weak=True, anomaly=True)
         ai_result = AIResult(case.task.task_id, "guard-third", "CFI-05", "首次判断为投资", "high")
         adjudication = AIResult("ADJ-THIRD", "guard-third", "CFF-01", "改判筹资", "high")
-        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudication])
+        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudication], ITEM_NAMES)
         self.assertFalse(resolved[0].resolved)
         self.assertEqual("CFO-03", resolved[0].system_item_id)
 
@@ -201,7 +238,7 @@ class AIAndMaterialityTests(unittest.TestCase):
         case = ai_case("guarded", 80_000_000, weak=False, anomaly=True)
         ai_result = AIResult(case.task.task_id, "guarded", "CFI-05", "可能属于投资", "low")
         adjudication = AIResult("ADJ-1", "guarded", "CFI-05", "仍然不确定", "low")
-        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudication])
+        resolved = resolve_automatic_decisions([case.decision], [ai_result], [adjudication], ITEM_NAMES)
         self.assertFalse(resolved[0].resolved)
         self.assertEqual("CFO-03", resolved[0].system_item_id)
 
@@ -263,7 +300,7 @@ class AIAndMaterialityTests(unittest.TestCase):
 
 
     def test_label_rule_conflict_joins_ai_regardless_of_performance(self) -> None:
-        # 标签与高证据规则冲突（≥明显微小临界值）→ 入选 AI，不受 performance 门槛限制
+        # 复核路由：保留原标签的冲突（40–69 分档），达明显微小临界值即送 AI，不受实际执行门槛限制
         from cashflow_direct.models import ClassificationDecision
         from tests.fixture_factory import cashflow_component
 
@@ -271,14 +308,15 @@ class AIAndMaterialityTests(unittest.TestCase):
                                        original_item_text="支付的各项税费", component_id="CFLX")
         decision = ClassificationDecision(
             component_id="CFLX", system_item_id="CFO-06", system_item_name="支付的各项税费",
-            normal_direction="outflow", matched_rule_id="LABEL-RULE-CONFLICT",
+            normal_direction="outflow", matched_rule_id="LABEL-KEPT-INSUFFICIENT-EVIDENCE",
             reason="冲突", evidence_level="medium", resolved=False,
+            evidence_score=55, label_kept=True,
         )
         tasks = select_ai_tasks([component], [decision], self.materiality)
         self.assertEqual(["CFLX"], [task.component_id for task in tasks])
 
     def test_label_rule_conflict_below_trivial_is_not_sent(self) -> None:
-        # 冲突金额低于明显微小临界值 → 不送 AI
+        # 复核路由：冲突 40–69 分档但金额低于明显微小临界值，且同类累计不足 → 不送 AI
         from cashflow_direct.models import ClassificationDecision
         from tests.fixture_factory import cashflow_component
 
@@ -286,11 +324,191 @@ class AIAndMaterialityTests(unittest.TestCase):
                                        original_item_text="支付的各项税费", component_id="CFLY")
         decision = ClassificationDecision(
             component_id="CFLY", system_item_id="CFO-06", system_item_name="支付的各项税费",
-            normal_direction="outflow", matched_rule_id="LABEL-RULE-CONFLICT",
+            normal_direction="outflow", matched_rule_id="LABEL-KEPT-INSUFFICIENT-EVIDENCE",
             reason="冲突", evidence_level="medium", resolved=False,
+            evidence_score=55, label_kept=True,
         )
         tasks = select_ai_tasks([component], [decision], self.materiality)
         self.assertEqual((), tasks)
+
+    def test_overall_materiality_items_skip_ai_review(self) -> None:
+        # 达到整体重要性的事项不送 AI，留给强制人工复核（Task 7）
+        component = cashflow_component("大额往来", 100_000_000, component_id="BIG")
+        decision = ClassificationDecision(
+            component.component_id, "CFO-03", "收到其他与经营活动有关的现金", "inflow",
+            "CFO-03-CURRENT", "暂定分类", "low", evidence_score=10, resolved=True,
+        )
+        tasks = select_ai_tasks([component], [decision], self.materiality)
+        self.assertEqual([], list(tasks))
+
+    def test_score_below_70_with_performance_amount_goes_to_ai(self) -> None:
+        # 打分不足 70 且金额达实际执行重要性 → 送 AI；打满 70 → 不送（Task 7）
+        materiality = MaterialityAmounts(10_000_000, 5_000_000, 500_000)
+        below = cashflow_component("往来款", 5_000_000, component_id="SCORE-69")
+        above = cashflow_component("往来款", 5_000_000, component_id="SCORE-70")
+        decisions = [
+            ClassificationDecision(
+                component.component_id, "CFO-03", "收到其他与经营活动有关的现金", "inflow",
+                "CFO-03-CURRENT", "暂定分类", "medium", evidence_score=score,
+            )
+            for component, score in ((below, 69), (above, 70))
+        ]
+        tasks = select_ai_tasks([below, above], decisions, materiality)
+        self.assertEqual(["SCORE-69"], [task.component_id for task in tasks])
+
+    def test_overall_materiality_forces_mandatory_review_batch(self) -> None:
+        # 达整体重要性的事项生成强制人工复核批次，无备选也不报错（Task 8）
+        from cashflow_direct.materiality import build_review_batches
+        from cashflow_direct.models import UnresolvedDecision
+
+        item = UnresolvedDecision(
+            component_id="CMP-BIG", cash_delta_cent=-240333845, cash_direction="outflow",
+            original_item="支付的各项税费", system_item_id="CFO-06",
+            adjudication_status="达到财务报表整体重要性，强制人工复核",
+            counterpart_group="应交税费", summary_pattern="留抵退税缴回",
+            alternative_item_ids=(), reason="测试", mandatory=True,
+        )
+        batches = build_review_batches((item,), performance_cent=50000000)
+        self.assertEqual(1, len(batches))
+        self.assertTrue(batches[0].mandatory)
+        self.assertEqual((), batches[0].alternative_item_codes)
+
+    def test_basis_gate_accepts_traceable_basis(self) -> None:
+        # 复核修复：四类可追查依据（准则条款/应用指南章节或引文/知识库位置/NOTE编号）均应通过
+        self.assertIsNone(validate_basis_text("依据企业会计准则第31号第十条第（一）项"))
+        self.assertIsNone(validate_basis_text("依据企业会计准则第31号第十项"))
+        self.assertIsNone(validate_basis_text("应用指南第三十二章'销售商品、提供劳务收到的现金'"))
+        self.assertIsNone(validate_basis_text("知识库第433行：代扣代缴的个人所得税款"))
+        self.assertIsNone(validate_basis_text("依据公司特殊规则：NOTE-01"))
+
+    def test_basis_gate_rejects_vague_basis(self) -> None:
+        # 复核修复：空泛理由一律拒收
+        for text in ("根据准则", "综合判断", "摘要支持", "根据业务实质", ""):
+            with self.subTest(text=text):
+                self.assertIsNotNone(validate_basis_text(text))
+
+    def test_vague_reason_result_is_rejected_by_validation(self) -> None:
+        # 复核修复：AI 结果理由过不了依据门禁 → 判为无效，不进入后续环节
+        tasks = tuple(
+            ai_case(str(index), 80_000_000, weak=True, anomaly=False).task for index in range(2)
+        )
+        payloads = [
+            {"task_id": tasks[0].task_id, "component_id": "0", "item_id": "CFO-03",
+             "reason": "根据准则", "confidence": "high"},
+            {"task_id": tasks[1].task_id, "component_id": "1", "item_id": "CFO-03",
+             "reason": "知识库第12行：往来款", "confidence": "high"},
+        ]
+        validation = validate_ai_results(tasks, payloads, {"CFO-03"})
+        self.assertEqual([tasks[1].task_id], [item.task_id for item in validation.valid_results])
+        self.assertEqual((tasks[0].task_id,), validation.invalid_ids)
+
+    def test_adjudication_override_clears_evidence_and_uses_real_item_name(self) -> None:
+        # 复核修复：AI 裁决改判后旧规则证据清零，项目名称用真实项目名而非编号
+        case = ai_case("override", 80_000_000, weak=False, anomaly=True)
+        ai_result = AIResult(case.task.task_id, "override", "CFI-05", "知识库第5行：投资流出", "medium")
+        adjudicated = AIResult("ADJ-OV", "override", "CFI-05", "知识库第5行：投资流出", "high")
+        resolved = resolve_automatic_decisions(
+            [case.decision], [ai_result], [adjudicated], ITEM_NAMES
+        )
+        self.assertTrue(resolved[0].resolved)
+        self.assertEqual("CFI-05", resolved[0].system_item_id)
+        self.assertEqual("支付其他与投资活动有关的现金", resolved[0].system_item_name)
+        self.assertEqual(0, resolved[0].evidence_score)
+        self.assertEqual((), resolved[0].evidence_sources)
+
+    def test_business_rule_conflict_any_score_trivial_goes_ai(self) -> None:
+        # 复核修复：业务规则冲突不分评分档位，达明显微小临界值即送 AI（如 70 对 70 混合缴款）
+        case = _routing_case("CONF-70", -100_000, score=70,
+                             rule_id="BUSINESS-RULE-CONFLICT")
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks((case[0],), (case[1],), materiality)
+        self.assertEqual(["CONF-70"], [task.component_id for task in tasks])
+
+    def test_label_conflict_40_to_69_trivial_goes_ai(self) -> None:
+        # 复核修复：标签留名冲突的复核路由——40-69 分档达明显微小临界值即送 AI
+        at = _routing_case("AT", -100_000, score=55, label_kept=True)
+        below = _routing_case("BELOW", -99_999, score=55, label_kept=True)
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks(
+            (at[0], below[0]), (at[1], below[1]), materiality)
+        self.assertEqual(["AT"], [task.component_id for task in tasks])
+
+    def test_label_conflict_below_40_needs_performance(self) -> None:
+        # 复核修复：标签留名冲突不足 40 分，走更严的实际执行重要性门槛
+        at = _routing_case("AT", -1_000_000, score=30, label_kept=True)
+        below = _routing_case("BELOW", -999_999, score=30, label_kept=True)
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks(
+            (at[0], below[0]), (at[1], below[1]), materiality)
+        self.assertEqual(["AT"], [task.component_id for task in tasks])
+
+    def test_pooled_same_type_cumulative_goes_ai(self) -> None:
+        # 复核修复：同类小额低分凑够实际执行门槛整组送 AI，上下文附累计口径说明
+        cases = tuple(
+            _routing_case(f"POOL-{index}", -400_000, score=30, label_kept=True)
+            for index in range(3)
+        )
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks(
+            tuple(item[0] for item in cases),
+            tuple(item[1] for item in cases), materiality)
+        self.assertEqual(
+            ["POOL-0", "POOL-1", "POOL-2"],
+            sorted(task.component_id for task in tasks))
+        for task in tasks:
+            self.assertIn("同类 3 笔", task.context)
+            self.assertIn("累计金额 12,000.00 元", task.context)
+
+    def test_below_trivial_and_pool_short_stays_trace_only(self) -> None:
+        # 复核修复：低分且低于明显微小临界值、同类累计也凑不够的，留台账留痕不送 AI
+        case = _routing_case("SMALL", -50_000, score=30, label_kept=True)
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks((case[0],), (case[1],), materiality)
+        self.assertEqual((), tasks)
+
+    def test_plain_weak_needs_performance(self) -> None:
+        # 复核修复：普通低证据（非冲突、非异常）达实际执行重要性才送 AI
+        at = _routing_case("AT", -1_000_000, score=10, weak=True,
+                           rule_id="CFO-04-PURCHASE")
+        below = _routing_case("BELOW", -999_999, score=10, weak=True,
+                              rule_id="CFO-04-PURCHASE")
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks(
+            (at[0], below[0]), (at[1], below[1]), materiality)
+        self.assertEqual(["AT"], [task.component_id for task in tasks])
+
+    def test_overall_materiality_never_goes_ai(self) -> None:
+        # 复核修复：达到财务报表整体重要性的，一律强制人工复核，冲突加异常叠加也不送 AI
+        case = _routing_case("BIG", -10_000_000, score=55, label_kept=True,
+                             anomaly=True)
+        materiality = MaterialityAmounts(10_000_000, 1_000_000, 100_000)
+        tasks = select_ai_tasks((case[0],), (case[1],), materiality)
+        self.assertEqual((), tasks)
+
+    def test_mandatory_batch_offers_all_leaf_items(self) -> None:
+        # 复核修复：强制人工复核批次的可改选范围 = 除原判外的全部叶子标准项目
+        rules = load_rule_pack(ROOT)
+        leaf_ids = tuple(
+            item.item_id for item in rules.statement_items if item.is_leaf)
+        item = UnresolvedDecision(
+            component_id="CMP-BIG",
+            cash_delta_cent=-240333845,
+            cash_direction="outflow",
+            original_item="支付的各项税费",
+            system_item_id="CFO-06",
+            adjudication_status="达到财务报表整体重要性，强制人工复核",
+            counterpart_group="应交税费",
+            summary_pattern="留抵退税缴回",
+            alternative_item_ids=(),
+            reason="留抵退税缴回计入支付税费",
+            mandatory=True,
+        )
+        batches = build_review_batches(
+            (item,), 1_000_000, all_leaf_item_ids=leaf_ids)
+        self.assertEqual(1, len(batches))
+        self.assertEqual(len(leaf_ids) - 1, len(batches[0].alternative_item_codes))
+        self.assertNotIn("CFO-06", batches[0].alternative_item_codes)
+
 
 if __name__ == "__main__":
     unittest.main()

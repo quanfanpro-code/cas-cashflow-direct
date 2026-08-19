@@ -355,6 +355,7 @@ def ai_case(
         matched_rule_id="CFO-03-FALLBACK" if weak else "CFO-03-CURRENT",
         reason="匿名规则证据",
         evidence_level="low" if weak else "high",
+        evidence_score=0 if weak else 100,
     )
     task = build_ai_task(component, decision)
     unresolved = UnresolvedDecision(
@@ -678,3 +679,14 @@ def write_detail_plus_statement_fixture(path: Path) -> None:
         statement.cell(row, 4, prior)
         row += 1
     workbook.save(path)
+
+
+def mark_dictionary_complete(run_dir) -> None:
+    """测试辅助：直接把运行状态标记为科目语义已齐备（无未知明细的场景）。"""
+    import json
+    from pathlib import Path
+
+    state_path = Path(run_dir) / "计算留痕数据" / "运行状态.json"
+    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    state["account_dictionary_completed"] = True
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")

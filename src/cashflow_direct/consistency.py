@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from cashflow_direct.ai_review import validate_basis_text
 from cashflow_direct.classification import RulePack
 from cashflow_direct.models import (
     CashflowComponent,
@@ -153,6 +154,7 @@ def find_consistency_groups(
 def build_consistency_tasks(
     groups: Sequence[ConsistencyGroup],
 ) -> tuple[ConsistencyTask, ...]:
+    # 重构后：逻辑矛盾一律拦截复核，不再因金额低于明显微小错报临界值而静默放过（Task 6）
     return tuple(
         ConsistencyTask(
             task_id=stable_id("CAI", group.group_id, *group.component_ids),
@@ -165,7 +167,6 @@ def build_consistency_tasks(
             context=group.context,
         )
         for group in groups
-        if group.tier != "trace_only"
     )
 
 
@@ -235,6 +236,7 @@ def validate_consistency_results(
             )
             and isinstance(reason, str)
             and bool(reason.strip())
+            and validate_basis_text(reason) is None
             and confidence in {"high", "medium", "low"}
         )
         if not is_valid:
@@ -357,6 +359,9 @@ def _apply_result(
                 evidence_level=result.confidence,
                 decision_source=source,
                 resolved=True,
+                # 复核修复：改判后旧规则证据清零，不随一致性结论继承
+                evidence_score=0,
+                evidence_sources=(),
             )
         )
     return tuple(updated)
@@ -381,18 +386,16 @@ def resolve_consistency_groups(
         source = ""
         status = ""
         reason = ""
-        if group.tier == "trace_only":
-            status = "低于明显微小错报临界值"
-            reason = "保留逐条判断，仅记录同一业务组项目不一致"
-        elif group.tier == "first_review":
+        if group.tier in {"trace_only", "first_review"}:
             if first is not None and first.confidence in {"medium", "high"}:
                 selected = first
                 source = "consistency_review"
                 status = "一致性复核已收口"
                 reason = first.reason
             else:
+                # 重构后：小额矛盾也一律拦截，复核证据不足时保留分歧并列入待复核（Task 6）
                 status = "低于实际执行重要性且复核证据不足"
-                reason = "保留逐条判断，不升级人工"
+                reason = "复核证据不足，保留分歧并列入待复核"
         elif group.tier == "adjudication_required":
             if second is not None and second.confidence == "high":
                 selected = second
@@ -420,7 +423,8 @@ def resolve_consistency_groups(
 
         if selected is not None:
             current = _apply_result(current, group, selected, rules, source)
-        elif group.tier in {"adjudication_required", "double_high_required"}:
+        else:
+            # 重构后：任何层级未收口的分歧组都列入待复核，不再对小额组静默放过（Task 6）
             unresolved.append(
                 UnresolvedConsistencyGroup(
                     group_id=group.group_id,

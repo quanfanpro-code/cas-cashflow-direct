@@ -1,0 +1,15 @@
+﻿{
+  "schema_version": "1.0",
+  "说明": "对方科目明细层通用语义词典。item_id 为空串表示已识别但不指向特定现流项目；layer 固定为 common。",
+  "entries": [
+    {"account": "应付设备款", "semantic": "购建固定资产对价", "item_id": "CFI-06", "basis": "准则31号：购建固定资产支付的现金归投资活动", "confidence": "high", "layer": "common"},
+    {"account": "应付工程款", "semantic": "工程建设对价", "item_id": "CFI-06", "basis": "准则31号：购建固定资产支付的现金归投资活动", "confidence": "high", "layer": "common"},
+    {"account": "设备款", "semantic": "购建固定资产对价", "item_id": "CFI-06", "basis": "同上", "confidence": "medium", "layer": "common"},
+    {"account": "工程款", "semantic": "工程建设对价", "item_id": "CFI-06", "basis": "同上", "confidence": "medium", "layer": "common"},
+    {"account": "限制性股票回购义务", "semantic": "股份回购筹资义务", "item_id": "CFF-06", "basis": "回购义务相关现金支付属筹资活动", "confidence": "high", "layer": "common"},
+    {"account": "回购义务", "semantic": "股份回购筹资义务", "item_id": "CFF-06", "basis": "同上", "confidence": "medium", "layer": "common"},
+    {"account": "进项税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "知识库：进项税额是交易对价的一部分，不单独成税费", "confidence": "high", "layer": "common"},
+    {"account": "销项税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "知识库：销项税额是销售收入的一部分", "confidence": "high", "layer": "common"},
+    {"account": "应交增值税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "同上", "confidence": "high", "layer": "common"}
+  ]
+}

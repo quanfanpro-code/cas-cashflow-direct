@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 from dataclasses import replace
@@ -164,8 +164,9 @@ class ConsistencyGroupingTests(unittest.TestCase):
         self.assertIn("2026/6/15", tasks[0].context)
         self.assertIn("凭证号：70", tasks[0].context)
         self.assertIn("收到其他与经营活动有关的现金", tasks[0].context)
+        # 重构后：矛盾必拦截，trace_only 层级也生成任务（不再按金额闸门放行）
         self.assertEqual(
-            (), build_consistency_tasks((replace(groups[0], tier="trace_only"),))
+            1, len(build_consistency_tasks((replace(groups[0], tier="trace_only"),)))
         )
 
 
@@ -186,7 +187,7 @@ class ConsistencyValidationTests(unittest.TestCase):
             "task_id": self.task.task_id,
             "group_id": self.task.group_id,
             "assignments": {"C1": "CFI-06", "C2": "CFI-06"},
-            "reason": "整组业务实质一致",
+            "reason": "知识库第1行：同一凭证同一业务",
             "confidence": "high",
         }
         payload.update(changes)
@@ -239,7 +240,7 @@ class ConsistencyValidationTests(unittest.TestCase):
             "task_id": second_task.task_id,
             "group_id": second_task.group_id,
             "assignments": {"C3": "CFI-06", "C4": "CFI-06"},
-            "reason": "第二组完成",
+            "reason": "知识库第2行：同一凭证同一业务",
             "confidence": "high",
         }
         first_validation = merge_consistency_results(
@@ -285,7 +286,7 @@ class ConsistencyResolutionTests(unittest.TestCase):
             confidence=confidence,
         )
 
-    def test_first_review_applies_medium_result_but_low_result_only_leaves_trace(self) -> None:
+    def test_first_review_applies_medium_result_and_low_result_goes_to_unresolved(self) -> None:
         group, decisions = self.case(1_000_000)
         task = build_consistency_tasks((group,))[0]
         medium = self.result(task.task_id, group.group_id, "CFI-06", "medium")
@@ -300,11 +301,9 @@ class ConsistencyResolutionTests(unittest.TestCase):
 
         self.assertEqual({"CFI-06"}, {item.system_item_id for item in applied.decisions})
         self.assertEqual("consistency_review", applied.decisions[0].decision_source)
-        self.assertEqual(
-            {"CFO-03", "CFO-04"},
-            {item.system_item_id for item in retained.decisions},
-        )
-        self.assertEqual((), retained.unresolved)
+        self.assertEqual("consistency_review", applied.decisions[1].decision_source)
+        # 重构后：低置信复核证据不足的分歧组也列入待复核，不再"仅留痕放过"
+        self.assertEqual(1, len(retained.unresolved))
 
     def test_performance_level_requires_high_adjudication_or_goes_to_human(self) -> None:
         group, decisions = self.case(6_000_000)
@@ -371,6 +370,48 @@ class ConsistencyResolutionTests(unittest.TestCase):
             {item.system_item_id for item in outcome.decisions},
         )
         self.assertEqual(1, len(outcome.unresolved))
+
+    def test_consistency_override_clears_rule_evidence(self) -> None:
+        # 复核修复：一致性复核改判后，旧规则证据必须清零（证据属于旧结论，不随改判继承）
+        group, decisions = self.case(1_000_000)
+        decisions = tuple(
+            replace(item, evidence_score=70, evidence_sources=("summary", "account_detail"))
+            for item in decisions
+        )
+        task = build_consistency_tasks((group,))[0]
+        result = self.result(task.task_id, group.group_id, "CFI-06", "medium")
+
+        applied = resolve_consistency_groups((group,), decisions, (result,), (), self.rules)
+
+        self.assertEqual({"CFI-06"}, {item.system_item_id for item in applied.decisions})
+        for item in applied.decisions:
+            self.assertEqual(0, item.evidence_score)
+            self.assertEqual((), item.evidence_sources)
+
+
+def test_trivial_amount_conflict_still_intercepted():
+    """同凭证同摘要分到不同项目，即使合计金额低于明显微小临界值也必须生成复核任务（Task 6）。"""
+    materiality = MaterialityAmounts(
+        overall_cent=100000000, performance_cent=50000000, trivial_cent=5500000
+    )
+    components = (
+        CashflowComponent(component_id="CMP-1", voucher_key="K80", summary="支付3月分红个税",
+                          cash_delta_cent=-204240, counterpart_accounts=("应交税费_应交个人所得税",),
+                          source_file_ids=("F1",)),
+        CashflowComponent(component_id="CMP-2", voucher_key="K80", summary="支付3月分红个税",
+                          cash_delta_cent=-4517850, counterpart_accounts=("应付股利",),
+                          source_file_ids=("F1",)),
+    )
+    decisions = (
+        ClassificationDecision(component_id="CMP-1", system_item_id="CFO-03", system_item_name="收到其他与经营活动有关的现金",
+                               normal_direction="inflow", matched_rule_id="R", reason="测试", evidence_level="low"),
+        ClassificationDecision(component_id="CMP-2", system_item_id="CFO-06", system_item_name="支付的各项税费",
+                               normal_direction="outflow", matched_rule_id="R", reason="测试", evidence_level="low"),
+    )
+    groups = find_consistency_groups(components, decisions, materiality)
+    assert len(groups) == 1 and groups[0].tier == "trace_only"  # tier 仍按金额标注深度
+    tasks = build_consistency_tasks(groups)
+    assert len(tasks) == 1  # 不再被金额闸门放过
 
 
 if __name__ == "__main__":

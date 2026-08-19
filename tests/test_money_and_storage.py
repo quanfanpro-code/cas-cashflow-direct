@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sqlite3
 import tempfile
@@ -117,6 +117,26 @@ class MoneyAndStorageTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(EXPECTED_TABLES, actual)
+
+
+def test_decision_new_fields_default_and_roundtrip():
+    """ClassificationDecision 新增打分字段有默认值，且旧留痕 JSON 无新字段时也能还原（Task 2）。"""
+    from dataclasses import asdict
+
+    from cashflow_direct.models import ClassificationDecision
+    from cashflow_direct.pipeline import _decision_from_dict
+
+    decision = ClassificationDecision(
+        component_id="CMP-1", system_item_id="CFO-04", system_item_name="购买商品、接受劳务支付的现金",
+        normal_direction="outflow", matched_rule_id="R", reason="测试", evidence_level="low",
+    )
+    assert decision.evidence_score == 0 and decision.evidence_sources == () and decision.label_kept is False
+    payload = asdict(decision)
+    assert payload["evidence_score"] == 0
+    # 旧留痕 JSON 没有新字段时也能还原（向后兼容）
+    legacy = {key: value for key, value in payload.items() if key not in {"evidence_score", "evidence_sources", "label_kept"}}
+    restored = _decision_from_dict(legacy)
+    assert restored.evidence_score == 0 and restored.label_kept is False
 
 
 if __name__ == "__main__":

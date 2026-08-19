@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import unittest
+
+from cashflow_direct.account_dictionary import (
+    AccountDictionary,
+    AccountSemanticEntry,
+    score_dictionary_hits,
+)
+from cashflow_direct.classification import ClassificationRule
+from cashflow_direct.evidence import (
+    aggregate_evidence,
+    score_rule,
+    split_account_levels,
+)
+from cashflow_direct.models import CashflowComponent
+
+
+def make_rule(**overrides) -> ClassificationRule:
+    base = dict(
+        rule_id="R1",
+        item_id="CFO-05",
+        priority=20,
+        direction="outflow",
+        summary_terms=("工资",),
+        account_terms=("工资",),
+        exclude_terms=(),
+        account_exclude_terms=(),
+        evidence_level="high",
+        sole_account_terms=(),
+    )
+    base.update(overrides)
+    return ClassificationRule(**base)
+
+
+def make_component(
+    summary: str = "发放工资",
+    accounts: tuple[str, ...] = ("应付职工薪酬_工资",),
+    cent: int = -10000,
+) -> CashflowComponent:
+    return CashflowComponent(
+        component_id="C1",
+        voucher_key="V1",
+        summary=summary,
+        cash_delta_cent=cent,
+        counterpart_accounts=accounts,
+    )
+
+
+class SplitAccountLevelsTests(unittest.TestCase):
+    def test_supports_common_separators(self) -> None:
+        for name in (
+            "应交税费_应交增值税_进项税额",
+            "应交税费/应交增值税/进项税额",
+            "应交税费\\应交增值税\\进项税额",
+            "应交税费>应交增值税>进项税额",
+            "应交税费|应交增值税|进项税额",
+            "应交税费:应交增值税:进项税额",
+            "应交税费：应交增值税：进项税额",
+            "应交税费 - 应交增值税 - 进项税额",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    ("应交税费", "应交增值税", "进项税额"), split_account_levels(name)
+                )
+
+    def test_plain_hyphen_without_spaces_stays_intact(self) -> None:
+        self.assertEqual(("财务费用-利息收入",), split_account_levels("财务费用-利息收入"))
+
+
+class ScoreRuleTests(unittest.TestCase):
+    def test_summary_only_scores_40(self) -> None:
+        score = score_rule(make_rule(account_terms=()), make_component(accounts=()), "outflow")
+        self.assertIsNotNone(score)
+        self.assertEqual(40, score.summary_part)
+        self.assertEqual(0, score.account_part)
+
+    def test_detail_only_scores_30(self) -> None:
+        score = score_rule(make_rule(summary_terms=()), make_component(summary="转账"), "outflow")
+        self.assertIsNotNone(score)
+        self.assertEqual(30, score.account_part)
+        self.assertEqual(0, score.summary_part)
+
+    def test_level1_only_scores_15(self) -> None:
+        score = score_rule(
+            make_rule(summary_terms=(), account_terms=("职工薪酬",)),
+            make_component(summary="转账", accounts=("应付职工薪酬",)),
+            "outflow",
+        )
+        self.assertIsNotNone(score)
+        self.assertEqual(15, score.account_part)
+
+    def test_overlapping_summary_terms_score_once(self) -> None:
+        rule = make_rule(summary_terms=("工资", "职工工资", "职工"), account_terms=())
+        score = score_rule(rule, make_component(summary="发放职工工资", accounts=()), "outflow")
+        self.assertIsNotNone(score)
+        self.assertEqual(40, score.summary_part)
+
+    def test_same_account_level1_and_detail_counted_once(self) -> None:
+        rule = make_rule(summary_terms=(), account_terms=("应付职工薪酬", "工资"))
+        score = score_rule(rule, make_component(summary="转账"), "outflow")
+        self.assertIsNotNone(score)
+        self.assertEqual(30, score.account_part)
+
+    def test_require_account_rule_returns_none_without_account_hit(self) -> None:
+        rule = make_rule(require_account=True)
+        score = score_rule(rule, make_component(accounts=("其他应付款_杂项",)), "outflow")
+        self.assertIsNone(score)
+
+
+class AggregateEvidenceTests(unittest.TestCase):
+    def test_summary_plus_detail_equals_70(self) -> None:
+        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "outflow")])
+        self.assertIsNotNone(agg)
+        self.assertEqual(70, agg.total)
+        self.assertEqual({"summary", "account_detail"}, set(agg.sources))
+
+    def test_summary_plus_level1_equals_55(self) -> None:
+        agg = aggregate_evidence(
+            [
+                score_rule(
+                    make_rule(account_terms=("职工薪酬",)),
+                    make_component(accounts=("应付职工薪酬",)),
+                    "outflow",
+                )
+            ]
+        )
+        self.assertIsNotNone(agg)
+        self.assertEqual(55, agg.total)
+
+    def test_label_agreement_adds_nothing(self) -> None:
+        # 汇总不接受原标签参数：标签一致不加分
+        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "outflow")])
+        self.assertIsNotNone(agg)
+        self.assertEqual(70, agg.total)
+
+    def test_conflict_margin_70_vs_40_is_not_conflict(self) -> None:
+        weak40 = score_rule(
+            make_rule(rule_id="A", account_terms=()), make_component(), "outflow"
+        )
+        strong70 = score_rule(
+            make_rule(
+                rule_id="B",
+                item_id="CFI-06",
+                summary_terms=("工资",),
+                account_terms=("厂房",),
+            ),
+            make_component(accounts=("在建工程_厂房",)),
+            "outflow",
+        )
+        agg = aggregate_evidence([weak40, strong70])
+        self.assertIsNotNone(agg)
+        self.assertEqual("CFI-06", agg.item_id)
+        self.assertFalse(agg.conflict)
+
+    def test_conflict_margin_55_vs_40_is_conflict(self) -> None:
+        weak40 = score_rule(
+            make_rule(rule_id="A", account_terms=()), make_component(), "outflow"
+        )
+        close55 = score_rule(
+            make_rule(
+                rule_id="B",
+                item_id="CFI-06",
+                summary_terms=("工资",),
+                account_terms=("在建工程",),
+            ),
+            make_component(accounts=("在建工程",)),
+            "outflow",
+        )
+        agg = aggregate_evidence([weak40, close55])
+        self.assertIsNotNone(agg)
+        self.assertTrue(agg.conflict)
+        # 首选为 CFI-06（55 分），冲突清单列的是与之竞争的其他项目
+        self.assertEqual(("CFO-05",), agg.conflict_item_ids)
+
+    def test_direction_incompatible_cannot_override(self) -> None:
+        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "inflow")])
+        self.assertIsNotNone(agg)
+        self.assertEqual(35, agg.total)
+        self.assertFalse(agg.can_override_label)
+
+    def test_override_gate_needs_70_two_sources_no_conflict_compatible(self) -> None:
+        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "outflow")])
+        self.assertIsNotNone(agg)
+        self.assertTrue(agg.can_override_label)
+        only_summary = aggregate_evidence(
+            [score_rule(make_rule(account_terms=()), make_component(accounts=()), "outflow")]
+        )
+        self.assertIsNotNone(only_summary)
+        self.assertEqual(40, only_summary.total)
+        self.assertFalse(only_summary.can_override_label)
+
+
+class DictionaryScoreTests(unittest.TestCase):
+    def _dictionary(self, layer: str, confidence: str) -> AccountDictionary:
+        return AccountDictionary(
+            (
+                AccountSemanticEntry(
+                    account="工资",
+                    semantic="职工薪酬",
+                    item_id="CFO-05",
+                    basis="应用指南第三十二章'支付给职工以及为职工支付的现金'",
+                    confidence=confidence,
+                    layer=layer,
+                    note_id="NOTE-01" if layer == "custom" else "",
+                ),
+            )
+        )
+
+    def test_custom_high_scores_40_and_carries_note_id(self) -> None:
+        scores = score_dictionary_hits(
+            make_component(summary="转账"), self._dictionary("custom", "high")
+        )
+        self.assertEqual(1, len(scores))
+        self.assertEqual(40, scores[0].account_part)
+        self.assertEqual("NOTE-01", scores[0].note_id)
+
+    def test_custom_medium_scores_30(self) -> None:
+        scores = score_dictionary_hits(
+            make_component(summary="转账"), self._dictionary("custom", "medium")
+        )
+        self.assertEqual(30, scores[0].account_part)
+
+    def test_common_high_scores_30(self) -> None:
+        scores = score_dictionary_hits(
+            make_component(summary="转账"), self._dictionary("common", "high")
+        )
+        self.assertEqual(30, scores[0].account_part)
+        self.assertEqual("", scores[0].note_id)
+
+
+if __name__ == "__main__":
+    unittest.main()

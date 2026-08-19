@@ -257,6 +257,58 @@ class WorkbookOutputTests(unittest.TestCase):
         self.assertEqual(10_000, adjustments["CFO-04"])
         self.assertEqual(10_000, adjustments["CFO-03"])
 
+    def test_mandatory_batch_uses_hidden_item_list_and_range_dropdown(self) -> None:
+        # 复核修复：强制人工复核批次可改选任一标准项目——下拉改隐藏 R 列区域引用；状态公式改 COUNTIF
+        from cashflow_direct.classification import load_rule_pack
+        rules = load_rule_pack(Path(__file__).resolve().parents[1])
+        leaf_ids = tuple(item.item_id for item in rules.statement_items if item.is_leaf)
+        batch = ReviewBatch(
+            "REV-BIG",
+            ("C-BIG",),
+            "CFO-06",
+            tuple(item_id for item_id in leaf_ids if item_id != "CFO-06"),
+            100_000,
+            "达到财务报表整体重要性，强制人工复核",
+            baseline_statement_amount_cent=100_000,
+            cash_delta_cent=-100_000,
+            mandatory=True,
+        )
+        model = replace(workbook_model(0, 0), review_batches=(batch,))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "强制复核.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                review = workbook["重要待复核事项"]
+                self.assertEqual("认可自动判断", review["R1"].value)
+                leaf_names = tuple(
+                    item.name for item in rules.statement_items if item.is_leaf)
+                written = {
+                    review.cell(row=row, column=18).value
+                    for row in range(2, 2 + len(leaf_names))
+                }
+                self.assertEqual(set(leaf_names), written)
+                self.assertTrue(review.column_dimensions["R"].hidden)
+                validation = review.data_validations.dataValidation[0].formula1
+                status_formula = review["J2"].value
+                self.assertIn("COUNTIF", status_formula)
+                # 区域末行必须与叶子项目数精确一致（行号算错也能过模糊断言）
+                self.assertIn(f"$R$1:$R${1 + len(leaf_names)}", validation)
+                self.assertIn(f"$R$2:$R${1 + len(leaf_names)}", status_formula)
+                # 审查修复：选回原判项目名视同认可自动判断，不产生调整（金额不会凭空消失）
+                self.assertIn("C2=B2", status_formula)
+                self.assertIn("C2<>B2", review["G2"].value)
+                # 设计第五节：强制批次行必须有区域下拉——自检正路通过、被篡改为内联列表则报错
+                ok = validate_output_workbook(path, model)
+                self.assertTrue(ok.valid, ok.errors)
+                review.data_validations.dataValidation[0].formula1 = '"认可自动判断"'
+                workbook.save(path)
+            finally:
+                workbook.close()
+            check = validate_output_workbook(path, model)
+            self.assertFalse(check.valid)
+            self.assertTrue(any("区域" in error for error in check.errors))
+
     def test_zero_review_batches_show_clear_note_and_statement_still_builds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "无重大事项.xlsx"
@@ -356,8 +408,10 @@ class WorkbookOutputTests(unittest.TestCase):
                     "对方科目": "普通往来科目",
                     "自动判定现流项目": "支付其他与经营活动有关的现金",
                     "判断理由": "命中规则",
-                    "证据强度": "high",
+                    "证据强度": "高",
+                    "证据得分": 55,
                     "异常": "",
+                    "决策来源": "系统规则",
                     "方向依据": "借贷差额",
                     "来源文件": "匿名输入.xlsx",
                     "来源工作表": "匿名数据",
@@ -382,9 +436,9 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertEqual(
                     [
                         "记录类型", "摘要", "现金变化", "原现流项目", "对方科目", "自动判定现流项目",
-                        "判断理由", "证据强度", "异常", "方向依据", "来源文件", "来源工作表",
-                        "来源单元格", "一致性复核状态", "一致性复核理由", "一致性重要性层级",
-                        "决策来源(技术)", "命中规则(技术)", "业务组成编号(技术)",
+                        "判断理由", "证据强度", "证据得分", "异常", "决策来源", "方向依据",
+                        "来源文件", "来源工作表", "来源单元格", "一致性复核状态", "一致性复核理由",
+                        "一致性重要性层级", "决策来源(技术)", "命中规则(技术)", "业务组成编号(技术)",
                         "来源占用键(技术)", "业务组编号(技术)",
                     ],
                     headers,
@@ -394,9 +448,18 @@ class WorkbookOutputTests(unittest.TestCase):
                     workbook["全量分类留痕"]["F2"].value,
                 )
                 trace = workbook["全量分类留痕"]
-                self.assertFalse(trace.column_dimensions["N"].hidden)
-                self.assertFalse(trace.column_dimensions["Q"].hidden)
+                # 重构后（A4）：新增可见列"证据得分/决策来源"；(技术)列由 4 增到 5 全部隐藏
+                for visible_header in ("证据得分", "决策来源", "一致性复核状态"):
+                    column_index = headers.index(visible_header) + 1
+                    self.assertFalse(
+                        any(
+                            dimension.hidden
+                            and dimension.min <= column_index <= dimension.max
+                            for dimension in trace.column_dimensions.values()
+                        )
+                    )
                 for header in (
+                    "决策来源(技术)",
                     "命中规则(技术)",
                     "业务组成编号(技术)",
                     "来源占用键(技术)",
@@ -471,6 +534,42 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertEqual([], hits)
             finally:
                 workbook.close()
+
+
+def test_trace_output_is_chinese(tmp_path):
+    """A4 输出中文化：全量分类留痕可见单元格不含英文技术值，证据得分为数值（Task 14）。"""
+    from dataclasses import replace
+
+    base = workbook_model(0, 0)
+    model = replace(
+        base,
+        trace_rows=(
+            {
+                "摘要": "测试",
+                "证据强度": "中",
+                "证据得分": 45,
+                "异常": "内部划转",
+                "决策来源": "系统规则",
+                "命中规则(技术)": "CFO-XX",
+            },
+        ),
+    )
+    path = Path(tmp_path) / "out.xlsx"
+    build_output_workbook(model, path)
+    wb = load_workbook(path, data_only=False)
+    sheet = wb["全量分类留痕"]
+    hidden = {dim.min for dim in sheet.column_dimensions.values() if dim.hidden}
+    english = ("high", "medium", "low", "internal_transfer", "system")
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.column in hidden or cell.value is None:
+                continue
+            text = str(cell.value)
+            assert not any(token in text for token in english), f"可见列出现英文技术值：{text}"
+    headers = [cell.value for cell in sheet[1]]
+    score_column = headers.index("证据得分") + 1
+    assert sheet.cell(2, score_column).value == 45
+    wb.close()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from cashflow_direct.account_dictionary import score_dictionary_hits
+from cashflow_direct.evidence import (
+    SOURCE_ACCOUNT_DETAIL,
+    SOURCE_ACCOUNT_LEVEL1,
+    SOURCE_SUMMARY,
+    aggregate_evidence,
+    score_rule,
+)
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
+
+# 来源中文名映射（用于 reason 展示，最终 xlsx 人类可读列一律中文）
+_SOURCE_CN = {
+    SOURCE_SUMMARY: "摘要",
+    SOURCE_ACCOUNT_DETAIL: "对方科目明细",
+    SOURCE_ACCOUNT_LEVEL1: "对方科目一级",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +47,8 @@ class ClassificationRule:
     account_exclude_terms: tuple[str, ...]
     evidence_level: str
     sole_account_terms: tuple[str, ...] = ()
+    # 为 True 时规则必须命中对方科目才参与打分（用于按服务对象分流的职工类规则）
+    require_account: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +94,7 @@ def load_rule_pack(root: Path) -> RulePack:
             account_exclude_terms=tuple(rule.get("account_exclude_terms", ())),
             evidence_level=rule["evidence_level"],
             sole_account_terms=tuple(rule.get("sole_account_terms", ())),
+            require_account=bool(rule.get("require_account", False)),
         )
         for rule in rule_payload["rules"]
     )
@@ -167,6 +185,7 @@ def standardize_flow_item(value: str, rules: RulePack) -> StatementItem | None:
 def classify_component(
     component: CashflowComponent,
     rules: RulePack,
+    dictionary: object | None = None,
 ) -> ClassificationDecision:
     if component.cash_delta_cent == 0 or any(
         marker in component.anomalies for marker in ("internal_transfer", "non_cash")
@@ -180,6 +199,7 @@ def classify_component(
             "内部划转、非现金或零金额事项不进入正表",
             "high",
             excluded=True,
+            evidence_score=100,
         )
 
     exact_item = standardize_flow_item(component.original_item_text, rules)
@@ -199,6 +219,7 @@ def classify_component(
                 matched_rule_id="ORIGINAL-LABEL-FALLBACK",
                 reason="摘要和对方科目不足以判断，暂按原现流项目保底分类，证据较弱",
                 evidence_level="low",
+                evidence_score=0,
             )
         fallback = matches[0]
         item = rules.item_by_id[fallback.item_id]
@@ -211,7 +232,8 @@ def classify_component(
             )
         else:
             reason = (
-                "业务信息及原标签均不足以判断，暂按现金方向归入其他经营活动项目；"
+                "业务信息及原标签均不足以判断，暂按现金方向归入其他经营活动项目"
+                "（此为内部保守处理口径，不是准则的直接结论）；"
                 f"现金为{'流入' if component.cash_delta_cent > 0 else '流出'}，证据较弱"
             )
         return ClassificationDecision(
@@ -222,66 +244,159 @@ def classify_component(
             matched_rule_id=fallback.rule_id,
             reason=reason,
             evidence_level=fallback.evidence_level,
+            evidence_score=0,
         )
 
-    chosen = business_matches[0]
-    item = rules.item_by_id[chosen.item_id]
-    reason = _business_reason(chosen, component, item)
-    high_item_ids = tuple(
-        dict.fromkeys(
-            rule.item_id
-            for rule in business_matches
-            if rule.evidence_level == "high"
-        )
-    )
-    if len(high_item_ids) > 1:
-        conflict_names = "、".join(
-            f"“{rules.item_by_id[item_id].name}”" for item_id in high_item_ids
-        )
+    # 业务规则命中：按证据打分决策（可并入科目语义词典的明细层得分）
+    rule_scores = [
+        score_rule(rule, component, rules.item_by_id[rule.item_id].normal_direction)
+        for rule in business_matches
+    ]
+    if dictionary is not None:
+        rule_scores.extend(score_dictionary_hits(component, dictionary))
+    agg = aggregate_evidence(rule_scores)
+    if agg is None:
+        # 没有任何规则实际命中打分（理论上不会发生，兜底走无命中保底）
+        if exact_item is not None:
+            return ClassificationDecision(
+                component_id=component.component_id,
+                system_item_id=exact_item.item_id,
+                system_item_name=exact_item.name,
+                normal_direction=exact_item.normal_direction,
+                matched_rule_id="ORIGINAL-LABEL-FALLBACK",
+                reason="摘要和对方科目不足以判断，暂按原现流项目保底分类，证据较弱",
+                evidence_level="low",
+                evidence_score=0,
+            )
         return ClassificationDecision(
             component_id=component.component_id,
-            system_item_id=item.item_id,
+            system_item_id=matches[0].item_id,
+            system_item_name=rules.item_by_id[matches[0].item_id].name,
+            normal_direction=rules.item_by_id[matches[0].item_id].normal_direction,
+            matched_rule_id=matches[0].rule_id,
+            reason="业务信息及原标签均不足以判断，暂按现金方向归入其他经营活动项目（此为内部保守处理口径，不是准则的直接结论）",
+            evidence_level="low",
+            evidence_score=0,
+        )
+
+    rule_by_id = {rule.rule_id: rule for rule in business_matches}
+    best_score = min(
+        (score for score in agg.rule_scores if score.item_id == agg.item_id),
+        key=lambda item: (-item.score, item.priority, item.rule_id),
+    )
+    item = rules.item_by_id[agg.item_id]
+    chosen_rule = rule_by_id.get(best_score.rule_id)
+    if chosen_rule is not None:
+        reason = _business_reason(chosen_rule, component, item)
+    else:
+        # 词典命中的专属规则没有 rule JSON 实体，命中词即对方科目明细段
+        account_text = "、".join(best_score.account_hits) if best_score.account_hits else ""
+        reason = (
+            f"对方科目包含“{account_text}”，符合“{item.name}”的科目语义词典定义"
+        )
+        if best_score.note_id:
+            # 复核修复：公司特殊规则命中必须留 NOTE 编号痕迹，保证理由可追查
+            reason += f"；依据公司特殊规则：{best_score.note_id}"
+    reason += f"；证据得分{agg.total}（{'/'.join(_SOURCE_CN[source] for source in agg.sources)}）"
+    evidence_level = agg.tier
+    excluded_conflict_rule_ids = tuple(
+        score.rule_id for score in agg.rule_scores if score.item_id != agg.item_id
+    )
+    matched_rule_id = best_score.rule_id
+
+    # 1) 冲突：多源指向不同项目，Resolution 送回复核
+    if agg.conflict:
+        conflict_names = "、".join(
+            f"“{rules.item_by_id[item_id].name}”" for item_id in agg.conflict_item_ids
+        )
+        reason += f"；其他证据同时指向{conflict_names}，存在冲突"
+        return ClassificationDecision(
+            component_id=component.component_id,
+            system_item_id=agg.item_id,
             system_item_name=item.name,
             normal_direction=item.normal_direction,
             matched_rule_id="BUSINESS-RULE-CONFLICT",
-            reason=f"{reason}；其他高证据同时指向{conflict_names}，业务证据存在冲突",
-            evidence_level="medium",
-            excluded_conflict_rule_ids=tuple(
-                rule.rule_id
-                for rule in business_matches
-                if rule.item_id != chosen.item_id and rule.evidence_level == "high"
-            ),
+            reason=reason,
+            evidence_level=evidence_level,
+            excluded_conflict_rule_ids=excluded_conflict_rule_ids,
+            resolved=False,
+            evidence_score=agg.total,
+            evidence_sources=agg.sources,
         )
 
-    matched_rule_id = chosen.rule_id
-    if exact_item is not None:
-        if exact_item.item_id == item.item_id:
-            reason += "；原标签一致，仅作补充"
-        else:
-            matched_rule_id = (
-                "LABEL-BUSINESS-HIGH-CONFLICT"
-                if chosen.evidence_level == "high"
-                else "LABEL-BUSINESS-MEDIUM-CONFLICT"
-            )
-            reason += f"；原标签为“{exact_item.name}”，仅作为冲突备选"
+    # 2) 无原标签且非冲突：用首选项目
+    if exact_item is None:
+        return ClassificationDecision(
+            component_id=component.component_id,
+            system_item_id=agg.item_id,
+            system_item_name=item.name,
+            normal_direction=item.normal_direction,
+            matched_rule_id=matched_rule_id,
+            reason=reason,
+            evidence_level=evidence_level,
+            excluded_conflict_rule_ids=excluded_conflict_rule_ids,
+            evidence_score=agg.total,
+            evidence_sources=agg.sources,
+        )
+
+    # 3) 原标签与首选一致
+    if exact_item.item_id == agg.item_id:
+        reason += "；原标签一致，仅作补充"
+        return ClassificationDecision(
+            component_id=component.component_id,
+            system_item_id=agg.item_id,
+            system_item_name=item.name,
+            normal_direction=item.normal_direction,
+            matched_rule_id=matched_rule_id,
+            reason=reason,
+            evidence_level=evidence_level,
+            excluded_conflict_rule_ids=excluded_conflict_rule_ids,
+            evidence_score=agg.total,
+            evidence_sources=agg.sources,
+        )
+
+    # 4) 原标签不一致：达双高门槛才改判，否则保留原标签送复核
+    if agg.can_override_label:
+        reason += (
+            f"；原标签为“{exact_item.name}”，证据充分"
+            f"（得分{agg.total}，{len(agg.sources)}个来源印证），予以改判"
+        )
+        return ClassificationDecision(
+            component_id=component.component_id,
+            system_item_id=agg.item_id,
+            system_item_name=item.name,
+            normal_direction=item.normal_direction,
+            matched_rule_id="LABEL-BUSINESS-OVERRIDE",
+            reason=reason,
+            evidence_level=evidence_level,
+            excluded_conflict_rule_ids=excluded_conflict_rule_ids,
+            evidence_score=agg.total,
+            evidence_sources=agg.sources,
+        )
+
+    reason += (
+        f"；原标签为“{exact_item.name}”，现有证据得分{agg.total}、"
+        f"来源{len(agg.sources)}个，不足以推翻原标签，保留原标签并送复核"
+    )
     return ClassificationDecision(
         component_id=component.component_id,
-        system_item_id=item.item_id,
-        system_item_name=item.name,
-        normal_direction=item.normal_direction,
-        matched_rule_id=matched_rule_id,
+        system_item_id=exact_item.item_id,
+        system_item_name=exact_item.name,
+        normal_direction=exact_item.normal_direction,
+        matched_rule_id="LABEL-KEPT-INSUFFICIENT-EVIDENCE",
         reason=reason,
-        evidence_level=chosen.evidence_level,
-        excluded_conflict_rule_ids=tuple(
-            rule.rule_id
-            for rule in business_matches[1:]
-            if rule.item_id != chosen.item_id
-        ),
+        evidence_level=evidence_level,
+        excluded_conflict_rule_ids=excluded_conflict_rule_ids,
+        resolved=False,
+        label_kept=True,
+        evidence_score=agg.total,
+        evidence_sources=agg.sources,
     )
 
 
 def classify_all(
     components: Sequence[CashflowComponent],
     rules: RulePack,
+    dictionary: object | None = None,
 ) -> tuple[ClassificationDecision, ...]:
-    return tuple(classify_component(component, rules) for component in components)
+    return tuple(classify_component(component, rules, dictionary) for component in components)

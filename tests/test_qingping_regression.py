@@ -15,6 +15,7 @@ from cashflow_direct.pipeline import (
     run_classification,
     run_preflight,
 )
+from tests.fixture_factory import mark_dictionary_complete
 
 
 def _write_qingping_style_fixture(path: Path) -> None:
@@ -57,8 +58,11 @@ class QingpingRegressionTests(unittest.TestCase):
                 statement_path=source,
             )
             confirm_cash_scope(preflight.run_dir, {})
+            # 本用例不涉及词典机制，直接标记齐备（门禁通行）
+            mark_dictionary_complete(preflight.run_dir)
             classified = run_classification(preflight.run_dir)
-            self.assertEqual(3, classified.ai_tasks_missing)
+            # 重构后口径：本夹具组成均达整体重要性，跳过逐笔 AI（大额强制人工复核兜底）
+            self.assertEqual(0, classified.ai_tasks_missing)
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
             self.assertEqual("相符", state["rough_reconciliation"]["status"])
