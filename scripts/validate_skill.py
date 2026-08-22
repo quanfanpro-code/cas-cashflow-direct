@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TEXT_SUFFIXES = {".py", ".md", ".json", ".jsonl", ".csv"}
 ALLOWED_IMPORTS = {
     "__future__", "argparse", "ast", "collections", "contextlib", "dataclasses", "datetime", "decimal",
-    "hashlib", "json", "math", "os", "pathlib", "posixpath", "re", "shutil", "sqlite3",
-    "sys", "tkinter", "types", "typing", "unittest", "xml", "zipfile",
+    "difflib", "enum", "hashlib", "json", "math", "os", "pathlib", "posixpath", "re", "shutil", "sqlite3",
+    "subprocess", "sys", "time", "tkinter", "types", "typing", "unittest", "xml", "zipfile",
     "cashflow_direct", "openpyxl", "pandas", "xlsxwriter",
 }
 FORBIDDEN_TEXT = (
@@ -37,6 +37,7 @@ def validate() -> tuple[str, ...]:
         ROOT / "references" / "一般企业正表项目.json",
         ROOT / "references" / "直接法分类规则.json",
         ROOT / "references" / "字段语义词典.json",
+        ROOT / "references" / "标准一级科目并集去重表.md",
     )
     for path in required:
         if not path.is_file():
@@ -64,6 +65,15 @@ def validate() -> tuple[str, ...]:
         errors.append("SKILL.md 前置元数据不完整")
     if ".xls" not in skill_text or "另存为" not in skill_text:
         errors.append("SKILL.md 未包含旧式 xls 拒绝规则")
+    baseline_path = ROOT / "references" / "标准一级科目并集去重表.md"
+    if baseline_path.is_file():
+        baseline_rows = sum(
+            1
+            for line in baseline_path.read_text(encoding="utf-8-sig").splitlines()
+            if line.startswith("|") and line.split("|", 2)[1].strip().isdigit()
+        )
+        if baseline_rows != 201:
+            errors.append(f"标准一级科目基线不是201条：{baseline_rows}")
 
     for path in (ROOT / "references").glob("*.json"):
         try:

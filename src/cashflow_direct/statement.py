@@ -102,7 +102,7 @@ def aggregate_statement(
     support: dict[str, list[str]] = {item.item_id: [] for item in rules.statement_items}
     component_by_id = {item.component_id: item for item in components}
     for decision in decisions:
-        if decision.excluded:
+        if decision.excluded or not decision.resolved:
             continue
         component = component_by_id[decision.component_id]
         item = item_by_id[decision.system_item_id]

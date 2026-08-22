@@ -2,9 +2,108 @@
 
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 
+from cashflow_direct.decision_policy import (
+    MaterialityLevel,
+    materiality_level,
+)
 from cashflow_direct.models import ReviewBatch, UnresolvedDecision
 from cashflow_direct.money import stable_id
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialityRecord:
+    record_id: str
+    amount_cent: int
+    cash_direction: str
+    candidate_item_id: str
+    standard_level1_account: str
+    business_object: str
+    purpose: str
+    grouping_reliable: bool = True
+    grouping_reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.cash_direction not in {"inflow", "outflow"}:
+            raise ValueError("现金方向只能是 inflow 或 outflow")
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialityAssessment:
+    record_id: str
+    single_amount_cent: int
+    same_class_total_cent: int
+    single_level: MaterialityLevel
+    cumulative_level: MaterialityLevel
+    effective_level: MaterialityLevel
+    group_key: tuple[str, ...]
+    group_id: str
+    grouping_status: str
+    grouping_reason: str
+
+
+def _same_class_key(record: MaterialityRecord) -> tuple[str, ...]:
+    if not record.candidate_item_id:
+        return (
+            record.cash_direction,
+            "待判断",
+            record.standard_level1_account,
+            record.business_object,
+        )
+    # 候选项目已经表达现金流业务类别。业务对象不能直接使用AI生成的整句
+    # 语义描述，否则“销售回款”和“销售商品形成的收款”等同义措辞会把
+    # 同一类业务拆散。优先使用稳定的明细用途；用途缺失时按更宽口径累计。
+    canonical_business_object = record.purpose or "未细分业务对象"
+    return (
+        record.cash_direction,
+        record.candidate_item_id,
+        record.standard_level1_account,
+        canonical_business_object,
+        record.purpose,
+    )
+
+
+def assess_materiality_records(
+    records: Sequence[MaterialityRecord],
+    thresholds,
+) -> tuple[MaterialityAssessment, ...]:
+    seen: set[str] = set()
+    totals: dict[tuple[str, ...], int] = defaultdict(int)
+    keys: dict[str, tuple[str, ...]] = {}
+    for record in records:
+        if record.record_id in seen:
+            raise ValueError(f"记录编号重复，不能重复累计：{record.record_id}")
+        seen.add(record.record_id)
+        key = _same_class_key(record)
+        keys[record.record_id] = key
+        totals[key] += abs(record.amount_cent)
+
+    results: list[MaterialityAssessment] = []
+    for record in records:
+        key = keys[record.record_id]
+        single_level = materiality_level(record.amount_cent, thresholds)
+        cumulative_level = materiality_level(totals[key], thresholds)
+        reliable = bool(record.candidate_item_id and record.grouping_reliable)
+        grouping_status = "reliable" if reliable else "potential"
+        results.append(MaterialityAssessment(
+            record_id=record.record_id,
+            single_amount_cent=abs(record.amount_cent),
+            same_class_total_cent=totals[key],
+            single_level=single_level,
+            cumulative_level=cumulative_level,
+            effective_level=single_level,
+            group_key=key,
+            group_id=stable_id("MATGRP", grouping_status, *key),
+            grouping_status=grouping_status,
+            grouping_reason=(
+                record.grouping_reason
+                or "候选、标准一级科目和明细用途均明确"
+                if reliable
+                else record.grouping_reason or "同类依据不足，仅作潜在累计风险提示"
+            ),
+        ))
+    return tuple(results)
 
 
 def build_review_batches(
@@ -12,13 +111,13 @@ def build_review_batches(
     performance_cent: int,
     all_leaf_item_ids: Sequence[str] = (),
 ) -> tuple[ReviewBatch, ...]:
-    """只把达到实际执行重要性的严格同质剩余风险送人工；大额强制事项单独成批。
+    """把统一动作表已经指定为人工处理的剩余事项逐项列出。
 
     all_leaf_item_ids：全部叶子标准项目编号；强制人工复核批次据此生成
     "可改选任一标准项目（除原判项目外）"的备选清单。
     """
     batches: list[ReviewBatch] = []
-    # 达到财务报表整体重要性的事项强制单独成批，备选为除原判外的全部叶子标准项目
+    # 达到财务报表整体重要性的事项强制单独成批，备选为除原判外的全部叶子标准项目。
     for item in unresolved:
         if not item.mandatory:
             continue
@@ -33,10 +132,8 @@ def build_review_batches(
                     if item_id != item.system_item_id
                 ),
                 worst_case_impact_cent=abs(item.cash_delta_cent),
-                reason="达到财务报表整体重要性，强制人工复核（无论自动判断是否收口）",
-                baseline_statement_amount_cent=(
-                    item.system_statement_amount_cent or abs(item.cash_delta_cent)
-                ),
+                reason="达到财务报表整体重要性，强制人工复核（无论自动判断是否已经确定）",
+                baseline_statement_amount_cent=item.system_statement_amount_cent,
                 cash_delta_cent=item.cash_delta_cent,
                 representative_summary=item.summary_pattern,
                 counterpart_group=item.counterpart_group,
@@ -45,56 +142,30 @@ def build_review_batches(
             )
         )
 
-    regular = [item for item in unresolved if not item.mandatory]
-    grouped: dict[tuple[object, ...], list[UnresolvedDecision]] = defaultdict(list)
-    for item in regular:
-        key = (
-            item.cash_direction,
-            item.original_item,
-            item.system_item_id,
-            item.adjudication_status,
-            item.counterpart_group,
-            item.summary_pattern,
-            tuple(sorted(item.alternative_item_ids)),
-        )
-        grouped[key].append(item)
-
-    for key, items in grouped.items():
-        worst_case = max(
-            sum(abs(item.cash_delta_cent) for item in items),
-            max((item.group_impact_cent for item in items), default=0),
-        )
-        if worst_case < performance_cent:
+    for item in unresolved:
+        if item.mandatory:
             continue
-        component_ids = tuple(item.component_id for item in items)
-        alternatives = tuple(sorted(items[0].alternative_item_ids))
+        alternatives = tuple(sorted(item.alternative_item_ids))
         if not alternatives:
             raise ValueError(
                 "重大待复核事项没有可供人工选择的备选现流项目："
-                + "、".join(component_ids)
+                + item.component_id
             )
         batches.append(
             ReviewBatch(
-                batch_id=stable_id("REV", *key, *component_ids),
-                component_ids=component_ids,
-                proposed_item_code=items[0].system_item_id,
+                batch_id=stable_id("REV", item.component_id),
+                component_ids=(item.component_id,),
+                proposed_item_code=item.system_item_id,
                 alternative_item_codes=alternatives,
-                worst_case_impact_cent=worst_case,
-                reason="自动判断仍未收口，且同质事项最不利重分类毛额达到实际执行的重要性",
-                baseline_statement_amount_cent=sum(
-                    item.system_statement_amount_cent or abs(item.cash_delta_cent)
-                    for item in items
+                worst_case_impact_cent=max(
+                    abs(item.cash_delta_cent), item.group_impact_cent
                 ),
-                cash_delta_cent=sum(item.cash_delta_cent for item in items),
-                representative_summary=items[0].summary_pattern,
-                counterpart_group=items[0].counterpart_group,
-                source_locations=tuple(
-                    dict.fromkeys(
-                        location
-                        for item in items
-                        for location in item.source_locations
-                    )
-                ),
+                reason="自动判断仍未取得唯一决定，按业务组成逐项人工决定",
+                baseline_statement_amount_cent=item.system_statement_amount_cent,
+                cash_delta_cent=item.cash_delta_cent,
+                representative_summary=item.summary_pattern,
+                counterpart_group=item.counterpart_group,
+                source_locations=item.source_locations,
             )
         )
     return tuple(batches)

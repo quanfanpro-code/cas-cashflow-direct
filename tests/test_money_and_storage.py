@@ -17,16 +17,23 @@ EXPECTED_TABLES = {
     "cash_scope",
     "cashflow_component",
     "classification_decision",
+    "decision_route",
     "duplicate_group",
+    "evidence_assessment",
     "field_mapping",
     "internal_transfer",
+    "invalidated_record",
+    "human_decision",
+    "materiality_assessment",
     "reconciliation",
     "review_batch",
     "run_event",
     "run_manifest",
+    "run_version",
     "sheet_structure",
     "source_entry",
     "source_file",
+    "source_allocation",
     "stage_status",
     "statement_comparison",
     "statement_value",
@@ -130,13 +137,13 @@ def test_decision_new_fields_default_and_roundtrip():
         component_id="CMP-1", system_item_id="CFO-04", system_item_name="购买商品、接受劳务支付的现金",
         normal_direction="outflow", matched_rule_id="R", reason="测试", evidence_level="low",
     )
-    assert decision.evidence_score == 0 and decision.evidence_sources == () and decision.label_kept is False
+    assert decision.evidence_score == 0 and decision.evidence_sources == ()
     payload = asdict(decision)
     assert payload["evidence_score"] == 0
     # 旧留痕 JSON 没有新字段时也能还原（向后兼容）
-    legacy = {key: value for key, value in payload.items() if key not in {"evidence_score", "evidence_sources", "label_kept"}}
+    legacy = {key: value for key, value in payload.items() if key not in {"evidence_score", "evidence_sources"}}
     restored = _decision_from_dict(legacy)
-    assert restored.evidence_score == 0 and restored.label_kept is False
+    assert restored.evidence_score == 0
 
 
 if __name__ == "__main__":

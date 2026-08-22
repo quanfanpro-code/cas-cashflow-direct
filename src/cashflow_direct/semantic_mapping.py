@@ -117,6 +117,20 @@ def _type_bonus(values: tuple[object, ...], expected: list[str]) -> int:
     return 2 if hits / len(values) >= 0.6 else 0
 
 
+def _account_path_bonus(path: tuple[str, ...], values: tuple[object, ...]) -> int:
+    """一级科目与完整路径并存时，只在样本确有层级结构时明确优先完整路径。"""
+    header_bonus = 1 if any(
+        item.replace(" ", "") in {"科目名称", "会计科目", "完整科目名称", "科目全称"}
+        for item in path
+    ) else 0
+    text_values = tuple(str(value).strip() for value in values if str(value).strip())
+    hierarchical = sum(
+        bool(re.search(r"[_/\\>|：:]", value)) for value in text_values
+    )
+    sample_bonus = 2 if text_values and hierarchical / len(text_values) >= 0.6 else 0
+    return header_bonus + sample_bonus
+
+
 def _score(role: str, path: tuple[str, ...], values: tuple[object, ...], spec: dict[str, list[str]]) -> int:
     joined = "".join(path).replace(" ", "")
     best = 0
@@ -126,7 +140,10 @@ def _score(role: str, path: tuple[str, ...], values: tuple[object, ...], spec: d
             best = max(best, 10)
         elif len(normalized) > 2 and normalized in joined:
             best = max(best, 7)
-    return best + _type_bonus(values, spec["value_types"])
+    score = best + _type_bonus(values, spec["value_types"])
+    if role == "account_name":
+        score += _account_path_bonus(path, values)
+    return score
 
 
 def _map_band(

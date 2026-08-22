@@ -38,6 +38,7 @@ class NormalizationResult:
     exclusions: tuple[RowExclusion, ...]
     errors: tuple[RowError, ...]
     rows_read: int
+    warnings: tuple[RowError, ...] = ()
 
 
 def _text(value: object) -> str:
@@ -124,6 +125,7 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
     entries: list[NormalizedEntry] = []
     exclusions: list[RowExclusion] = []
     errors: list[RowError] = []
+    warnings: list[RowError] = []
     rows_read = 0
     try:
         worksheet = workbook[mapping.sheet_name]
@@ -215,6 +217,35 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
             account = _text(_cell_value(tuple(row), mapping, "account_name"))
             account_code = _text(_cell_value(tuple(row), mapping, "account_code"))
             counterpart = _text(_cell_value(tuple(row), mapping, "counterpart_name"))
+            input_issues: list[str] = []
+            if not summary:
+                input_issues.append("summary_empty")
+                summary_column = mapping.role_to_column.get("summary")
+                warnings.append(
+                    RowError(
+                        _error_locator(
+                            file_id,
+                            worksheet.title,
+                            row_number,
+                            1 if summary_column is None else summary_column.column_index,
+                        ),
+                        "摘要为空：本行保留但按非法输入隔离，补充摘要或人工决定前不得完成最终表",
+                    )
+                )
+            if not account and not counterpart:
+                input_issues.append("account_path_empty")
+                account_column = mapping.role_to_column.get("account_name")
+                warnings.append(
+                    RowError(
+                        _error_locator(
+                            file_id,
+                            worksheet.title,
+                            row_number,
+                            1 if account_column is None else account_column.column_index,
+                        ),
+                        "对方科目路径为空：本行保留但不重建路径，补充路径或人工决定前不得完成最终表",
+                    )
+                )
             retained_side = _retained_side(account)
             original_item = _text(_cell_value(tuple(row), mapping, "flow_item"))
             label_side = retained_side if original_item else "unknown"
@@ -253,6 +284,7 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
                     source_debit_cent=source_money["debit"],
                     source_credit_cent=source_money["credit"],
                     source_flow_amount_cent=source_money["flow_amount"],
+                    input_issues=tuple(input_issues),
                 )
             )
     finally:
@@ -265,6 +297,7 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
         tuple(exclusions),
         tuple(errors),
         rows_read,
+        tuple(warnings),
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -355,7 +356,7 @@ def ai_case(
         matched_rule_id="CFO-03-FALLBACK" if weak else "CFO-03-CURRENT",
         reason="匿名规则证据",
         evidence_level="low" if weak else "high",
-        evidence_score=0 if weak else 100,
+        evidence_score=0 if weak else 90,
     )
     task = build_ai_task(component, decision)
     unresolved = UnresolvedDecision(
@@ -364,7 +365,7 @@ def ai_case(
         cash_direction="inflow" if amount_cent >= 0 else "outflow",
         original_item=component.original_item_text,
         system_item_id=decision.system_item_id,
-        adjudication_status="unresolved",
+        review_status="unresolved",
         counterpart_group="普通往来科目",
         summary_pattern=summary_pattern,
         alternative_item_ids=alternatives,
@@ -425,7 +426,17 @@ def classified_components():
         cashflow_component("收回长期股权投资", 300_000, component_id="S3"),
         cashflow_component("取得银行借款", 200_000, component_id="S4"),
     )
-    return SimpleNamespace(components=components, decisions=classify_all(components, rules), rules=rules)
+    candidate_decisions = classify_all(components, rules)
+    decisions = tuple(
+        replace(
+            decision,
+            resolved=True,
+            decision_source="manual",
+            decision_action="manual_decision",
+        )
+        for decision in candidate_decisions
+    )
+    return SimpleNamespace(components=components, decisions=decisions, rules=rules)
 
 
 def write_existing_statement_fixture(
@@ -568,16 +579,16 @@ def write_large_case(root: Path, row_count: int) -> tuple[Path, int]:
     for column, header in enumerate(headers):
         journal.write(0, column, header)
     patterns = (
-        (100, "匿名销售收款", "销售商品收到的现金", "主营业务收入"),
-        (-80, "匿名采购付款", "购买商品支付的现金", "原材料"),
-        (20, "匿名税费返还", "收到的税费返还", "其他应收税款"),
-        (-30, "匿名职工付款", "支付给职工的现金", "应付职工薪酬"),
+        (100, "匿名销售收款", "销售商品、提供劳务收到的现金", "主营业务收入"),
+        (-80, "匿名采购付款", "购买商品、接受劳务支付的现金", "原材料"),
+        (20, "匿名税费返还", "收到的税费返还", "应交税费"),
+        (-30, "匿名发放职工工资", "支付给职工以及为职工支付的现金", "应付职工薪酬"),
         (-10, "匿名缴纳税费", "支付的各项税费", "应交税费"),
         (50, "匿名收回投资", "收回投资收到的现金", "长期股权投资"),
-        (-40, "匿名购建设备", "购建固定资产支付的现金", "固定资产"),
-        (60, "匿名取得借款", "取得借款收到的现金", "短期借款"),
-        (-25, "匿名偿还借款", "偿还债务支付的现金", "长期借款"),
-        (15, "匿名供应商退回采购款", "购买商品支付的现金", "应付账款"),
+        (-40, "匿名购买机器设备付款", "购建固定资产、无形资产和其他长期资产支付的现金", "固定资产"),
+        (60, "匿名取得银行借款", "取得借款收到的现金", "短期借款"),
+        (-25, "匿名偿还银行借款本金", "偿还债务支付的现金", "长期借款"),
+        (15, "匿名销售商品收到货款", "销售商品、提供劳务收到的现金", "主营业务收入"),
         (0, "匿名账户内部划转", "", "1001 库存现金"),
     )
     expected_cash_delta = 0
@@ -619,13 +630,18 @@ def write_ai_end_to_end_case(root: Path) -> Path:
     path = root / "匿名弱证据明细.xlsx"
     workbook = Workbook()
     detail = workbook.active
-    detail.title = "匿名流量明细"
-    detail.append(["发生额方向", "金额", "摘要", "现流项目"])
-    detail.append(["借", 800000, "匿名往来款", "收到其他经营现金"])
+    detail.title = "匿名序时账"
+    detail.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "现流项目"])
+    detail.append(
+        ["2026-01-01", "记-1", "匿名往来款", "1002 银行存款", 80_000, None, "收到其他经营现金"]
+    )
+    detail.append(
+        ["2026-01-01", "记-1", "匿名往来款", "其他应付款_匿名对象", None, 80_000, "收到其他经营现金"]
+    )
     balance = workbook.create_sheet("现金余额资料")
     balance.append(["项目", "金额"])
     balance.append(["期初现金及现金等价物余额", 1000000])
-    balance.append(["期末现金及现金等价物余额", 1800000])
+    balance.append(["期末现金及现金等价物余额", 1080000])
     balance.append(["汇率变动对现金及现金等价物的影响", 0])
     workbook.save(path)
     return path
@@ -635,14 +651,35 @@ def write_ai_batch_case(root: Path, count: int = 26) -> Path:
     path = root / "多批匿名弱证据明细.xlsx"
     workbook = Workbook()
     detail = workbook.active
-    detail.title = "匿名流量明细"
-    detail.append(["发生额方向", "金额", "摘要", "现流项目"])
+    detail.title = "匿名序时账"
+    detail.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "现流项目"])
     for index in range(count):
-        detail.append(["借", 800000, f"匿名往来款{index + 1}", "收到其他经营现金"])
+        detail.append(
+            [
+                "2026-01-01",
+                f"记-{index + 1}",
+                f"匿名往来款{index + 1}",
+                "1002 银行存款",
+                80_000,
+                None,
+                "收到其他经营现金",
+            ]
+        )
+        detail.append(
+            [
+                "2026-01-01",
+                f"记-{index + 1}",
+                f"匿名往来款{index + 1}",
+                f"其他应付款_匿名对象{index + 1}",
+                None,
+                80_000,
+                "收到其他经营现金",
+            ]
+        )
     balance = workbook.create_sheet("现金余额资料")
     balance.append(["项目", "金额"])
     balance.append(["期初现金及现金等价物余额", 1000000])
-    balance.append(["期末现金及现金等价物余额", 1000000 + count * 800000])
+    balance.append(["期末现金及现金等价物余额", 1000000 + count * 80_000])
     balance.append(["汇率变动对现金及现金等价物的影响", 0])
     workbook.save(path)
     return path
@@ -682,11 +719,13 @@ def write_detail_plus_statement_fixture(path: Path) -> None:
 
 
 def mark_dictionary_complete(run_dir) -> None:
-    """测试辅助：直接把运行状态标记为科目语义已齐备（无未知明细的场景）。"""
+    """测试辅助：与语义门禁无关的旧测试直接标记两类语义已齐备。"""
     import json
     from pathlib import Path
 
     state_path = Path(run_dir) / "计算留痕数据" / "运行状态.json"
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))
     state["account_dictionary_completed"] = True
+    state["summary_dictionary_completed"] = True
+    state.setdefault("summary_dictionary", {"tasks": [], "valid_results": [], "missing_ids": []})
     state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from cashflow_direct.pipeline import confirm_cash_scope, finalize_run, run_classification, run_preflight
 from tests.fixture_factory import write_large_case
+from tests.fixture_factory import mark_dictionary_complete
 
 
 class LargeCaseTests(unittest.TestCase):
@@ -24,6 +25,7 @@ class LargeCaseTests(unittest.TestCase):
                 output_parent=root,
             )
             confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            mark_dictionary_complete(preflight.run_dir)
             classified = run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
             elapsed = time.perf_counter() - started

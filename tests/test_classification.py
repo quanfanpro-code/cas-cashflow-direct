@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from cashflow_direct.account_dictionary import AccountDictionary, AccountSemanticEntry
+from cashflow_direct.account_dictionary import (
+    AccountDictionary,
+    AccountSemanticEntry,
+    load_common_dictionary,
+)
 from cashflow_direct.classification import (
     _rule_matches,
     ClassificationRule,
@@ -101,7 +105,7 @@ class ClassificationTests(unittest.TestCase):
         }
         self.assertEqual(expected_leaf_ids, {item.item_id for item in rules.statement_items if item.is_leaf})
 
-    def test_each_exact_standard_leaf_label_can_be_used_as_a_low_evidence_fallback(self) -> None:
+    def test_each_exact_standard_leaf_label_is_only_for_comparison(self) -> None:
         rules = load_rule_pack(ROOT)
         for item in (item for item in rules.statement_items if item.is_leaf):
             amount = 100 if item.normal_direction == "inflow" else -100
@@ -113,9 +117,11 @@ class ClassificationTests(unittest.TestCase):
             )
             with self.subTest(item_id=item.item_id):
                 decision = classify_component(component, rules)
-                self.assertEqual(item.item_id, decision.system_item_id)
-                self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
-                self.assertEqual("low", decision.evidence_level)
+                self.assertEqual("", decision.system_item_id)
+                self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
+                self.assertEqual(0, decision.evidence_score)
+                self.assertEqual((), decision.candidate_item_ids)
+                self.assertFalse(decision.resolved)
 
     def test_exact_standard_label_does_not_ignore_meaningful_words(self) -> None:
         rules = load_rule_pack(ROOT)
@@ -132,7 +138,7 @@ class ClassificationTests(unittest.TestCase):
         )
         self.assertNotEqual("EXACT-STANDARD-LABEL", decision.matched_rule_id)
 
-    def test_standard_original_label_is_only_a_low_evidence_fallback(self) -> None:
+    def test_standard_original_label_does_not_create_business_evidence(self) -> None:
         decision = classify_component(
             cashflow_component(
                 "普通业务",
@@ -143,14 +149,12 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-06", decision.system_item_id)
-        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
-        self.assertEqual("low", decision.evidence_level)
-        self.assertIn("保底分类", decision.reason)
-        self.assertNotIn("完全一致", decision.reason)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
+        self.assertEqual(0, decision.evidence_score)
+        self.assertIn("原项目只用于比较", decision.reason)
 
-    def test_insufficient_evidence_keeps_original_label_for_penalty(self) -> None:
-        # 重构后口径：税收滞纳金证据打分50分<70，按新推翻门槛不再改判原标签，保留原标签送复核
+    def test_penalty_candidate_is_kept_separate_from_conflicting_original_label(self) -> None:
         decision = classify_component(
             cashflow_component(
                 "税收滞纳金",
@@ -161,13 +165,14 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-06", decision.system_item_id)
-        self.assertEqual("LABEL-KEPT-INSUFFICIENT-EVIDENCE", decision.matched_rule_id)
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("CFO-07-PENALTY", decision.matched_rule_id)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
         self.assertFalse(decision.resolved)
-        self.assertTrue(decision.label_kept)
+        self.assertEqual("conflicts", decision.original_item_state)
         self.assertIn("滞纳金", decision.reason)
-        self.assertIn("原标签", decision.reason)
+        self.assertIn("原项目", decision.reason)
 
     def test_business_reason_stays_primary_when_original_label_agrees(self) -> None:
         decision = classify_component(
@@ -182,25 +187,26 @@ class ClassificationTests(unittest.TestCase):
 
         self.assertEqual("CFO-01", decision.system_item_id)
         self.assertEqual("CFO-01-SALES", decision.matched_rule_id)
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual("high", decision.evidence_level)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertFalse(decision.resolved)
         self.assertIn("销售商品", decision.reason)
         self.assertIn("主营业务收入", decision.reason)
-        self.assertIn("原标签一致，仅作补充", decision.reason)
+        self.assertIn("原项目能够标准化并与候选一致", decision.reason)
         self.assertNotIn("CFO-01-SALES", decision.reason)
 
-    def test_unlabeled_business_gap_uses_a_readable_direction_fallback(self) -> None:
+    def test_unlabeled_business_gap_does_not_invent_a_direction_fallback(self) -> None:
         decision = classify_component(
             cashflow_component("普通业务", -100, ("普通科目",)),
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-07", decision.system_item_id)
-        self.assertEqual("CFO-07-FALLBACK", decision.matched_rule_id)
-        self.assertEqual("low", decision.evidence_level)
-        self.assertIn("现金为流出", decision.reason)
-        self.assertIn("证据较弱", decision.reason)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
+        self.assertEqual(0, decision.evidence_score)
+        self.assertIn("没有形成有效候选", decision.reason)
 
-    def test_different_high_business_rules_are_reported_as_a_conflict(self) -> None:
+    def test_one_complete_path_uses_one_best_supported_candidate(self) -> None:
         decision = classify_component(
             cashflow_component(
                 "购买机器设备并支付股权投资款",
@@ -211,12 +217,12 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-06", decision.system_item_id)
-        self.assertEqual("BUSINESS-RULE-CONFLICT", decision.matched_rule_id)
-        self.assertIn("购建固定资产、无形资产和其他长期资产支付的现金", decision.reason)
-        self.assertIn("投资支付的现金", decision.reason)
+        self.assertEqual("CFI-06-BUILD-ASSET", decision.matched_rule_id)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual(("CFI-06",), decision.candidate_item_ids)
+        self.assertFalse(decision.resolved)
 
-    def test_insufficient_evidence_keeps_investing_label(self) -> None:
-        # 重构后口径：中证据（50分）不足以推翻原投资标签，保留原标签并送复核
+    def test_guarantee_candidate_and_investing_original_are_recorded_as_conflicting(self) -> None:
         decision = classify_component(
             cashflow_component(
                 "支付保证金",
@@ -227,11 +233,12 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFI-09", decision.system_item_id)
-        self.assertEqual("LABEL-KEPT-INSUFFICIENT-EVIDENCE", decision.matched_rule_id)
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("CFO-07-CURRENT", decision.matched_rule_id)
+        self.assertEqual(50, decision.evidence_score)
         self.assertEqual("medium", decision.evidence_level)
         self.assertFalse(decision.resolved)
-        self.assertTrue(decision.label_kept)
+        self.assertEqual("conflicts", decision.original_item_state)
 
     def test_ordinary_current_account_defaults_to_other_operating_cash(self) -> None:
         rules = load_rule_pack(ROOT)
@@ -275,7 +282,7 @@ class ClassificationTests(unittest.TestCase):
                 decision = classify_component(cashflow_component(summary, amount), rules)
                 self.assertEqual(expected, decision.system_item_id)
                 self.assertTrue(decision.matched_rule_id)
-                self.assertTrue(decision.resolved)
+                self.assertFalse(decision.resolved)
 
     def test_refund_offsets_original_project_as_negative_statement_amount(self) -> None:
         rules = load_rule_pack(ROOT)
@@ -294,8 +301,8 @@ class ClassificationTests(unittest.TestCase):
             cashflow_component("收到债券投资利息", 12_000, ("投资收益",)), rules
         )
         self.assertEqual("CFO-03", bank_interest.system_item_id)
-        # 重构后口径：evidence_level 由证据打分映射（55分=中），不再取规则常量 high
-        self.assertEqual("medium", bank_interest.evidence_level)
+        self.assertEqual(70, bank_interest.evidence_score)
+        self.assertEqual("high", bank_interest.evidence_level)
         self.assertEqual("CFI-02", investment_interest.system_item_id)
 
     def test_customer_name_containing_investment_does_not_block_sales_receipt(self) -> None:
@@ -332,10 +339,11 @@ class ClassificationTests(unittest.TestCase):
         self.assertTrue(zero.excluded)
         self.assertTrue(internal.excluded)
         self.assertEqual("", zero.system_item_id)
+        self.assertIsNone(zero.evidence_score)
+        self.assertIsNone(internal.evidence_score)
 
 
-    def test_label_conflict_with_insufficient_evidence_keeps_original(self) -> None:
-        # 重构后口径：原标签与业务证据冲突但证据打分<70时，保留原标签送复核，业务项目仅作备选
+    def test_original_label_conflict_is_recorded_without_replacing_candidate(self) -> None:
         rules = load_rule_pack(ROOT)
         decision = classify_component(
             cashflow_component(
@@ -347,14 +355,14 @@ class ClassificationTests(unittest.TestCase):
             ),
             rules,
         )
-        self.assertEqual("CFO-06", decision.system_item_id)
-        self.assertEqual("LABEL-KEPT-INSUFFICIENT-EVIDENCE", decision.matched_rule_id)
+        self.assertEqual("CFO-07", decision.system_item_id)
+        self.assertEqual("CFO-07-PENALTY", decision.matched_rule_id)
         self.assertFalse(decision.resolved)
-        self.assertTrue(decision.label_kept)
-        self.assertIn("原标签", decision.reason)
+        self.assertEqual("conflicts", decision.original_item_state)
+        self.assertIn("原项目", decision.reason)
 
     def test_label_consistent_with_high_evidence_rule_keeps_exact(self) -> None:
-        # 规则与标签一致 → 维持 EXACT-STANDARD-LABEL
+        # 候选与原项目一致仍只完成候选阶段，后续动作由评分和重要性共同决定。
         rules = load_rule_pack(ROOT)
         decision = classify_component(
             cashflow_component(
@@ -368,10 +376,11 @@ class ClassificationTests(unittest.TestCase):
         )
         self.assertEqual("CFO-01", decision.system_item_id)
         self.assertEqual("CFO-01-SALES", decision.matched_rule_id)
-        self.assertTrue(decision.resolved)
-        self.assertIn("原标签一致，仅作补充", decision.reason)
+        self.assertFalse(decision.resolved)
+        self.assertEqual("agrees", decision.original_item_state)
+        self.assertIn("原项目能够标准化并与候选一致", decision.reason)
 
-    def test_label_with_no_business_evidence_is_a_low_evidence_fallback(self) -> None:
+    def test_label_with_no_business_evidence_does_not_create_a_candidate(self) -> None:
         rules = load_rule_pack(ROOT)
         decision = classify_component(
             cashflow_component(
@@ -382,8 +391,9 @@ class ClassificationTests(unittest.TestCase):
             ),
             rules,
         )
-        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
-        self.assertEqual("low", decision.evidence_level)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
+        self.assertEqual(0, decision.evidence_score)
 
     def test_new_terms_classify_correctly(self) -> None:
         # Task 2 Step 4 新增规则词条逐一核对
@@ -403,8 +413,7 @@ class ClassificationTests(unittest.TestCase):
                 self.assertEqual(expected, decision.system_item_id)
 
     def test_accounts_payable_alone_is_only_low_purchase_evidence(self) -> None:
-        # 重构后口径：仅一级"应付账款"命中 15 分=低，不足以推翻任何原标签（服务费等已改归 CFO-07）
-        # 关键词补强后"支付货款"已带直接证据（见下条测试），本测试摘要改用无业务线索的"支付款项"
+        # 仅一级“应付账款”属于中质量路径来源25分；摘要无有效业务事实。
         decision = classify_component(
             cashflow_component("支付款项", -100, ("应付账款_财务",)),
             load_rule_pack(ROOT),
@@ -412,19 +421,18 @@ class ClassificationTests(unittest.TestCase):
 
         self.assertEqual("CFO-04", decision.system_item_id)
         self.assertEqual("low", decision.evidence_level)
-        self.assertEqual(15, decision.evidence_score)
+        self.assertEqual(25, decision.evidence_score)
 
     def test_pay_huokuan_summary_is_medium_purchase_evidence(self) -> None:
-        # 新口径：摘要"支付货款"命中"付货款"（摘要分40），
-        # 一级"应付账款"命中科目分15，项目总分=40+15=55分=中
+        # 摘要强45分与完整路径中25分相互印证，合计70分。
         decision = classify_component(
             cashflow_component("支付货款", -100, ("应付账款_财务",)),
             load_rule_pack(ROOT),
         )
 
         self.assertEqual("CFO-04", decision.system_item_id)
-        self.assertEqual("medium", decision.evidence_level)
-        self.assertEqual(55, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
+        self.assertEqual(70, decision.evidence_score)
 
     def test_input_vat_does_not_turn_a_purchase_payment_into_tax_payment(self) -> None:
         decision = classify_component(
@@ -437,9 +445,9 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFI-06", decision.system_item_id)
-        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
-        self.assertEqual("low", decision.evidence_level)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
+        self.assertEqual(0, decision.evidence_score)
 
     def test_loan_interest_expense_is_not_treated_as_principal_repayment(self) -> None:
         decision = classify_component(
@@ -453,10 +461,10 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFF-05", decision.system_item_id)
-        # 新口径：摘要"偿还银行贷款利息"命中"贷款利息"40分 + 明细"利息支出"30分=70分=高（原标签CFF-05一致，仅作补充）
+        # 摘要与完整路径都指向偿付利息，形成两个独立来源。
         self.assertEqual("high", decision.evidence_level)
 
-    def test_fixed_asset_clearing_does_not_mean_cash_was_used_to_build_an_asset(self) -> None:
+    def test_fixed_asset_clearing_and_original_label_do_not_create_a_candidate(self) -> None:
         decision = classify_component(
             cashflow_component(
                 "地下电动铲运机评估费",
@@ -467,8 +475,8 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFI-03", decision.system_item_id)
-        self.assertEqual("ORIGINAL-LABEL-FALLBACK", decision.matched_rule_id)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
 
     def test_common_sales_collection_and_advance_refund_have_business_rules(self) -> None:
         rules = load_rule_pack(ROOT)
@@ -480,10 +488,11 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-01", receipt.system_item_id)
-        # 重构后口径：单摘要词命中45分=中；预收退款为流出与CFO-01收入方向相反，得分减半=22分=低
-        self.assertEqual("medium", receipt.evidence_level)
+        self.assertEqual(70, receipt.evidence_score)
+        self.assertEqual("high", receipt.evidence_level)
         self.assertEqual("CFO-01", refund.system_item_id)
-        self.assertEqual("low", refund.evidence_level)
+        self.assertEqual(45, refund.evidence_score)
+        self.assertEqual("medium", refund.evidence_level)
 
     def test_withheld_individual_income_tax_belongs_to_staff_payments(self) -> None:
         # 应用指南三(一)5：代扣代缴的个人所得税款应在"支付给职工以及为职工支付的现金"
@@ -494,8 +503,7 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-05", decision.system_item_id)
-        # 复核修复后口径：单摘要词40分=中（个税对方科目已被税费规则排除，项目归属未变）
-        self.assertEqual(40, decision.evidence_score)
+        self.assertEqual(45, decision.evidence_score)
         self.assertEqual("medium", decision.evidence_level)
 
     def test_plain_individual_income_tax_payment_also_goes_to_staff_payments(self) -> None:
@@ -510,6 +518,25 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("CFO-05-STAFF", decision.matched_rule_id)
         self.assertEqual("medium", decision.evidence_level)
 
+    def test_short_individual_tax_word_and_common_detail_path_go_to_staff_payments(self) -> None:
+        decision = classify_component(
+            cashflow_component("支付个税", -100, ("应交税费_个人所得税",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-05", decision.system_item_id)
+        self.assertEqual("CFO-05-STAFF", decision.matched_rule_id)
+        self.assertFalse(decision.source_conflict)
+
+    def test_dividend_individual_tax_is_staff_payment_not_dividend_distribution(self) -> None:
+        decision = classify_component(
+            cashflow_component("支付分红个税", -100, ("应交税费_个人所得税",)),
+            load_rule_pack(ROOT),
+        )
+
+        self.assertEqual("CFO-05", decision.system_item_id)
+        self.assertEqual("CFO-05-STAFF", decision.matched_rule_id)
+
     def test_enterprise_income_tax_still_uses_tax_payment_rule(self) -> None:
         # 回归保护：企业所得税仍命中 CFO-06 税费摘要词
         decision = classify_component(
@@ -518,10 +545,10 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-06", decision.system_item_id)
-        # 复核修复后口径：单摘要词40分=中
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
 
-    def test_note_discounting_is_not_high_evidence_sales_collection(self) -> None:
+    def test_note_discounting_without_financing_facts_has_no_candidate(self) -> None:
         # 会计类第1号指引及上交所案例：贴现不符合终止确认条件时应列筹资流入并确认为借款，
         # 不得高证据归入销售回款；证据不足时落低证据兜底并进入复核
         decision = classify_component(
@@ -529,9 +556,9 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-03", decision.system_item_id)
-        self.assertEqual("CFO-03-FALLBACK", decision.matched_rule_id)
-        self.assertEqual("low", decision.evidence_level)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("NO-BUSINESS-CANDIDATE", decision.matched_rule_id)
+        self.assertEqual(0, decision.evidence_score)
 
     def test_note_maturity_collection_stays_sales_collection(self) -> None:
         # 回归保护：票据到期收款仍是销售回款
@@ -541,8 +568,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-01", decision.system_item_id)
-        # 复核修复后口径：摘要"票据到期收款"40分+对方科目一级"应收票据"15分=55分=中
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
 
     def test_wealth_management_redemption_principal_is_investment_recovery(self) -> None:
         # 应用指南三(二)1：理财/结构性存款赎回本金入"收回投资收到的现金"，
@@ -553,8 +580,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-01", decision.system_item_id)
-        # 重构后口径：摘要+对方科目一级两源印证55分=中
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
 
     def test_structured_deposit_interest_stays_investment_income(self) -> None:
         # 回归保护：结构性存款利息仍归 CFI-02，赎回排除词不能误伤收益场景
@@ -617,8 +644,9 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-06", decision.system_item_id)
-        # 重构后口径：单"契税"摘要词40分=中
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual({"CFI-06", "CFO-06"}, set(decision.candidate_item_ids))
+        self.assertTrue(decision.source_conflict)
+        self.assertIsNone(decision.evidence_score)
 
     def test_vehicle_purchase_tax_follows_asset_acquisition(self) -> None:
         # 车辆购置税为购置车辆的直接相关税费，随资产购建归 CFI-06
@@ -628,8 +656,9 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-06", decision.system_item_id)
-        # 重构后口径：单摘要词45分=中
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual({"CFI-06", "CFO-06"}, set(decision.candidate_item_ids))
+        self.assertTrue(decision.source_conflict)
+        self.assertIsNone(decision.evidence_score)
 
     def test_returned_vat_credit_refund_is_tax_payment(self) -> None:
         # 应用指南：缴回留抵退税款属于"支付的各项税费"
@@ -639,8 +668,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-06", decision.system_item_id)
-        # 重构后口径：单摘要词50分=中（留抵退税缴回归属未变，仍为CFO-06）
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
 
     def test_received_vat_credit_refund_stays_tax_refund(self) -> None:
         # 回归保护：收到留抵退税款仍归"收到的税费返还"
@@ -654,8 +683,8 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("medium", decision.evidence_level)
 
 
-def test_weak_single_account_evidence_keeps_original_label():
-    """摘要指向工程的标签不被仅一级科目'应付账款'命中推翻（Task 3 电梯安装费回归案例）。"""
+def test_complete_path_dictionary_recognizes_equipment_payable():
+    """完整路径中的“应付设备款”按通用科目语义形成投资活动候选。"""
     from cashflow_direct.classification import classify_component, load_rule_pack
 
     rules = load_rule_pack(ROOT)
@@ -664,11 +693,11 @@ def test_weak_single_account_evidence_keeps_original_label():
         cash_delta_cent=-5000000, counterpart_accounts=("应付账款_应付设备款_暂估款",),
         original_item_text="购建固定资产、无形资产和其他长期资产支付的现金",
     )
-    decision = classify_component(component, rules)
+    decision = classify_component(component, rules, load_common_dictionary(ROOT))
     assert decision.system_item_id == "CFI-06"
-    assert decision.label_kept is True and decision.resolved is False
-    assert decision.matched_rule_id == "LABEL-KEPT-INSUFFICIENT-EVIDENCE"
-    assert decision.evidence_score < 70
+    assert decision.original_item_state == "agrees"
+    assert decision.resolved is False
+    assert decision.evidence_score == 45
 
 
 def test_fee_type_split_categories():
@@ -699,11 +728,12 @@ def test_plain_vat_in_purchase_summary_is_not_tax_payment():
         load_rule_pack(ROOT),
     )
     assert decision.system_item_id == "CFO-04"
-    assert decision.resolved is True
+    assert decision.evidence_score == 70
+    assert decision.resolved is False
 
 
 def test_explicit_vat_payment_is_tax_payment():
-    """回归保护："缴纳增值税"整词仍是 CFO-06 高证据（摘要40+对方科目明细30=70分=高）。"""
+    """回归保护：摘要与完整路径共同支持时，缴纳增值税仍形成高证据候选。"""
     decision = classify_component(
         cashflow_component("缴纳增值税", -340000, ("应交税费_未交增值税",)),
         load_rule_pack(ROOT),
@@ -712,42 +742,40 @@ def test_explicit_vat_payment_is_tax_payment():
     assert decision.evidence_level == "high"
 
 
-def test_staff_tax_for_construction_goes_to_cfi06():
-    """复核修复：代扣个税+对方科目明细"资本化"经 CFI-06-STAFF-TAX 分流至购建固定资产（70分=高）。
-
-    该分流规则要求必须命中对方科目才作数；与 CFO-05 的分差恰为一个明细档（30分），不算冲突。
-    """
+def test_staff_tax_for_construction_is_a_two_source_conflict():
+    """摘要指向职工、完整路径指向资本化时，不形成可用总分。"""
     decision = classify_component(
         cashflow_component("代扣个税", -50000, ("在建工程_资本化",)),
         load_rule_pack(ROOT),
     )
-    assert decision.system_item_id == "CFI-06"
-    assert decision.evidence_score == 70
-    assert decision.resolved is True
+    assert set(decision.candidate_item_ids) == {"CFO-05", "CFI-06"}
+    assert decision.source_conflict is True
+    assert decision.evidence_score is None
+    assert decision.resolved is False
 
 
-def test_construction_wages_go_to_cfi06_with_conflict_flag():
-    """复核修复："发放工资"+在建工程科目经 CFI-06-STAFF-COMP 得55分，胜过 CFO-05 的40分，
-
-    但分差不足一个明细档（30分）计为冲突，首选 CFI-06 并按业务规则冲突口径送 AI 复核。
-    """
+def test_construction_wages_are_a_two_source_conflict():
+    """摘要指向职工、完整路径指向在建工程时，必须直接识别为来源冲突。"""
     decision = classify_component(
         cashflow_component("发放工资", -200000, ("在建工程_厂房",)),
         load_rule_pack(ROOT),
     )
-    assert decision.system_item_id == "CFI-06"
+    assert set(decision.candidate_item_ids) == {"CFO-05", "CFI-06"}
     assert decision.matched_rule_id == "BUSINESS-RULE-CONFLICT"
+    assert decision.source_conflict is True
+    assert decision.evidence_score is None
     assert decision.resolved is False
 
 
-def test_fallback_reason_marks_internal_conservative_caliber():
-    """复核修复：方向兜底理由必须声明此为内部保守处理口径，不是准则直接结论。"""
+def test_unknown_transfer_does_not_use_a_direction_fallback():
+    """摘要和路径都没有业务事实时，不因现金方向虚构候选。"""
     decision = classify_component(
         cashflow_component("转账", -10000, ("其他科目_杂项",)),
         load_rule_pack(ROOT),
     )
-    assert decision.matched_rule_id == "CFO-07-FALLBACK"
-    assert "内部保守处理口径" in decision.reason
+    assert decision.system_item_id == ""
+    assert decision.matched_rule_id == "NO-BUSINESS-CANDIDATE"
+    assert decision.evidence_score == 0
 
 
 def test_dictionary_hit_reason_includes_note_id():

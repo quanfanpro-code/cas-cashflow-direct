@@ -181,6 +181,28 @@ class StructureAndMappingTests(unittest.TestCase):
             self.assertIsInstance(result, MappingQuestion)
             self.assertEqual("account_name", result.role)
 
+    def test_hierarchical_account_samples_prefer_the_complete_path_column(self) -> None:
+        # 同时存在一级科目和明细路径时，层级化样本能够证明“科目名称”是完整路径。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "分层科目导出.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(
+                ["记账日期", "凭证号", "摘要", "一级科目", "科目编码", "科目名称", "借方", "贷方", "主表项目"]
+            )
+            sheet.append(
+                ["2026-06-30", "00377", "匿名付款", "应交税费", "2221.01", "应交税费_税费明细", 40250, None, "支付的各项税费"]
+            )
+            sheet.append(
+                ["2026-06-30", "00378", "匿名收款", "银行存款", "1002.01", "银行存款_基本账户", None, 40250, "收到其他与经营活动有关的现金"]
+            )
+            workbook.save(path)
+
+            result = infer_dataset_mapping(scan_workbook(path))
+
+            self.assertIsInstance(result, DatasetMapping)
+            self.assertEqual(6, result.role_to_column["account_name"].column_index)
+
     def test_three_level_header_and_hostile_layout_keep_full_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "恶劣结构.xlsx"

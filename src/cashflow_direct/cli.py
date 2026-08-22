@@ -9,11 +9,17 @@ from pathlib import Path
 from cashflow_direct.intake import choose_input_files
 from cashflow_direct.pipeline import (
     confirm_company_notes,
+    confirm_component_structure,
+    confirm_reversal_patterns,
+    confirm_manual_decisions,
+    confirm_account_mapping,
     confirm_mapping,
     confirm_cash_scope,
     finalize_run,
     import_ai_results,
+    import_component_structure_ai_results,
     import_dictionary_results,
+    import_summary_results,
     run_classification,
     run_preflight,
     scan_accounts,
@@ -34,13 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--paths", nargs="+", help="直接给出输入文件路径（可多个）；给定后不弹文件选择窗口")
     for name in (
         "confirm-mapping",
+        "confirm-account-mapping",
         "confirm-cash",
         "confirm-notes",
+        "confirm-components",
+        "confirm-reversals",
+        "import-component-ai",
         "supplement-cash",
         "scan-accounts",
         "import-dictionary",
+        "import-summary",
         "classify",
         "import-ai",
+        "confirm-manual",
         "finalize",
         "status",
     ):
@@ -48,10 +60,30 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--run-dir", required=True, help="由上一阶段自动传递的运行目录")
         if name == "confirm-mapping":
             command.add_argument("--decisions", required=True, help="字段映射确认 JSON")
+        elif name == "confirm-account-mapping":
+            command.add_argument("--decisions", required=True, help="客户一级科目映射确认 JSON")
         elif name == "confirm-cash":
             command.add_argument("--decisions", required=True, help="现金范围决定 JSON")
         elif name == "confirm-notes":
             command.add_argument("--decisions", required=True, help="公司特殊规则清单 JSON 数组")
+        elif name == "confirm-components":
+            command.add_argument(
+                "--decisions",
+                required=True,
+                help="业务组成候选确认 JSON；键为凭证，值为所选来源行编号数组",
+            )
+        elif name == "confirm-reversals":
+            command.add_argument(
+                "--decisions",
+                required=True,
+                help="退款或反向冲减确认 JSON；值为仅本次采用、长期采用或拒绝",
+            )
+        elif name == "import-component-ai":
+            command.add_argument(
+                "--result-path",
+                required=True,
+                help="业务组成AI返回结果 JSONL",
+            )
         elif name == "supplement-cash":
             command.add_argument("--opening", required=True, help="期初现金余额，单位元")
             command.add_argument("--closing", required=True, help="期末现金余额，单位元")
@@ -59,8 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--source-note", required=True, help="补充数据的资料来源说明")
         elif name == "import-dictionary":
             command.add_argument("--result-path", required=True, help="科目语义 AI 返回结果 JSONL")
+        elif name == "import-summary":
+            command.add_argument("--result-path", required=True, help="摘要语义 AI 返回结果 JSONL")
         elif name == "import-ai":
             command.add_argument("--result-path", required=True, help="AI 返回结果 JSONL")
+        elif name == "confirm-manual":
+            command.add_argument(
+                "--decisions",
+                required=True,
+                help="人工决定 JSON 数组；逐项填写业务编号、项目或排除、依据和处理人",
+            )
     return parser
 
 
@@ -90,10 +130,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif arguments.command == "confirm-mapping":
             result = confirm_mapping(Path(arguments.run_dir), json.loads(arguments.decisions))
+        elif arguments.command == "confirm-account-mapping":
+            result = confirm_account_mapping(
+                Path(arguments.run_dir), json.loads(arguments.decisions)
+            )
         elif arguments.command == "confirm-cash":
             result = confirm_cash_scope(Path(arguments.run_dir), json.loads(arguments.decisions))
         elif arguments.command == "confirm-notes":
             result = confirm_company_notes(Path(arguments.run_dir), json.loads(arguments.decisions))
+        elif arguments.command == "confirm-components":
+            result = confirm_component_structure(
+                Path(arguments.run_dir), json.loads(arguments.decisions)
+            )
+        elif arguments.command == "confirm-reversals":
+            result = confirm_reversal_patterns(
+                Path(arguments.run_dir), json.loads(arguments.decisions)
+            )
+        elif arguments.command == "import-component-ai":
+            result = import_component_structure_ai_results(
+                Path(arguments.run_dir), Path(arguments.result_path)
+            )
         elif arguments.command == "supplement-cash":
             result = supplement_cash_balances(
                 Path(arguments.run_dir),
@@ -106,10 +162,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = scan_accounts(Path(arguments.run_dir))
         elif arguments.command == "import-dictionary":
             result = import_dictionary_results(Path(arguments.run_dir), Path(arguments.result_path))
+        elif arguments.command == "import-summary":
+            result = import_summary_results(Path(arguments.run_dir), Path(arguments.result_path))
         elif arguments.command == "classify":
             result = run_classification(Path(arguments.run_dir))
         elif arguments.command == "import-ai":
             result = import_ai_results(Path(arguments.run_dir), Path(arguments.result_path))
+        elif arguments.command == "confirm-manual":
+            result = confirm_manual_decisions(
+                Path(arguments.run_dir), json.loads(arguments.decisions)
+            )
         elif arguments.command == "finalize":
             result = finalize_run(Path(arguments.run_dir))
         else:

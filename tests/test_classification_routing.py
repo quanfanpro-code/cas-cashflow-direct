@@ -1,0 +1,768 @@
+from __future__ import annotations
+
+import importlib
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from cashflow_direct.models import (
+    CashflowComponent,
+    ClassificationDecision,
+    MaterialityAmounts,
+)
+from cashflow_direct.classification import classify_all, load_rule_pack
+from tests.fixture_factory import cashflow_component
+
+
+THRESHOLDS = MaterialityAmounts(
+    overall_cent=10_000,
+    performance_cent=1_000,
+    trivial_cent=100,
+)
+
+
+def route_classification_decisions(*args, **kwargs):
+    module = importlib.import_module("cashflow_direct.classification")
+    return module.route_classification_decisions(*args, **kwargs)
+
+
+def _decision(
+    component_id: str,
+    *,
+    score: int | None,
+    state: str = "agrees",
+    source_conflict: bool = False,
+    candidate: str = "CFO-04",
+    business_object: str = "",
+    purpose: str = "",
+) -> ClassificationDecision:
+    return ClassificationDecision(
+        component_id=component_id,
+        system_item_id=candidate,
+        system_item_name="购买商品、接受劳务支付的现金" if candidate else "",
+        normal_direction="outflow" if candidate else "net",
+        matched_rule_id="TEST",
+        reason="构造候选",
+        evidence_level="high" if score in {70, 90} else "medium",
+        resolved=False,
+        evidence_score=score,
+        evidence_sources=("summary", "account_path") if score in {70, 90} else ("summary",),
+        candidate_item_ids=(candidate,) if candidate else (),
+        original_item_state=state,
+        source_conflict=source_conflict,
+        business_object=business_object,
+        purpose=purpose,
+    )
+
+
+def test_m1_agreement_with_score_55_is_decided_automatically() -> None:
+    component = cashflow_component(
+        "支付货款",
+        -500,
+        ("应付账款_供应商",),
+        original_item_text="购买商品、接受劳务支付的现金",
+        component_id="AUTO",
+    )
+
+    result = route_classification_decisions(
+        (component,), (_decision("AUTO", score=55),), THRESHOLDS
+    )
+
+    assert result.decisions[0].resolved is True
+    assert result.decisions[0].decision_action == "automatic_keep"
+    assert result.ai_tasks == ()
+
+
+def test_m1_original_conflict_with_score_90_still_requires_ai() -> None:
+    component = cashflow_component(
+        "税收滞纳金",
+        -500,
+        ("营业外支出_罚款滞纳金",),
+        original_item_text="支付的各项税费",
+        component_id="CONFLICT",
+    )
+
+    result = route_classification_decisions(
+        (component,),
+        (_decision("CONFLICT", score=90, state="conflicts", candidate="CFO-07"),),
+        THRESHOLDS,
+    )
+
+    assert result.decisions[0].resolved is False
+    assert result.decisions[0].decision_action == "ai_review"
+    assert len(result.ai_tasks) == 1
+
+
+def test_same_source_business_conflict_is_blocked_before_ai_tasks() -> None:
+    components = (
+        CashflowComponent(
+            component_id="FACT-CONFLICT-1",
+            voucher_key="V-SAME",
+            summary="同一事实",
+            cash_delta_cent=-50,
+            counterpart_accounts=("其他应付款_同一对象",),
+            source_file_ids=("F-SAME",),
+        ),
+        CashflowComponent(
+            component_id="FACT-CONFLICT-2",
+            voucher_key="V-SAME",
+            summary="同一事实",
+            cash_delta_cent=-50,
+            counterpart_accounts=("其他应付款_同一对象",),
+            source_file_ids=("F-SAME",),
+        ),
+    )
+    decisions = (
+        _decision(
+            "FACT-CONFLICT-1",
+            score=70,
+            state="blank",
+            candidate="CFO-04",
+        ),
+        _decision(
+            "FACT-CONFLICT-2",
+            score=70,
+            state="blank",
+            candidate="CFO-07",
+        ),
+    )
+
+    result = route_classification_decisions(components, decisions, THRESHOLDS)
+
+    assert result.ai_tasks == ()
+    assert all(item.business_conflict for item in result.decisions)
+    assert {
+        item.decision_action for item in result.decisions
+    } == {"low_amount_human_batch"}
+
+
+def test_automatic_keep_restores_original_item_in_the_result() -> None:
+    component = cashflow_component(
+        "模糊报销",
+        -50,
+        ("其他应付款_往来款",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id="KEEP-ORIGINAL",
+    )
+    decision = replace(
+        _decision(
+            "KEEP-ORIGINAL",
+            score=55,
+            state="conflicts",
+            candidate="CFO-04",
+        ),
+        original_standard_item_id="CFO-07",
+    )
+
+    result = route_classification_decisions((component,), (decision,), THRESHOLDS)
+
+    kept = result.decisions[0]
+    assert kept.decision_action == "automatic_keep"
+    assert kept.system_item_id == "CFO-07"
+    assert kept.system_item_name == "支付其他与经营活动有关的现金"
+
+
+def test_builtin_purchase_refund_rule_is_an_approved_reversal() -> None:
+    component = cashflow_component(
+        "供应商退回采购款",
+        50,
+        ("应付账款_材料供应商",),
+        original_item_text="购买商品、接受劳务支付的现金",
+        component_id="REFUND",
+    )
+
+    result = route_classification_decisions(
+        (component,), (_decision("REFUND", score=90),), THRESHOLDS
+    )
+
+    assert result.decisions[0].direction_status == "approved_reversal"
+    assert result.decisions[0].resolved is True
+    assert result.ai_tasks == ()
+
+
+def test_unapproved_reverse_direction_still_requires_review() -> None:
+    component = cashflow_component(
+        "反向收款",
+        50,
+        ("应付账款_供应商",),
+        original_item_text="购买商品、接受劳务支付的现金",
+        component_id="UNKNOWN-REVERSAL",
+    )
+
+    result = route_classification_decisions(
+        (component,), (_decision("UNKNOWN-REVERSAL", score=90),), THRESHOLDS
+    )
+
+    assert result.decisions[0].direction_status == "incompatible"
+    assert result.decisions[0].resolved is False
+    assert len(result.ai_tasks) == 1
+
+
+def test_component_anomaly_cannot_self_approve_a_reversal() -> None:
+    component = cashflow_component(
+        "反向收款",
+        50,
+        ("应付账款_供应商",),
+        original_item_text="购买商品、接受劳务支付的现金",
+        anomalies=("approved_reversal",),
+        component_id="FAKE-REVERSAL",
+    )
+
+    result = route_classification_decisions(
+        (component,), (_decision("FAKE-REVERSAL", score=90),), THRESHOLDS
+    )
+
+    assert result.decisions[0].direction_status == "incompatible"
+    assert result.decisions[0].approved_reversal_rule_ids == ()
+
+
+def test_net_statement_item_missing_facts_does_not_reopen_valid_original() -> None:
+    component = cashflow_component(
+        "处置固定资产收款",
+        50,
+        ("固定资产清理_设备",),
+        original_item_text="处置固定资产、无形资产和其他长期资产收回的现金净额",
+        component_id="NET-ITEM",
+    )
+    decision = replace(
+        _decision("NET-ITEM", score=90, candidate="CFI-03"),
+        normal_direction="inflow",
+    )
+
+    result = route_classification_decisions((component,), (decision,), THRESHOLDS)
+
+    assert result.decisions[0].resolved is True
+    assert result.decisions[0].business_conflict is False
+    assert result.decisions[0].net_item_facts_missing is True
+    assert result.decisions[0].decision_action == "automatic_keep"
+    assert "净额资料" in result.decisions[0].reason
+
+
+def test_confirmed_netting_facts_allow_the_normal_route() -> None:
+    component = cashflow_component(
+        "处置固定资产收款",
+        50,
+        ("固定资产清理_设备",),
+        original_item_text="处置固定资产、无形资产和其他长期资产收回的现金净额",
+        component_id="NET-CONFIRMED",
+    )
+    decision = replace(
+        _decision("NET-CONFIRMED", score=90, candidate="CFI-03"),
+        normal_direction="inflow",
+    )
+    notes = ({
+        "note_id": "NOTE-101",
+        "状态": "仅本次采用",
+        "规则类型": "净额项目资料确认",
+        "适用摘要词": ["处置固定资产"],
+        "内容": "已确认处置价款及全部相关处置费用，净额资料完整",
+    },)
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS, company_notes=notes
+    )
+
+    assert result.decisions[0].business_conflict is False
+    assert result.decisions[0].resolved is True
+
+
+def test_m2_agreement_does_not_require_ai_to_prove_the_original_can_stay() -> None:
+    component = cashflow_component(
+        "支付货款",
+        -1_000,
+        ("应付账款_供应商",),
+        original_item_text="购买商品、接受劳务支付的现金",
+        component_id="DOUBLE",
+    )
+
+    result = route_classification_decisions(
+        (component,), (_decision("DOUBLE", score=55),), THRESHOLDS
+    )
+
+    assert result.decisions[0].decision_action == "automatic_keep"
+    assert result.decisions[0].resolved is True
+    assert result.ai_tasks == ()
+
+
+def test_same_class_cumulative_does_not_make_ai_reprove_an_unchanged_original() -> None:
+    components = tuple(
+        cashflow_component(
+            "支付货款",
+            -60,
+            ("应付账款_供应商",),
+            original_item_text="购买商品、接受劳务支付的现金",
+            component_id=component_id,
+        )
+        for component_id in ("A", "B")
+    )
+
+    result = route_classification_decisions(
+        components,
+        tuple(
+            _decision(
+                component_id,
+                score=45,
+                business_object="采购商品",
+                purpose="应付商品款",
+            )
+            for component_id in ("A", "B")
+        ),
+        THRESHOLDS,
+    )
+
+    assert {item.materiality_level for item in result.decisions} == {"M0"}
+    assert {item.cumulative_materiality_level for item in result.decisions} == {"M1"}
+    assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
+    assert result.ai_tasks == ()
+
+
+def test_cumulative_m3_finishes_normal_routing_before_final_excel_confirmation() -> None:
+    components = tuple(
+        cashflow_component(
+            "支付货款",
+            -4_000,
+            ("应付账款_供应商",),
+            original_item_text="购买商品、接受劳务支付的现金",
+            component_id=component_id,
+        )
+        for component_id in ("A", "B", "C")
+    )
+    decisions = tuple(
+        _decision(
+            component_id,
+            score=55,
+            business_object="采购商品",
+            purpose="应付商品款",
+        )
+        for component_id in ("A", "B", "C")
+    )
+
+    result = route_classification_decisions(components, decisions, THRESHOLDS)
+
+    assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
+    assert {item.single_materiality_level for item in result.decisions} == {"M2"}
+    assert {item.cumulative_materiality_level for item in result.decisions} == {"M3"}
+    assert len({item.materiality_group_id for item in result.decisions}) == 1
+    assert {item.materiality_group_confirmation_status for item in result.decisions} == {
+        "pending_in_final_workbook"
+    }
+    assert result.ai_tasks == ()
+
+
+def test_cumulative_m3_does_not_need_preclassification_group_confirmation() -> None:
+    components = tuple(
+        cashflow_component(
+            "支付货款",
+            -4_000,
+            ("应付账款_供应商",),
+            original_item_text="购买商品、接受劳务支付的现金",
+            component_id=component_id,
+        )
+        for component_id in ("A", "B", "C")
+    )
+    decisions = tuple(
+        _decision(
+            component_id,
+            score=55,
+            business_object="采购商品",
+            purpose="应付商品款",
+        )
+        for component_id in ("A", "B", "C")
+    )
+    result = route_classification_decisions(
+        components, decisions, THRESHOLDS
+    )
+
+    assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
+    assert {item.materiality_level for item in result.decisions} == {"M2"}
+    assert {item.materiality_group_confirmation_status for item in result.decisions} == {
+        "pending_in_final_workbook"
+    }
+    assert result.ai_tasks == ()
+
+
+def test_potential_cumulative_m3_group_only_warns_and_uses_single_level() -> None:
+    components = tuple(
+        cashflow_component(
+            "支付往来款",
+            -4_000,
+            ("其他应付款",),
+            original_item_text="购买商品、接受劳务支付的现金",
+            component_id=component_id,
+        )
+        for component_id in ("A", "B", "C")
+    )
+    decisions = tuple(
+        _decision(component_id, score=55, purpose="")
+        for component_id in ("A", "B", "C")
+    )
+
+    result = route_classification_decisions(components, decisions, THRESHOLDS)
+
+    assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
+    assert {item.materiality_level for item in result.decisions} == {"M2"}
+    assert {item.materiality_grouping_status for item in result.decisions} == {
+        "potential"
+    }
+    assert {item.cumulative_materiality_level for item in result.decisions} == {"M3"}
+    assert not any(
+        item.decision_action == "confirm_materiality_group"
+        for item in result.decisions
+    )
+
+
+@pytest.mark.parametrize(
+    "purpose",
+    ("其他外部往来款", "其他收益", "进项税额", "共用进项税额"),
+)
+def test_broad_or_vat_purpose_never_becomes_reliable_group(purpose: str) -> None:
+    components = tuple(
+        cashflow_component(
+            "构造摘要",
+            -4_000,
+            (f"其他应付款_{purpose}",),
+            original_item_text="购买商品、接受劳务支付的现金",
+            component_id=component_id,
+        )
+        for component_id in ("A", "B", "C")
+    )
+    decisions = tuple(
+        _decision(component_id, score=55, purpose=purpose)
+        for component_id in ("A", "B", "C")
+    )
+
+    result = route_classification_decisions(components, decisions, THRESHOLDS)
+
+    assert {item.materiality_grouping_status for item in result.decisions} == {
+        "potential"
+    }
+
+
+def test_single_m3_still_requires_individual_human_decision() -> None:
+    component = cashflow_component(
+        "支付重大设备款",
+        -10_000,
+        ("在建工程_设备",),
+        original_item_text="购建固定资产、无形资产和其他长期资产支付的现金",
+        component_id="SINGLE-M3",
+    )
+    decision = _decision("SINGLE-M3", score=90, candidate="CFI-06")
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS
+    )
+
+    assert result.decisions[0].decision_action == "human_decision"
+    assert result.decisions[0].single_materiality_level == "M3"
+
+
+def test_different_business_objects_and_purposes_are_not_combined() -> None:
+    components = tuple(
+        cashflow_component(
+            "支付经营费用",
+            -60,
+            ("管理费用_经营费用",),
+            original_item_text="购买商品、接受劳务支付的现金",
+            component_id=component_id,
+        )
+        for component_id in ("TRAVEL", "REPAIR")
+    )
+    decisions = (
+        _decision(
+            "TRAVEL",
+            score=45,
+            business_object="员工差旅",
+            purpose="日常出差",
+        ),
+        _decision(
+            "REPAIR",
+            score=45,
+            business_object="设备维修",
+            purpose="维持生产",
+        ),
+    )
+
+    result = route_classification_decisions(components, decisions, THRESHOLDS)
+
+    assert {item.materiality_level for item in result.decisions} == {"M0"}
+    assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
+
+
+def test_source_conflict_keeps_valid_original_while_illegal_input_is_isolated() -> None:
+    conflict = cashflow_component(
+        "发放工资",
+        -500,
+        ("在建工程_工资",),
+        original_item_text="购买商品、接受劳务支付的现金",
+        component_id="SOURCE-CONFLICT",
+    )
+    illegal = cashflow_component(
+        "",
+        -500,
+        ("应付账款_供应商",),
+        component_id="ILLEGAL",
+        anomalies=("summary_empty",),
+    )
+    decisions = (
+        _decision(
+            "SOURCE-CONFLICT",
+            score=None,
+            state="conflicts",
+            source_conflict=True,
+        ),
+        _decision("ILLEGAL", score=0, state="pending_comparison", candidate=""),
+    )
+
+    result = route_classification_decisions(
+        (conflict, illegal), decisions, THRESHOLDS
+    )
+
+    by_id = {item.component_id: item for item in result.decisions}
+    assert by_id["SOURCE-CONFLICT"].decision_action == "automatic_keep"
+    assert by_id["SOURCE-CONFLICT"].resolved is True
+    assert by_id["ILLEGAL"].decision_action == "isolate_invalid_input"
+    assert by_id["ILLEGAL"].resolved is False
+
+
+def test_direction_conflict_ai_can_search_direction_compatible_candidates() -> None:
+    component = cashflow_component(
+        "支付设备维修款",
+        -500,
+        ("管理费用_维修费",),
+        component_id="DIRECTION",
+    )
+    decision = replace(
+        _decision("DIRECTION", score=45, candidate="CFO-01"),
+        normal_direction="inflow",
+    )
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS
+    )
+
+    assert result.decisions[0].decision_action == "ai_review"
+    assert result.decisions[0].direction_status == "incompatible"
+    assert "CFO-07" in result.ai_tasks[0].candidate_item_ids
+    assert set(result.ai_tasks[0].candidate_item_ids) != {"CFO-01"}
+
+
+def test_explicit_exclusion_bypasses_the_scoring_matrix() -> None:
+    component = cashflow_component(
+        "现金范围内部划转",
+        100,
+        ("银行存款_一般户",),
+        component_id="EXCLUDED",
+        anomalies=("internal_transfer",),
+    )
+    decision = ClassificationDecision(
+        component_id="EXCLUDED",
+        system_item_id="",
+        system_item_name="",
+        normal_direction="net",
+        matched_rule_id="EXCLUDED",
+        reason="现金范围内部划转不进入正表",
+        evidence_level="not_applicable",
+        resolved=True,
+        excluded=True,
+        evidence_score=None,
+        decision_action="exclude",
+    )
+
+    result = route_classification_decisions((component,), (decision,), THRESHOLDS)
+
+    assert result.decisions == (decision,)
+    assert result.ai_tasks == ()
+
+
+def test_unknown_service_individual_tax_keeps_a_standardized_original_below_overall() -> None:
+    rules = load_rule_pack(Path(__file__).resolve().parents[1])
+    trivial = cashflow_component(
+        "代扣个人所得税",
+        -50,
+        ("应交税费_个人所得税",),
+        original_item_text="支付的各项税费",
+        component_id="TAX-TRIVIAL",
+    )
+    below_performance = cashflow_component(
+        "代扣个人所得税",
+        -500,
+        ("应交税费_个人所得税",),
+        original_item_text="支付的各项税费",
+        component_id="TAX-BELOW-PERFORMANCE",
+    )
+    trivial_result = route_classification_decisions(
+        (trivial,), classify_all((trivial,), rules), THRESHOLDS
+    )
+    below_performance_result = route_classification_decisions(
+        (below_performance,), classify_all((below_performance,), rules), THRESHOLDS
+    )
+    by_id = {
+        trivial_result.decisions[0].component_id: trivial_result.decisions[0],
+        below_performance_result.decisions[0].component_id: below_performance_result.decisions[0],
+    }
+
+    assert by_id["TAX-TRIVIAL"].resolved is True
+    assert by_id["TAX-TRIVIAL"].decision_action == "automatic_keep"
+    assert by_id["TAX-BELOW-PERFORMANCE"].resolved is True
+    assert by_id["TAX-BELOW-PERFORMANCE"].decision_action == "automatic_keep"
+    assert trivial_result.ai_tasks == ()
+    assert below_performance_result.ai_tasks == ()
+
+
+def test_unknown_service_individual_tax_with_blank_original_uses_batch_then_blind_ai() -> None:
+    rules = load_rule_pack(Path(__file__).resolve().parents[1])
+    low = cashflow_component(
+        "代扣个人所得税",
+        -50,
+        ("应交税费_个人所得税",),
+        original_item_text="",
+        component_id="TAX-BLANK-M0",
+    )
+    below_performance = cashflow_component(
+        "代扣个人所得税",
+        -500,
+        ("应交税费_个人所得税",),
+        original_item_text="",
+        component_id="TAX-BLANK-M1",
+    )
+    performance = cashflow_component(
+        "代扣个人所得税",
+        -5_000,
+        ("应交税费_个人所得税",),
+        original_item_text="",
+        component_id="TAX-BLANK-M2",
+    )
+
+    result = route_classification_decisions(
+        (low, below_performance, performance),
+        classify_all((low, below_performance, performance), rules),
+        THRESHOLDS,
+    )
+    by_id = {item.component_id: item for item in result.decisions}
+
+    assert by_id["TAX-BLANK-M0"].decision_action == "low_amount_human_batch"
+    assert by_id["TAX-BLANK-M1"].decision_action == "human_batch"
+    assert by_id["TAX-BLANK-M2"].decision_action == "double_ai_review"
+    assert by_id["TAX-BLANK-M2"].ai_review_policy == "individual_tax_service"
+    assert len(result.ai_tasks) == 2
+
+
+def test_two_applicable_company_rules_with_different_outcomes_go_to_human() -> None:
+    component = cashflow_component(
+        "支付设备押金",
+        -50,
+        ("其他应付款_设备押金",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id="NOTE-CONFLICT",
+    )
+    decision = _decision(
+        "NOTE-CONFLICT",
+        score=70,
+        state="agrees",
+        candidate="CFO-07",
+    )
+    notes = (
+        {
+            "note_id": "NOTE-01",
+            "内容": "设备押金按经营活动",
+            "涉及科目或词": ["设备押金"],
+            "建议处理": "CFO-07",
+            "状态": "采用",
+        },
+        {
+            "note_id": "NOTE-02",
+            "内容": "设备押金按投资活动",
+            "涉及科目或词": ["设备押金"],
+            "建议处理": "CFI-06",
+            "状态": "采用",
+        },
+    )
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS, company_notes=notes
+    )
+
+    assert result.decisions[0].decision_action == "human_decision"
+    assert result.decisions[0].company_rule_conflict is True
+    assert result.ai_tasks == ()
+
+
+def test_vat_without_a_base_transaction_cannot_reclassify_a_valid_original() -> None:
+    component = cashflow_component(
+        "水费发票",
+        -500,
+        ("应交税费_应交增值税_进项税",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id="VAT-NO-BASE",
+    )
+    decision = replace(
+        _decision(
+            "VAT-NO-BASE",
+            score=90,
+            state="conflicts",
+            candidate="CFO-04",
+        ),
+        original_standard_item_id="CFO-07",
+    )
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS
+    )
+
+    assert result.decisions[0].decision_action == "automatic_keep"
+    assert result.decisions[0].system_item_id == "CFO-07"
+    assert result.decisions[0].vat_base_missing is True
+    assert result.ai_tasks == ()
+
+
+def test_overall_material_new_reversal_waits_for_agent_confirmation() -> None:
+    component = cashflow_component(
+        "供应商退回设备款",
+        20_000,
+        ("应付账款_应付设备款",),
+        original_item_text="",
+        component_id="NEW-REVERSAL-M3",
+    )
+    decision = _decision(
+        "NEW-REVERSAL-M3",
+        score=70,
+        state="blank",
+        candidate="CFI-06",
+    )
+    decision = replace(decision, normal_direction="outflow")
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS
+    )
+
+    assert result.decisions[0].decision_action == "confirm_reversal_rule"
+    assert result.decisions[0].new_reversal_pattern is True
+    assert result.ai_tasks == ()
+
+
+def test_returned_fee_is_recognized_as_a_new_reversal_pattern() -> None:
+    component = cashflow_component(
+        "退还手续费",
+        50,
+        ("财务费用_手续费",),
+        original_item_text="",
+        component_id="RETURNED-FEE-M0",
+    )
+    decision = replace(
+        _decision(
+            "RETURNED-FEE-M0",
+            score=70,
+            state="blank",
+            candidate="CFO-07",
+        ),
+        normal_direction="outflow",
+    )
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS
+    )
+
+    assert result.decisions[0].new_reversal_pattern is True
+    assert result.decisions[0].decision_action == "ai_review"
+    assert result.ai_tasks[0].allow_one_time_reversal is True

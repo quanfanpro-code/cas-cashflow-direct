@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from cashflow_direct.classification import load_rule_pack
@@ -75,6 +76,12 @@ def decision(
         reason="测试判断",
         evidence_level="high",
         excluded=excluded,
+        evidence_score=70,
+        summary_quality=45,
+        account_path_quality=25,
+        sources_independent=True,
+        decision_action="automatic_change",
+        materiality_level="M0",
     )
 
 
@@ -113,27 +120,19 @@ class OriginalAutoDifferenceTests(unittest.TestCase):
         rows = self.build((source,), (current,), (automatic,))
 
         self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertNotIn("主表项目名称", row)
+        self.assertNotIn("最终决定现流项目", row)
+        self.assertEqual("支付的各项税费", row["原项目标准化结果"])
+        self.assertEqual("支付其他与经营活动有关的现金", row["审定现流表项目"])
         self.assertEqual(
-            {
-                "日期": "2026-01-01",
-                "凭证字": "记",
-                "凭证号": "1",
-                "摘要": "匿名业务",
-                "科目编码": "1002.01",
-                "科目名称": "银行存款",
-                "借方": 100.0,
-                "贷方": None,
-                "流量金额（原币）": 100.0,
-                "主表项目名称": "支付的各项税费",
-                "对方科目": "其他应付款",
-                "原项目标准化结果": "支付的各项税费",
-                "自动判定现流项目": "支付其他与经营活动有关的现金",
-                "差异说明": "标准项目不一致",
-                "来源文件": "匿名输入.xlsx",
-                "来源工作表": "明细",
-                "来源单元格": "A2:L2",
-            },
-            rows[0],
+            "证据得分70分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
+            row["差异形成原因"],
+        )
+        self.assertEqual("摘要“匿名业务”；强证据45分", row["独立来源1"])
+        self.assertEqual(
+            "完整对方科目路径“路径为空”；中等证据25分",
+            row["独立来源2"],
         )
 
     def test_unstandardized_and_internal_transfer_rows_are_visible(self) -> None:
@@ -151,9 +150,9 @@ class OriginalAutoDifferenceTests(unittest.TestCase):
 
         self.assertEqual(2, len(rows))
         self.assertEqual("原项目无法标准化", rows[0]["原项目标准化结果"])
-        self.assertEqual("原项目无法标准化", rows[0]["差异说明"])
-        self.assertEqual("不进入正表", rows[1]["自动判定现流项目"])
-        self.assertEqual("自动判定不进入正表", rows[1]["差异说明"])
+        self.assertIn("证据得分70分", rows[0]["差异形成原因"])
+        self.assertEqual("不进入正表", rows[1]["审定现流表项目"])
+        self.assertIn("内部划转", rows[1]["差异形成原因"])
 
     def test_multiple_source_rows_expand_without_common_leg_duplication(self) -> None:
         first = entry("E1", "支付的各项税费", row=2)
@@ -185,7 +184,53 @@ class OriginalAutoDifferenceTests(unittest.TestCase):
 
         self.assertEqual(2, len(rows))
         self.assertTrue(
-            all("多个自动判定结果" in str(row["差异说明"]) for row in rows)
+            all("拆分为多个业务组成" in str(row["差异形成原因"]) for row in rows)
+        )
+
+    def test_pending_ai_or_human_and_manual_results_are_not_auto_differences(self) -> None:
+        source = entry("E1", "支付的各项税费")
+        current = component("C1", source.original_flow_item, ("E1",))
+        pending_ai = replace(
+            decision("C1", "CFO-07", "支付其他与经营活动有关的现金"),
+            resolved=False,
+            decision_action="ai_review",
+            decision_source="candidate",
+        )
+        manual = replace(
+            decision("C1", "CFO-07", "支付其他与经营活动有关的现金"),
+            decision_source="manual",
+        )
+
+        self.assertEqual((), self.build((source,), (current,), (pending_ai,)))
+        self.assertEqual((), self.build((source,), (current,), (manual,)))
+
+    def test_auto_fill_for_blank_original_is_a_difference_result(self) -> None:
+        source = entry("E1", "")
+        current = component("C1", "", ("E1",))
+        automatic = decision("C1", "CFO-07", "支付其他与经营活动有关的现金")
+
+        rows = self.build((source,), (current,), (automatic,))
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual("原项目为空", rows[0]["原项目标准化结果"])
+        self.assertEqual(
+            "支付其他与经营活动有关的现金",
+            rows[0]["审定现流表项目"],
+        )
+
+    def test_difference_explains_score_and_amount_tier_in_natural_language(self) -> None:
+        source = entry("E1", "支付的各项税费")
+        current = component("C1", source.original_flow_item, ("E1",))
+        automatic = decision("C1", "CFO-07", "支付其他与经营活动有关的现金")
+
+        row = self.build((source,), (current,), (automatic,))[0]
+
+        self.assertNotIn("M0", row["差异形成原因"])
+        self.assertIn("低于明显微小错报临界值", row["差异形成原因"])
+        self.assertEqual(
+            "摘要为强证据45分，完整对方科目路径为中等证据25分；"
+            "两个来源相互独立并共同支持同一项目，合计70分。",
+            row["打分逻辑描述及打分结果"],
         )
 
 

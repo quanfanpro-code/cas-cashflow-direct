@@ -153,6 +153,66 @@ class NormalizationTests(unittest.TestCase):
             self.assertEqual(1, len(result.entries))
             self.assertEqual(100_00, result.entries[0].debit_cent)
 
+    def test_blank_summary_is_kept_as_illegal_input_and_warned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "摘要为空.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["发生额方向", "金额", "摘要", "科目名称", "现流项目"])
+            sheet.append(["贷", 100, None, "应付账款_供应商", "购买商品、接受劳务支付的现金"])
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+
+            result = normalize_dataset(path, "F-EMPTY-SUMMARY", mapping)
+
+            self.assertEqual(1, len(result.entries))
+            self.assertEqual(10_000, result.entries[0].credit_cent)
+            self.assertIn("summary_empty", result.entries[0].input_issues)
+            self.assertTrue(any("摘要为空" in item.message for item in result.warnings))
+
+    def test_blank_account_path_is_kept_and_is_not_reconstructed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "路径为空.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["发生额方向", "金额", "摘要", "科目名称", "现流项目"])
+            sheet.append(["贷", 100, "支付货款", None, "购买商品、接受劳务支付的现金"])
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+
+            result = normalize_dataset(path, "F-EMPTY-PATH", mapping)
+
+            self.assertEqual(1, len(result.entries))
+            self.assertEqual("", result.entries[0].account_name)
+            self.assertEqual("", result.entries[0].counterpart_name)
+            self.assertIn("account_path_empty", result.entries[0].input_issues)
+            self.assertTrue(any("对方科目路径为空" in item.message for item in result.warnings))
+
+    def test_only_real_merged_cells_inherit_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "合并与普通空白.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方"])
+            sheet.append(["2026-01-01", "记-1", "发放工资", "银行存款", None, 100])
+            sheet.append([None, None, None, "应付职工薪酬_工资", 100, None])
+            sheet.append(["2026-01-02", "记-2", None, "银行存款", None, 50])
+            sheet.merge_cells("A2:A3")
+            sheet.merge_cells("B2:B3")
+            sheet.merge_cells("C2:C3")
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+
+            result = normalize_dataset(path, "F-MERGED", mapping)
+
+            self.assertEqual("发放工资", result.entries[1].summary)
+            self.assertEqual("", result.entries[2].summary)
+            self.assertNotIn("summary_empty", result.entries[1].input_issues)
+            self.assertIn("summary_empty", result.entries[2].input_issues)
+
     def test_merged_and_blank_voucher_fields_stay_in_one_voucher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "合并凭证.xlsx"

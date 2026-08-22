@@ -7,11 +7,11 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from cashflow_direct.classification import load_rule_pack
+from cashflow_direct.classification import load_rule_pack, standardize_flow_item
 from cashflow_direct.pipeline import (
     confirm_cash_scope,
+    confirm_manual_decisions,
     finalize_run,
-    import_ai_results,
     run_classification,
     run_preflight,
 )
@@ -67,26 +67,29 @@ class QingpingRegressionTests(unittest.TestCase):
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
             self.assertEqual("相符", state["rough_reconciliation"]["status"])
             self.assertEqual(-10_926_170_61, state["rough_reconciliation"]["detail_sum_cent"])
-            ai_results = root / "AI结果.jsonl"
-            ai_results.write_text(
-                "".join(
-                    json.dumps(
-                        {
-                            "task_id": task["task_id"],
-                            "component_id": task["component_id"],
-                            "item_id": task["system_item_id"],
-                            "reason": "与系统首选一致",
-                            "confidence": "high",
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                    for task in state["ai_tasks"]
-                ),
-                encoding="utf-8-sig",
+            item_by_name = {
+                item.name: item.item_id
+                for item in load_rule_pack(Path(__file__).resolve().parents[1]).statement_items
+                if item.is_leaf
+            }
+            component_by_id = {
+                item["component_id"]: item for item in state["components"]
+            }
+            confirm_manual_decisions(
+                preflight.run_dir,
+                [
+                    {
+                        "component_id": decision["component_id"],
+                        "item_id": item_by_name[
+                            component_by_id[decision["component_id"]]["original_item_text"]
+                        ],
+                        "basis": "构造回归用例：人工复核后沿用来源文件中的原项目",
+                        "operator": "测试复核人",
+                    }
+                    for decision in state["decisions"]
+                    if not decision["resolved"] and not decision["excluded"]
+                ],
             )
-            imported = import_ai_results(preflight.run_dir, ai_results)
-            self.assertEqual("AI 已完成", imported.status)
             final = finalize_run(preflight.run_dir)
             self.assertNotIn("草稿", final.overall_status)
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
