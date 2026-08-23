@@ -4,12 +4,13 @@ import hashlib
 from pathlib import Path
 
 
-SCHEMA_VERSION = "3.7"
-SCORING_VERSION = "2026-08-23-two-source-independence-v12"
-ACTION_MATRIX_VERSION = "2026-08-23-authoritative-matrix-v13"
+SCHEMA_VERSION = "4.0"
+SCORING_VERSION = "2026-08-23-fixed-summary-semantics-v13"
+ACTION_MATRIX_VERSION = "2026-08-23-anomaly-clue-only-v14"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
-MATERIALITY_AND_ACCUMULATION_VERSION = "2026-08-23-single-item-plus-reliable-group-v1"
+SUMMARY_SEMANTICS_VERSION = "2026-08-23-seven-dictionaries-v2"
+MATERIALITY_VERSION = "2026-08-23-single-item-only-v2"
 FORCED_CHECKS_VERSION = "2026-08-23-forced-checks-v1"
 
 
@@ -30,12 +31,13 @@ def current_versions(project_root: Path) -> dict[str, str]:
         "action_matrix": ACTION_MATRIX_VERSION,
         "account_mapping": ACCOUNT_MAPPING_VERSION,
         "company_notes": COMPANY_NOTES_VERSION,
-        "materiality_and_accumulation": MATERIALITY_AND_ACCUMULATION_VERSION,
+        "summary_semantics": SUMMARY_SEMANTICS_VERSION,
+        "materiality": MATERIALITY_VERSION,
         "forced_checks": FORCED_CHECKS_VERSION,
         "rule_pack": _combined_sha256(
             (
                 references / "一般企业正表项目.json",
-                references / "直接法分类规则.json",
+                references / "摘要语义规则.json",
             )
         ),
         "account_dictionary": _combined_sha256(

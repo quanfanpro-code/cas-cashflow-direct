@@ -10,7 +10,6 @@ from cashflow_direct.intake import choose_input_files
 from cashflow_direct.pipeline import (
     confirm_company_notes,
     confirm_component_structure,
-    confirm_reversal_patterns,
     confirm_manual_decisions,
     confirm_account_mapping,
     confirm_mapping,
@@ -44,7 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
         "confirm-cash",
         "confirm-notes",
         "confirm-components",
-        "confirm-reversals",
         "import-component-ai",
         "supplement-cash",
         "scan-accounts",
@@ -71,12 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
                 "--decisions",
                 required=True,
                 help="业务组成候选确认 JSON；键为凭证，值为所选来源行编号数组",
-            )
-        elif name == "confirm-reversals":
-            command.add_argument(
-                "--decisions",
-                required=True,
-                help="退款或反向冲减确认 JSON；值为仅本次采用、长期采用或拒绝",
             )
         elif name == "import-component-ai":
             command.add_argument(
@@ -140,10 +132,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = confirm_company_notes(Path(arguments.run_dir), json.loads(arguments.decisions))
         elif arguments.command == "confirm-components":
             result = confirm_component_structure(
-                Path(arguments.run_dir), json.loads(arguments.decisions)
-            )
-        elif arguments.command == "confirm-reversals":
-            result = confirm_reversal_patterns(
                 Path(arguments.run_dir), json.loads(arguments.decisions)
             )
         elif arguments.command == "import-component-ai":

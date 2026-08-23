@@ -11,7 +11,9 @@ from cashflow_direct.models import (
     ClassificationDecision,
     MaterialityAmounts,
 )
-from cashflow_direct.classification import classify_all, load_rule_pack
+from cashflow_direct.account_dictionary import load_common_dictionary
+from cashflow_direct.classification import classify_all as _classify_all, load_rule_pack
+from cashflow_direct.summary_semantics import analyze_summary, load_summary_rules
 from tests.fixture_factory import cashflow_component
 
 
@@ -25,6 +27,21 @@ THRESHOLDS = MaterialityAmounts(
 def route_classification_decisions(*args, **kwargs):
     module = importlib.import_module("cashflow_direct.classification")
     return module.route_classification_decisions(*args, **kwargs)
+
+
+def classify_all(components, rules):
+    root = Path(__file__).resolve().parents[1]
+    semantics_rules = load_summary_rules(root)
+    semantics = {
+        component.summary: analyze_summary(component.summary, semantics_rules)
+        for component in components
+    }
+    return _classify_all(
+        components,
+        rules,
+        load_common_dictionary(root),
+        semantics,
+    )
 
 
 def _decision(
@@ -163,7 +180,7 @@ def test_automatic_keep_restores_original_item_in_the_result() -> None:
     assert kept.system_item_name == "支付其他与经营活动有关的现金"
 
 
-def test_builtin_purchase_refund_rule_is_an_approved_reversal() -> None:
+def test_small_refund_clue_keeps_the_valid_original_without_review() -> None:
     component = cashflow_component(
         "供应商退回采购款",
         50,
@@ -176,12 +193,13 @@ def test_builtin_purchase_refund_rule_is_an_approved_reversal() -> None:
         (component,), (_decision("REFUND", score=90),), THRESHOLDS
     )
 
-    assert result.decisions[0].direction_status == "approved_reversal"
+    assert result.decisions[0].direction_status == "incompatible"
     assert result.decisions[0].resolved is True
+    assert result.decisions[0].decision_action == "automatic_keep"
     assert result.ai_tasks == ()
 
 
-def test_unapproved_reverse_direction_still_requires_review() -> None:
+def test_unknown_reverse_direction_also_keeps_a_valid_small_original() -> None:
     component = cashflow_component(
         "反向收款",
         50,
@@ -195,17 +213,18 @@ def test_unapproved_reverse_direction_still_requires_review() -> None:
     )
 
     assert result.decisions[0].direction_status == "incompatible"
-    assert result.decisions[0].resolved is False
-    assert len(result.ai_tasks) == 1
+    assert result.decisions[0].resolved is True
+    assert result.decisions[0].decision_action == "automatic_keep"
+    assert result.ai_tasks == ()
 
 
-def test_component_anomaly_cannot_self_approve_a_reversal() -> None:
+def test_component_marker_cannot_create_a_special_refund_route() -> None:
     component = cashflow_component(
         "反向收款",
         50,
         ("应付账款_供应商",),
         original_item_text="购买商品、接受劳务支付的现金",
-        anomalies=("approved_reversal",),
+        anomalies=("历史退款标记",),
         component_id="FAKE-REVERSAL",
     )
 
@@ -214,7 +233,8 @@ def test_component_anomaly_cannot_self_approve_a_reversal() -> None:
     )
 
     assert result.decisions[0].direction_status == "incompatible"
-    assert result.decisions[0].approved_reversal_rule_ids == ()
+    assert result.decisions[0].decision_action == "automatic_keep"
+    assert not hasattr(result.decisions[0], "退款审批规则")
 
 
 def test_net_statement_item_missing_facts_does_not_reopen_valid_original() -> None:
@@ -285,7 +305,7 @@ def test_m2_agreement_does_not_require_ai_to_prove_the_original_can_stay() -> No
     assert result.ai_tasks == ()
 
 
-def test_same_class_cumulative_does_not_make_ai_reprove_an_unchanged_original() -> None:
+def test_same_class_items_keep_their_own_single_amount_levels() -> None:
     components = tuple(
         cashflow_component(
             "支付货款",
@@ -312,12 +332,12 @@ def test_same_class_cumulative_does_not_make_ai_reprove_an_unchanged_original() 
     )
 
     assert {item.materiality_level for item in result.decisions} == {"M0"}
-    assert {item.cumulative_materiality_level for item in result.decisions} == {"M1"}
+    assert all(not hasattr(item, "group_id") for item in result.decisions)
     assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
     assert result.ai_tasks == ()
 
 
-def test_cumulative_m3_finishes_normal_routing_before_final_excel_confirmation() -> None:
+def test_three_performance_level_items_do_not_create_an_overall_gate() -> None:
     components = tuple(
         cashflow_component(
             "支付货款",
@@ -342,15 +362,11 @@ def test_cumulative_m3_finishes_normal_routing_before_final_excel_confirmation()
 
     assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
     assert {item.single_materiality_level for item in result.decisions} == {"M2"}
-    assert {item.cumulative_materiality_level for item in result.decisions} == {"M3"}
-    assert len({item.materiality_group_id for item in result.decisions}) == 1
-    assert {item.materiality_group_confirmation_status for item in result.decisions} == {
-        "pending_in_final_workbook"
-    }
+    assert all(not hasattr(item, "group_id") for item in result.decisions)
     assert result.ai_tasks == ()
 
 
-def test_cumulative_m3_does_not_need_preclassification_group_confirmation() -> None:
+def test_repeated_items_have_no_separate_confirmation_state() -> None:
     components = tuple(
         cashflow_component(
             "支付货款",
@@ -376,13 +392,11 @@ def test_cumulative_m3_does_not_need_preclassification_group_confirmation() -> N
 
     assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
     assert {item.materiality_level for item in result.decisions} == {"M2"}
-    assert {item.materiality_group_confirmation_status for item in result.decisions} == {
-        "pending_in_final_workbook"
-    }
+    assert all(not hasattr(item, "group_confirmation_status") for item in result.decisions)
     assert result.ai_tasks == ()
 
 
-def test_potential_cumulative_m3_group_only_warns_and_uses_single_level() -> None:
+def test_repeated_uncertain_items_still_use_only_single_amount_level() -> None:
     components = tuple(
         cashflow_component(
             "支付往来款",
@@ -402,21 +416,14 @@ def test_potential_cumulative_m3_group_only_warns_and_uses_single_level() -> Non
 
     assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
     assert {item.materiality_level for item in result.decisions} == {"M2"}
-    assert {item.materiality_grouping_status for item in result.decisions} == {
-        "potential"
-    }
-    assert {item.cumulative_materiality_level for item in result.decisions} == {"M3"}
-    assert not any(
-        item.decision_action == "confirm_materiality_group"
-        for item in result.decisions
-    )
+    assert all(not hasattr(item, "grouping_status") for item in result.decisions)
 
 
 @pytest.mark.parametrize(
     "purpose",
     ("其他外部往来款", "其他收益", "进项税额", "共用进项税额"),
 )
-def test_broad_or_vat_purpose_never_becomes_reliable_group(purpose: str) -> None:
+def test_broad_or_vat_purpose_never_changes_single_amount_level(purpose: str) -> None:
     components = tuple(
         cashflow_component(
             "构造摘要",
@@ -434,9 +441,8 @@ def test_broad_or_vat_purpose_never_becomes_reliable_group(purpose: str) -> None
 
     result = route_classification_decisions(components, decisions, THRESHOLDS)
 
-    assert {item.materiality_grouping_status for item in result.decisions} == {
-        "potential"
-    }
+    assert {item.materiality_level for item in result.decisions} == {"M2"}
+    assert all(not hasattr(item, "grouping_status") for item in result.decisions)
 
 
 def test_single_m3_still_requires_individual_human_decision() -> None:
@@ -489,7 +495,7 @@ def test_different_business_objects_and_purposes_are_not_combined() -> None:
     assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
 
 
-def test_same_purpose_with_different_business_objects_is_not_combined() -> None:
+def test_same_purpose_with_different_business_objects_stays_per_item() -> None:
     components = tuple(
         cashflow_component(
             "支付日常维护款",
@@ -519,8 +525,8 @@ def test_same_purpose_with_different_business_objects_is_not_combined() -> None:
 
     result = route_classification_decisions(components, decisions, THRESHOLDS)
 
-    assert len({item.materiality_group_id for item in result.decisions}) == 2
-    assert {item.cumulative_materiality_level for item in result.decisions} == {"M0"}
+    assert {item.materiality_level for item in result.decisions} == {"M0"}
+    assert all(not hasattr(item, "group_id") for item in result.decisions)
 
 
 def test_source_conflict_keeps_valid_original_while_illegal_input_is_isolated() -> None:
@@ -536,7 +542,6 @@ def test_source_conflict_keeps_valid_original_while_illegal_input_is_isolated() 
         -500,
         ("应付账款_供应商",),
         component_id="ILLEGAL",
-        anomalies=("summary_empty",),
     )
     decisions = (
         _decision(
@@ -559,7 +564,7 @@ def test_source_conflict_keeps_valid_original_while_illegal_input_is_isolated() 
     assert by_id["ILLEGAL"].resolved is False
 
 
-def test_direction_conflict_ai_can_search_direction_compatible_candidates() -> None:
+def test_direction_clue_cannot_force_review_of_a_valid_original() -> None:
     component = cashflow_component(
         "支付设备维修款",
         -500,
@@ -575,10 +580,9 @@ def test_direction_conflict_ai_can_search_direction_compatible_candidates() -> N
         (component,), (decision,), THRESHOLDS
     )
 
-    assert result.decisions[0].decision_action == "ai_review"
+    assert result.decisions[0].decision_action == "automatic_keep"
     assert result.decisions[0].direction_status == "incompatible"
-    assert "CFO-07" in result.ai_tasks[0].candidate_item_ids
-    assert set(result.ai_tasks[0].candidate_item_ids) != {"CFO-01"}
+    assert result.ai_tasks == ()
 
 
 def test_explicit_exclusion_bypasses_the_scoring_matrix() -> None:
@@ -793,7 +797,7 @@ def test_vat_without_a_base_transaction_cannot_reclassify_a_valid_original() -> 
     assert result.ai_tasks == ()
 
 
-def test_overall_material_new_reversal_waits_for_agent_confirmation() -> None:
+def test_overall_material_refund_clue_uses_the_normal_human_route() -> None:
     component = cashflow_component(
         "供应商退回设备款",
         20_000,
@@ -813,12 +817,12 @@ def test_overall_material_new_reversal_waits_for_agent_confirmation() -> None:
         (component,), (decision,), THRESHOLDS
     )
 
-    assert result.decisions[0].decision_action == "confirm_reversal_rule"
-    assert result.decisions[0].new_reversal_pattern is True
+    assert result.decisions[0].decision_action == "human_decision"
+    assert not hasattr(result.decisions[0], "refund_pattern")
     assert result.ai_tasks == ()
 
 
-def test_returned_fee_is_recognized_as_a_new_reversal_pattern() -> None:
+def test_small_returned_fee_uses_the_normal_blank_item_route() -> None:
     component = cashflow_component(
         "退还手续费",
         50,
@@ -840,6 +844,6 @@ def test_returned_fee_is_recognized_as_a_new_reversal_pattern() -> None:
         (component,), (decision,), THRESHOLDS
     )
 
-    assert result.decisions[0].new_reversal_pattern is True
-    assert result.decisions[0].decision_action == "ai_review"
-    assert result.ai_tasks[0].allow_one_time_reversal is True
+    assert result.decisions[0].decision_action == "automatic_fill"
+    assert not hasattr(result.decisions[0], "refund_pattern")
+    assert result.ai_tasks == ()

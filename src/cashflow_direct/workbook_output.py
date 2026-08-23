@@ -15,11 +15,6 @@ from xlsxwriter.utility import xl_col_to_name
 from cashflow_direct.classification import RulePack
 from cashflow_direct.duplicates import DuplicateGroup
 from cashflow_direct.models import ReviewBatch
-from cashflow_direct.materiality_group_workbook import (
-    CONFIRM_GROUP,
-    GROUP_CONFIRMATION_SHEET,
-    write_materiality_group_sheet,
-)
 from cashflow_direct.money import statement_amount_cent
 from cashflow_direct.statement import (
     ReconciliationResult,
@@ -33,7 +28,6 @@ SHEET_NAMES = (
     "现金流量表正表",
     "正表核对报告",
     "重要待复核事项",
-    GROUP_CONFIRMATION_SHEET,
     "疑似重复事项",
     "AI复核记录",
     "原表与系统决定差异",
@@ -88,21 +82,12 @@ REVIEW_HEADERS = (
     "证据质量说明",
     "证据得分",
     "单笔金额",
-    "同类累计金额",
-    "有效重要性层级",
     "单笔重要性层级",
-    "累计重要性层级",
-    "累计重大组编号",
-    "累计重大组确认状态",
-    "同类累计性质",
-    "同类累计判断依据",
     "强制检查",
     "唯一动作",
     "异常",
     "批次最不利影响金额",
     "批次现金变化金额",
-    "同类分组",
-    "同类批次原因",
     "人工可选标准项目",
     "人工确认项目",
     "明确排除原因",
@@ -159,10 +144,6 @@ class WorkbookModel:
     unconfirmed_statement: bool = False
     dictionary_rows: tuple[Mapping[str, object], ...] = ()
     consistency_rows: tuple[Mapping[str, object], ...] = ()
-    materiality_group_requests: tuple[Mapping[str, object], ...] = ()
-    materiality_group_components: tuple[Mapping[str, object], ...] = ()
-    materiality_group_decisions: tuple[Mapping[str, object], ...] = ()
-    materiality_group_assessments: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,14 +312,6 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     workbook.set_calc_mode("auto")
     formats = _formats(workbook)
     sheets = {name: workbook.add_worksheet(name) for name in SHEET_NAMES}
-    write_materiality_group_sheet(
-        workbook,
-        sheets[GROUP_CONFIRMATION_SHEET],
-        model.materiality_group_requests,
-        model.materiality_group_components,
-        model.materiality_group_decisions,
-        model.materiality_group_assessments,
-    )
     item_name_by_id = {
         item.item_id: item.name for item in model.rules.statement_items
     }
@@ -375,7 +348,6 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         elif (
             model.review_batches
             or model.duplicate_groups
-            or model.materiality_group_requests
             or reconciliation_complete
         ):
             review_end = max(2, len(model.review_batches) + 1)
@@ -393,11 +365,6 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 pending_terms.append(
                     f'COUNTIFS(\'疑似重复事项\'!G2:G{duplicate_end},"是",'
                     f'\'疑似重复事项\'!H2:H{duplicate_end},"待确认")'
-                )
-            if model.materiality_group_requests:
-                group_end = len(model.materiality_group_requests) + 7
-                pending_terms.append(
-                    f'COUNTIF(\'{GROUP_CONFIRMATION_SHEET}\'!B8:B{group_end},"<>{CONFIRM_GROUP}")'
                 )
             completed_value = '"最终可使用"'
             if reconciliation_complete:
@@ -527,23 +494,10 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "证据质量说明": review_fact(batch, "证据质量说明"),
                     "证据得分": review_fact(batch, "证据得分"),
                     "单笔金额": abs(batch.cash_delta_cent) / 100,
-                    "同类累计金额": review_fact(batch, "同类累计金额"),
-                    "有效重要性层级": review_fact(batch, "有效重要性层级"),
                     "单笔重要性层级": review_fact(batch, "单笔重要性层级"),
-                    "累计重要性层级": review_fact(batch, "累计重要性层级"),
-                    "累计重大组编号": review_fact(batch, "累计重大组编号"),
-                    "累计重大组确认状态": review_fact(
-                        batch, "累计重大组确认状态"
-                    ),
-                    "同类累计性质": review_fact(batch, "同类累计性质"),
-                    "同类累计判断依据": review_fact(
-                        batch, "同类累计判断依据"
-                    ),
                     "强制检查": review_fact(batch, "强制检查"),
                     "唯一动作": review_fact(batch, "唯一动作"),
                     "异常": review_fact(batch, "异常"),
-                    "同类分组": batch.counterpart_group or "无单独分组",
-                    "同类批次原因": batch.reason,
                     "人工可选标准项目": "、".join(
                         (*selectable_names, "明确排除")
                     ),
@@ -558,7 +512,6 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                             "流量金额（原币）",
                             "本行分配现金变化",
                             "单笔金额",
-                            "同类累计金额",
                         }
                         and isinstance(value, (int, float))
                         else formats["text"]
@@ -695,20 +648,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             "两个来源是否独立",
             "证据质量说明",
             "证据得分",
-            "同类累计金额",
-            "有效重要性层级",
             "单笔重要性层级",
-            "累计重要性层级",
-            "累计重大组编号",
-            "累计重大组确认状态",
-            "同类累计性质",
-            "同类累计判断依据",
             "强制检查",
             "唯一动作",
             "批次最不利影响金额",
             "批次现金变化金额",
-            "同类分组",
-            "同类批次原因",
             "明确排除原因",
             "人工依据",
             "外部资料位置",
@@ -1052,7 +996,6 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             "证据质量说明",
             "证据得分",
             "单笔金额",
-            "同类累计金额",
             "强制检查",
             "异常",
             "AI复核过程",

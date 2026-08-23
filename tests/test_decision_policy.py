@@ -1,10 +1,37 @@
 from __future__ import annotations
 
 import importlib
+import unittest
 
 import pytest
 
 from cashflow_direct.models import MaterialityAmounts
+
+
+class AnomalyClueRoutingTests(unittest.TestCase):
+    def test_direction_clue_cannot_displace_valid_original_without_change_evidence(self) -> None:
+        policy = _policy()
+        route = policy.route_decision(
+            score=45,
+            original_state=policy.OriginalItemState.CONFLICTS,
+            materiality=policy.MaterialityLevel.M0,
+            direction_status="incompatible",
+        )
+
+        self.assertIs(policy.DecisionAction.AUTOMATIC_KEEP, route.action)
+        self.assertEqual("", route.forced_check)
+
+    def test_direction_clue_cannot_block_a_change_supported_by_two_sources(self) -> None:
+        policy = _policy()
+        route = policy.route_decision(
+            score=70,
+            original_state=policy.OriginalItemState.CONFLICTS,
+            materiality=policy.MaterialityLevel.M0,
+            direction_status="incompatible",
+        )
+
+        self.assertIs(policy.DecisionAction.AUTOMATIC_CHANGE, route.action)
+        self.assertEqual("", route.forced_check)
 
 
 def _policy():
@@ -501,7 +528,6 @@ def test_forced_checks_run_before_the_normal_action_table() -> None:
         ({"company_rule_conflict": True}, "human_decision", "company_rule_conflict"),
         ({"vat_base_missing": True}, "automatic_keep", "vat_base_missing"),
         ({"net_item_facts_missing": True}, "automatic_keep", "net_item_facts_missing"),
-        ({"direction_status": "incompatible"}, "ai_review", "direction"),
     )
     for changes, expected_action, expected_check in cases:
         arguments = {
@@ -598,30 +624,28 @@ def test_unknown_individual_tax_service_uses_its_own_forced_route(
     assert route.forced_check == "individual_tax_service"
 
 
-def test_approved_reversal_returns_to_the_normal_action_table() -> None:
+def test_removed_direction_status_value_is_rejected() -> None:
     policy = _policy()
 
-    route = policy.route_decision(
-        score=90,
-        original_state=policy.OriginalItemState.AGREES,
-        materiality=policy.MaterialityLevel.M0,
-        direction_status="approved_reversal",
-    )
-
-    assert route.action.value == "automatic_keep"
-    assert route.forced_check == ""
+    with pytest.raises(ValueError, match="方向状态"):
+        policy.route_decision(
+            score=90,
+            original_state=policy.OriginalItemState.AGREES,
+            materiality=policy.MaterialityLevel.M0,
+            direction_status="已批准反向模式",
+        )
 
 
 @pytest.mark.parametrize(
     ("level", "expected_action"),
     [
-        ("M0", "ai_review"),
+        ("M0", "automatic_fill"),
         ("M1", "ai_review"),
-        ("M2", "double_ai_review"),
+        ("M2", "ai_review"),
         ("M3", "human_decision"),
     ],
 )
-def test_direction_incompatibility_uses_its_dedicated_route(
+def test_direction_incompatibility_uses_the_normal_action_table(
     level: str, expected_action: str
 ) -> None:
     policy = _policy()
@@ -634,34 +658,16 @@ def test_direction_incompatibility_uses_its_dedicated_route(
     )
 
     assert route.action.value == expected_action
-    assert route.forced_check == "direction"
-    assert route.review_policy == (
-        "direction_compatibility" if "ai" in expected_action else ""
-    )
+    assert route.forced_check == ""
 
 
-@pytest.mark.parametrize(
-    ("level", "expected_action", "expected_policy"),
-    [
-        ("M0", "ai_review", "reversal_one_time"),
-        ("M1", "ai_review", "reversal_one_time"),
-        ("M2", "double_ai_review", "reversal_one_time"),
-        ("M3", "confirm_reversal_rule", ""),
-    ],
-)
-def test_new_reversal_pattern_uses_ai_only_for_current_item_below_overall(
-    level: str, expected_action: str, expected_policy: str
-) -> None:
+def test_removed_refund_route_argument_is_not_part_of_the_policy_api() -> None:
     policy = _policy()
 
-    route = policy.route_decision(
-        score=70,
-        original_state=policy.OriginalItemState.BLANK,
-        materiality=policy.MaterialityLevel(level),
-        direction_status="incompatible",
-        new_reversal_pattern=True,
-    )
-
-    assert route.action.value == expected_action
-    assert route.review_policy == expected_policy
-    assert route.forced_check == "new_reversal"
+    with pytest.raises(TypeError):
+        policy.route_decision(
+            score=70,
+            original_state=policy.OriginalItemState.BLANK,
+            materiality=policy.MaterialityLevel.M1,
+            已移除退款专用路由=True,
+        )

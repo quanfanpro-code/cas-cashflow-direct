@@ -100,7 +100,6 @@ class ClassificationDecision:
     vat_base_missing: bool = False
     net_item_facts_missing: bool = False
     individual_tax_fact_missing: bool = False
-    new_reversal_pattern: bool = False
     direction_status: str = "compatible"
     decision_action: str = ""
     ai_review_policy: str = ""
@@ -110,12 +109,6 @@ class ClassificationDecision:
     candidate_status: str = "available"
     original_standard_item_id: str = ""
     single_materiality_level: str = ""
-    cumulative_materiality_level: str = ""
-    materiality_group_id: str = ""
-    materiality_group_confirmation_status: str = "not_required"
-    materiality_grouping_status: str = ""
-    materiality_grouping_reason: str = ""
-    approved_reversal_rule_ids: tuple[str, ...] = ()
 
     @property
     def item_code(self) -> str:
@@ -167,8 +160,6 @@ class AITask:
     system_item_id: str
     rule_evidence: str
     candidate_item_ids: tuple[str, ...] = ()
-    approved_reversal_rule_ids: tuple[str, ...] = ()
-    allow_one_time_reversal: bool = False
     summary_candidate_item_ids: tuple[str, ...] | None = None
     account_path_candidate_item_ids: tuple[str, ...] | None = None
 

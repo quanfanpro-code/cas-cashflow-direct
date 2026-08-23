@@ -87,11 +87,7 @@ def _forced_check(
         return "净额列报事实缺失"
     if any(item.individual_tax_fact_missing for item in decisions):
         return "个税服务对象不明"
-    if any(item.new_reversal_pattern for item in decisions):
-        return "新的退款或反向冲减模式待确认"
-    if any(item.direction_status == "incompatible" for item in decisions):
-        return "现金方向不相容"
-    return "无"
+    return ""
 
 
 def _scope_status(account_name: str, state: Mapping[str, object]) -> str:
@@ -276,10 +272,8 @@ def build_trace_rows(
             anomalies.append("两个来源冲突")
         if primary_decision is not None and primary_decision.business_conflict:
             anomalies.append("业务事实冲突")
-        if primary_decision is not None and primary_decision.new_reversal_pattern:
-            anomalies.append("新的退款或反向冲减模式")
         if primary_decision is not None and primary_decision.direction_status == "incompatible":
-            anomalies.append("现金方向与候选项目不相容")
+            anomalies.append("现金方向与候选项目不相容（仅异常线索）")
         anomaly_text = "、".join(dict.fromkeys(anomalies)) if anomalies else "未发现异常"
         if primary_decision is None:
             current_process = "系统尚未形成候选，等待人工复核。"
@@ -488,50 +482,10 @@ def build_trace_rows(
                     if assessment
                     else ()
                 ),
-                "同类累计金额": _unique_text(
-                    (int(assessment.get("same_class_total_cent", 0)) / 100,)
-                    if assessment
-                    else ()
-                ),
-                "有效重要性层级": _unique_text(
-                    (
-                        _MATERIALITY_TEXT.get(
-                            str(assessment.get("single_level", "")),
-                            str(assessment.get("single_level", "")),
-                        ),
-                    )
-                    if assessment
-                    else ()
-                ),
                 "单笔重要性层级": _MATERIALITY_TEXT.get(
                     primary_decision.single_materiality_level,
                     primary_decision.single_materiality_level,
                 ) if primary_decision is not None else "",
-                "累计重要性层级": _MATERIALITY_TEXT.get(
-                    primary_decision.cumulative_materiality_level,
-                    primary_decision.cumulative_materiality_level,
-                ) if primary_decision is not None else "",
-                "累计重大组编号": (
-                    primary_decision.materiality_group_id
-                    if primary_decision is not None else ""
-                ),
-                "累计重大组确认状态": (
-                    primary_decision.materiality_group_confirmation_status
-                    if primary_decision is not None else ""
-                ),
-                "同类累计性质": (
-                    "可靠同类组"
-                    if primary_decision is not None
-                    and primary_decision.materiality_grouping_status == "reliable"
-                    else "潜在累计组（仅风险提示）"
-                    if primary_decision is not None
-                    and primary_decision.materiality_grouping_status == "potential"
-                    else ""
-                ),
-                "同类累计判断依据": (
-                    primary_decision.materiality_grouping_reason
-                    if primary_decision is not None else ""
-                ),
                 "强制检查": _forced_check((component,), related_decisions),
                 "唯一动作": action_text,
                 "异常": anomaly_text,

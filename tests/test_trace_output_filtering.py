@@ -61,7 +61,6 @@ def _rules() -> RulePack:
                 (),
             ),
         ),
-        (),
     )
 
 
@@ -102,7 +101,6 @@ def _materiality(component_id: str) -> tuple[dict[str, object], ...]:
         {
             "record_id": component_id,
             "single_amount_cent": 10_000,
-            "same_class_total_cent": 10_000,
             "single_level": "M1",
         },
     )
@@ -122,7 +120,7 @@ def test_scope_status_recognizes_the_customer_name_kept_after_mapping() -> None:
     assert _scope_status("客户银行款_一般户", state) == "现金及现金等价物范围内"
 
 
-def test_trace_names_a_new_reversal_pattern_instead_of_hiding_it_as_direction_error() -> None:
+def test_trace_names_direction_mismatch_as_an_anomaly_clue_only() -> None:
     cash = _entry(
         "E-CASH-REVERSAL",
         8,
@@ -152,9 +150,8 @@ def test_trace_names_a_new_reversal_pattern_instead_of_hiding_it_as_direction_er
     decision = replace(
         _decision(component.component_id),
         direction_status="incompatible",
-        new_reversal_pattern=True,
-        resolved=False,
-        decision_action="confirm_reversal_rule",
+        resolved=True,
+        decision_action="automatic_keep",
     )
 
     row = build_trace_rows(
@@ -168,8 +165,8 @@ def test_trace_names_a_new_reversal_pattern_instead_of_hiding_it_as_direction_er
         {"F1": "匿名序时账.xlsx"},
     )[0]
 
-    assert row["强制检查"] == "新的退款或反向冲减模式待确认"
-    assert "新的退款或反向冲减模式" in row["异常"]
+    assert row["强制检查"] == ""
+    assert row["异常"] == "现金方向与候选项目不相容（仅异常线索）"
 
 
 def test_trace_displays_m1_individual_tax_batch_as_general_human_batch() -> None:

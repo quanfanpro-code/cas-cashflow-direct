@@ -10,6 +10,19 @@
     {"account": "回购义务", "semantic": "股份回购筹资义务", "item_id": "CFF-06", "basis": "同上", "confidence": "medium", "layer": "common"},
     {"account": "进项税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "知识库：进项税额是交易对价的一部分，不单独成税费", "confidence": "high", "layer": "common"},
     {"account": "销项税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "知识库：销项税额是销售收入的一部分", "confidence": "high", "layer": "common"},
-    {"account": "应交增值税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "同上", "confidence": "high", "layer": "common"}
+    {"account": "应交增值税", "semantic": "增值税随交易对价归类", "item_id": "", "basis": "同上", "confidence": "high", "layer": "common"},
+    {"account": "主营业务收入", "semantic": "销售商品或提供劳务收入", "item_id": "CFO-01", "basis": "准则31号：销售商品、提供劳务收到的现金归经营活动", "confidence": "high", "layer": "common"},
+    {"account": "合同负债", "semantic": "客户合同预收与退款", "item_id": "CFO-01", "basis": "准则31号：客户合同预收与退款随销售业务列报", "confidence": "medium", "layer": "common"},
+    {"account": "财务费用-利息收入", "semantic": "银行存款利息收入", "item_id": "CFO-03", "basis": "准则31号：企业银行存款利息属于经营活动其他流入", "confidence": "high", "layer": "common"},
+    {"account": "投资收益", "semantic": "投资收益现金流入", "item_id": "CFI-02", "basis": "准则31号：取得投资收益收到的现金归投资活动", "confidence": "high", "layer": "common"},
+    {"account": "原材料", "semantic": "购买商品形成的存货", "item_id": "CFO-04", "basis": "准则31号：购买商品支付的现金归经营活动", "confidence": "high", "layer": "common"},
+    {"account": "生产成本", "semantic": "生产经营投入", "item_id": "CFO-04", "basis": "准则31号：生产经营相关商品和劳务支付归经营活动", "confidence": "medium", "layer": "common"},
+    {"account": "罚款、滞纳金", "semantic": "经营活动罚款及滞纳金支出", "item_id": "CFO-07", "basis": "准则31号：罚款支出归其他经营活动现金流出", "confidence": "high", "layer": "common"},
+    {"account": "在建工程", "semantic": "资本化工程建设", "item_id": "CFI-06", "basis": "准则31号：购建固定资产支付的现金归投资活动", "confidence": "high", "layer": "common"},
+    {"account": "资本化", "semantic": "资本化工程建设", "item_id": "CFI-06", "basis": "准则31号：资本化购建支出归投资活动", "confidence": "medium", "layer": "common"},
+    {"account": "短期借款", "semantic": "银行借款本金", "item_id": "", "basis": "准则31号：取得借款与偿还债务本金分别归筹资活动流入和流出", "confidence": "high", "layer": "common", "inflow_item_id": "CFF-02", "outflow_item_id": "CFF-04"},
+    {"account": "长期借款", "semantic": "长期借款本金", "item_id": "", "basis": "准则31号：取得借款与偿还债务本金分别归筹资活动流入和流出", "confidence": "high", "layer": "common", "inflow_item_id": "CFF-02", "outflow_item_id": "CFF-04"},
+    {"account": "应付利息", "semantic": "应付借款利息", "item_id": "CFF-05", "basis": "准则31号：偿付利息支付的现金归筹资活动", "confidence": "high", "layer": "common"},
+    {"account": "利息支出", "semantic": "借款利息支出", "item_id": "CFF-05", "basis": "准则31号：偿付利息支付的现金归筹资活动", "confidence": "high", "layer": "common"}
   ]
 }

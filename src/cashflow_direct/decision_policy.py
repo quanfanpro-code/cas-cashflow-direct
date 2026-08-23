@@ -48,7 +48,6 @@ class DecisionAction(StrEnum):
     LOW_AMOUNT_HUMAN_BATCH = "low_amount_human_batch"
     HUMAN_BATCH = "human_batch"
     HUMAN_DECISION = "human_decision"
-    CONFIRM_REVERSAL_RULE = "confirm_reversal_rule"
     ISOLATE_INVALID_INPUT = "isolate_invalid_input"
     CONFIRM_CASH_SCOPE = "confirm_cash_scope"
 
@@ -393,14 +392,6 @@ def route_normal_decision(
     )
 
 
-def _review_action(materiality: MaterialityLevel) -> DecisionAction:
-    if materiality is MaterialityLevel.M2:
-        return DecisionAction.DOUBLE_AI_REVIEW
-    if materiality is MaterialityLevel.M3:
-        return DecisionAction.HUMAN_DECISION
-    return DecisionAction.AI_REVIEW
-
-
 def route_decision(
     score: int | None,
     original_state: OriginalItemState,
@@ -411,7 +402,6 @@ def route_decision(
     company_rule_conflict: bool = False,
     vat_base_missing: bool = False,
     net_item_facts_missing: bool = False,
-    new_reversal_pattern: bool = False,
     source_conflict: bool = False,
     business_conflict: bool = False,
     individual_tax_fact_missing: bool = False,
@@ -524,35 +514,7 @@ def route_decision(
             else DecisionAction.HUMAN_DECISION
         )
         return DecisionRoute(action, frozenset(), forced_check="business_conflict")
-    if direction_status == "incompatible" and new_reversal_pattern:
-        action = (
-            DecisionAction.CONFIRM_REVERSAL_RULE
-            if materiality is MaterialityLevel.M3
-            else _review_action(materiality)
-        )
-        return DecisionRoute(
-            action,
-            frozenset(),
-            forced_check="new_reversal",
-            review_policy=(
-                "reversal_one_time"
-                if action in {DecisionAction.AI_REVIEW, DecisionAction.DOUBLE_AI_REVIEW}
-                else ""
-            ),
-        )
-    if direction_status == "incompatible":
-        action = _review_action(materiality)
-        return DecisionRoute(
-            action,
-            frozenset(),
-            forced_check="direction",
-            review_policy=(
-                "direction_compatibility"
-                if action in {DecisionAction.AI_REVIEW, DecisionAction.DOUBLE_AI_REVIEW}
-                else ""
-            ),
-        )
-    if direction_status not in {"compatible", "approved_reversal"}:
+    if direction_status not in {"compatible", "incompatible"}:
         raise ValueError(f"不允许的现金方向状态：{direction_status}")
     if score is None:
         raise ValueError("无可用证据分数时必须给出来源冲突或其他强制检查")

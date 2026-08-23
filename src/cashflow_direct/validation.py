@@ -64,7 +64,6 @@ def validate_classification(
         DecisionAction.HUMAN_DECISION.value,
         DecisionAction.ISOLATE_INVALID_INPUT.value,
         DecisionAction.CONFIRM_CASH_SCOPE.value,
-        DecisionAction.CONFIRM_REVERSAL_RULE.value,
     }
     for item in decisions:
         if item.excluded:

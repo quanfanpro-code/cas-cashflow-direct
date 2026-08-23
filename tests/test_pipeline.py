@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook
 from openpyxl import load_workbook
@@ -33,6 +34,54 @@ from tests.fixture_factory import (
     write_existing_statement_fixture,
 )
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
+from cashflow_direct.summary_semantics import (
+    analyze_summary,
+    build_summary_agent_task,
+    load_summary_rules,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class SummarySemanticsPipelineTests(unittest.TestCase):
+    def test_summary_import_rejects_agent_accounting_decision_fields(self) -> None:
+        unresolved = analyze_summary(
+            "代甲方向乙方转处理尾款",
+            load_summary_rules(ROOT),
+        )
+        task = build_summary_agent_task(unresolved)
+        self.assertIsNotNone(task)
+        state = {
+            "summary_semantics": {
+                "tasks": [task],
+                "results": [pipeline_module._summary_result_to_dict(unresolved)],
+                "missing_ids": [task["task_id"]],
+            },
+            "summary_semantics_completed": False,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "摘要补槽位.jsonl"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task["task_id"],
+                        "summary": unresolved.summary,
+                        "item_id": "CFO-07",
+                        "spans": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8-sig",
+            )
+            with (
+                patch.object(pipeline_module, "_load_state", return_value=state),
+                patch.object(pipeline_module, "_assert_inputs_unchanged"),
+                patch.object(pipeline_module, "_save_state"),
+            ):
+                with self.assertRaisesRegex(ValueError, "不得返回"):
+                    import_summary_results(Path(tmp), result_path)
 
 
 def test_dictionary_display_uses_the_confirmed_full_path_result() -> None:
@@ -555,7 +604,7 @@ class PipelineTests(unittest.TestCase):
                     "1",
                     "支付税收滞纳金",
                     "6711",
-                    "营业外支出",
+                    "营业外支出_罚款、滞纳金",
                     100,
                     None,
                     "客户自定义项目",
@@ -606,7 +655,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(100, row["借方"])
                 self.assertIsNone(row["流量金额（原币）"])
                 self.assertEqual(
-                    "证据得分70分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
+                    "证据得分90分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
                     row["差异形成原因"],
                 )
             finally:
@@ -1225,17 +1274,33 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(2, classified.ai_tasks_missing)
             request_path = preflight.run_dir / "计算留痕数据" / "AI复核请求_第01批.jsonl"
             self.assertTrue(request_path.is_file())
-            self.assertIn("task_id", request_path.read_text(encoding="utf-8-sig"))
+            request_rows = tuple(
+                json.loads(line)
+                for line in request_path.read_text(encoding="utf-8-sig").splitlines()
+            )
+            self.assertTrue(request_rows)
+            forbidden_fields = {
+                "original_item",
+                "system_item_id",
+                "rule_evidence",
+                "candidate_item_ids",
+                "summary_candidate_item_ids",
+                "account_path_candidate_item_ids",
+            }
+            self.assertTrue(
+                all(not forbidden_fields.intersection(row) for row in request_rows)
+            )
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
             initial_decision = state["decisions"][0]
-            self.assertEqual("CFO-03", initial_decision["system_item_id"])
+            self.assertEqual("", initial_decision["system_item_id"])
+            self.assertEqual("no_candidate", initial_decision["candidate_status"])
             tasks = state["ai_tasks"]
             invented_result = root / "AI越界结果.jsonl"
             invented_result.write_text(
                 json.dumps(
                     _structured_ai_payload(
-                        tasks[0], candidate_item_id="CFI-05"
+                        tasks[0], candidate_item_id="CFO-04"
                     ),
                     ensure_ascii=False,
                 )
@@ -1261,7 +1326,7 @@ class PipelineTests(unittest.TestCase):
             final = finalize_run(preflight.run_dir)
             self.assertEqual("最终可使用", final.overall_status)
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-            self.assertEqual("CFO-03", state["decisions"][0]["system_item_id"])
+            self.assertEqual("CFO-01", state["decisions"][0]["system_item_id"])
             self.assertEqual(90, state["decisions"][0]["evidence_score"])
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
@@ -1313,7 +1378,7 @@ class PipelineTests(unittest.TestCase):
                         (state["decisions"][0]["component_id"],),
                     ).fetchone()[0]
                 )
-                self.assertEqual("CFO-03", final_payload["system_item_id"])
+                self.assertEqual("CFO-01", final_payload["system_item_id"])
             finally:
                 connection.close()
 
@@ -1369,7 +1434,7 @@ class PipelineTests(unittest.TestCase):
                     row
                     for row in range(4, main.max_row + 1)
                     if main.cell(row, 2).value
-                    == "收到其他与经营活动有关的现金"
+                    == "销售商品、提供劳务收到的现金"
                 )
                 self.assertNotEqual(0, main.cell(proposed_row, 4).value)
                 self.assertNotIn("来源文件", headers)
@@ -1498,74 +1563,17 @@ class PipelineTests(unittest.TestCase):
             import_result = import_dictionary_results(preflight.run_dir, result_path)
             self.assertEqual("科目语义已导入", import_result["status"])
             second = run_classification(preflight.run_dir)
-            self.assertEqual("待摘要语义确认", second.status)
+            self.assertNotEqual("待摘要语义确认", second.status)
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
-            self.assertGreater(len(state["summary_dictionary"]["tasks"]), 0)
+            self.assertEqual([], state["summary_semantics"]["tasks"])
+            summary_result = state["summary_semantics"]["results"][0]
+            self.assertEqual("rule_complete", summary_result["status"])
+            self.assertEqual(["CFI-06"], summary_result["candidate_item_ids"])
+            self.assertEqual(25, summary_result["quality"])
             self.assertEqual("科目语义词典说明.md", (preflight.run_dir / "科目语义词典说明.md").name)
             self.assertTrue((preflight.run_dir / "科目语义词典说明.md").is_file())
-            summary_path = root / "摘要语义结果.jsonl"
-            summary_path.write_text(
-                "".join(
-                    json.dumps(
-                        {
-                            "task_id": task["task_id"],
-                            "summary": task["summary"],
-                            "semantic": "购建设备",
-                            "item_id": "CFI-06",
-                            "confidence": "high",
-                            "basis": f"摘要原文“{task['summary']}”明确表示支付设备款",
-                            "classification_facts": ["object:设备", "purpose:购建长期资产"],
-                        },
-                        ensure_ascii=False,
-                    ) + "\n"
-                    for task in state["summary_dictionary"]["tasks"]
-                ),
-                encoding="utf-8-sig",
-            )
-            rejected_summary = import_summary_results(preflight.run_dir, summary_path)
-            self.assertEqual("AI 未完成", rejected_summary["status"])
-            summary_path.write_text(
-                "".join(
-                    json.dumps(
-                        {
-                            "task_id": task["task_id"],
-                            "summary": task["summary"],
-                            "semantic": "购建设备",
-                            "item_id": "CFI-06",
-                            "confidence": "high",
-                            "basis": f"摘要原文“{task['summary']}”明确表示支付设备款",
-                            "standard_basis": (
-                                "《企业会计准则第31号——现金流量表》第十三条："
-                                "购建固定资产、无形资产和其他长期资产支付的现金（CFI-06）"
-                            ),
-                            "classification_facts": ["object:设备", "purpose:购建长期资产"],
-                            "negation": [],
-                            "uncertainty": [],
-                            "conditionality": [],
-                            "source_spans": [task["summary"]],
-                        },
-                        ensure_ascii=False,
-                    ) + "\n"
-                    for task in state["summary_dictionary"]["tasks"]
-                ),
-                encoding="utf-8-sig",
-            )
-            summary_import = import_summary_results(preflight.run_dir, summary_path)
-            self.assertEqual("摘要语义已导入", summary_import["status"])
-            state = json.loads(
-                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
-                    encoding="utf-8-sig"
-                )
-            )
-            summary_result = state["summary_dictionary"]["valid_results"][0]
-            self.assertEqual([], summary_result["negation"])
-            self.assertEqual([], summary_result["uncertainty"])
-            self.assertEqual([], summary_result["conditionality"])
-            self.assertTrue(summary_result["source_spans"])
-            third = run_classification(preflight.run_dir)
-            self.assertNotEqual("待摘要语义确认", third.status)
 
     def test_company_notes_gate_and_injection(self) -> None:
         # 传入 --notes 后，未 confirm-notes 前 scan-accounts 停在待确认；确认后注意事项进入词典批次 context（Task 5B）

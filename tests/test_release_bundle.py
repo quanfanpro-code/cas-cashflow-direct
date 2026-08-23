@@ -16,10 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseBundleTests(unittest.TestCase):
-    def test_version_bundle_covers_accumulation_and_forced_checks(self) -> None:
+    def test_version_bundle_covers_summary_semantics_single_item_materiality_and_forced_checks(self) -> None:
         versions = current_versions(ROOT)
 
-        self.assertTrue(versions["materiality_and_accumulation"])
+        self.assertTrue(versions["summary_semantics"])
+        self.assertTrue(versions["materiality"])
         self.assertTrue(versions["forced_checks"])
 
     def test_release_contains_only_runtime_whitelist_and_runs_independently(self) -> None:

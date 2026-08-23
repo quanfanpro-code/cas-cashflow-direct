@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -16,47 +15,13 @@ from cashflow_direct.money import stable_id
 class MaterialityRecord:
     record_id: str
     amount_cent: int
-    cash_direction: str
-    candidate_item_id: str
-    standard_level1_account: str
-    business_object: str
-    purpose: str
-    grouping_reliable: bool = True
-    grouping_reason: str = ""
-
-    def __post_init__(self) -> None:
-        if self.cash_direction not in {"inflow", "outflow"}:
-            raise ValueError("现金方向只能是 inflow 或 outflow")
 
 
 @dataclass(frozen=True, slots=True)
 class MaterialityAssessment:
     record_id: str
     single_amount_cent: int
-    same_class_total_cent: int
     single_level: MaterialityLevel
-    cumulative_level: MaterialityLevel
-    group_key: tuple[str, ...]
-    group_id: str
-    grouping_status: str
-    grouping_reason: str
-
-
-def _same_class_key(record: MaterialityRecord) -> tuple[str, ...]:
-    if not record.candidate_item_id:
-        return (
-            record.cash_direction,
-            "待判断",
-            record.standard_level1_account,
-            record.business_object,
-        )
-    return (
-        record.cash_direction,
-        record.candidate_item_id,
-        record.standard_level1_account,
-        record.business_object,
-        record.purpose,
-    )
 
 
 def assess_materiality_records(
@@ -64,40 +29,18 @@ def assess_materiality_records(
     thresholds,
 ) -> tuple[MaterialityAssessment, ...]:
     seen: set[str] = set()
-    totals: dict[tuple[str, ...], int] = defaultdict(int)
-    keys: dict[str, tuple[str, ...]] = {}
     for record in records:
         if record.record_id in seen:
-            raise ValueError(f"记录编号重复，不能重复累计：{record.record_id}")
+            raise ValueError(f"记录编号重复：{record.record_id}")
         seen.add(record.record_id)
-        key = _same_class_key(record)
-        keys[record.record_id] = key
-        totals[key] += abs(record.amount_cent)
-
-    results: list[MaterialityAssessment] = []
-    for record in records:
-        key = keys[record.record_id]
-        single_level = materiality_level(record.amount_cent, thresholds)
-        cumulative_level = materiality_level(totals[key], thresholds)
-        reliable = bool(record.candidate_item_id and record.grouping_reliable)
-        grouping_status = "reliable" if reliable else "potential"
-        results.append(MaterialityAssessment(
+    return tuple(
+        MaterialityAssessment(
             record_id=record.record_id,
             single_amount_cent=abs(record.amount_cent),
-            same_class_total_cent=totals[key],
-            single_level=single_level,
-            cumulative_level=cumulative_level,
-            group_key=key,
-            group_id=stable_id("MATGRP", grouping_status, *key),
-            grouping_status=grouping_status,
-            grouping_reason=(
-                record.grouping_reason
-                or "候选、标准一级科目和明细用途均明确"
-                if reliable
-                else record.grouping_reason or "同类依据不足，仅作潜在累计风险提示"
-            ),
-        ))
-    return tuple(results)
+            single_level=materiality_level(record.amount_cent, thresholds),
+        )
+        for record in records
+    )
 
 
 def build_review_batches(

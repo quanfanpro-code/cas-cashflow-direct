@@ -77,10 +77,10 @@ def test_complete_structured_result_is_accepted_without_ai_score() -> None:
     assert evidence.independent_source_count == 2
 
 
-def test_ai_cannot_approve_reversal_without_an_approved_rule() -> None:
+def test_ai_cannot_invent_a_third_direction_status() -> None:
     review = _review()
     payload = _payload()
-    payload["direction_status"] = "approved_reversal"
+    payload["direction_status"] = "已经批准反向"
 
     validation = review.validate_structured_ai_results(
         (_task(),), (payload,), {"CFO-01", "CFO-03"}
@@ -90,14 +90,13 @@ def test_ai_cannot_approve_reversal_without_an_approved_rule() -> None:
     assert validation.invalid_ids == ("AI-1",)
 
 
-def test_ai_can_use_a_reversal_rule_already_approved_for_the_task() -> None:
+def test_ai_may_report_direction_mismatch_only_as_a_clue() -> None:
     review = _review()
-    task = replace(_task(), approved_reversal_rule_ids=("REFUND-SALES",))
     payload = _payload()
-    payload["direction_status"] = "approved_reversal"
+    payload["direction_status"] = "incompatible"
 
     validation = review.validate_structured_ai_results(
-        (task,), (payload,), {"CFO-01", "CFO-03"}
+        (_task(),), (payload,), {"CFO-01", "CFO-03"}
     )
 
     assert validation.status == "AI 已完成"
@@ -477,7 +476,7 @@ def test_ordinary_ai_task_contains_only_the_two_original_business_sources() -> N
     assert task.original_item == ""
 
 
-def test_direction_control_fact_is_exposed_only_for_direction_forced_check() -> None:
+def test_direction_clue_is_never_exposed_to_classification_ai() -> None:
     review = _review()
     component = CashflowComponent(
         component_id="CMP-DIRECTION",
@@ -500,24 +499,21 @@ def test_direction_control_fact_is_exposed_only_for_direction_forced_check() -> 
 
     task = review.build_ai_task(component, decision)
 
-    assert "现金方向：inflow" in task.context
+    assert "现金方向" not in task.context
 
 
-def test_one_time_reversal_task_may_confirm_current_item_without_creating_a_rule() -> None:
+def test_ai_task_does_not_expose_a_refund_approval_route() -> None:
     review = _review()
-    task = replace(
-        _task(),
-        allow_one_time_reversal=True,
-        approved_reversal_rule_ids=(),
-    )
+    task = _task()
     payload = _payload()
-    payload["direction_status"] = "approved_reversal"
+    payload["direction_status"] = "incompatible"
 
     validation = review.validate_structured_ai_results(
         (task,), (payload,), {"CFO-01", "CFO-03"}
     )
 
     assert validation.status == "AI 已完成"
+    assert "退款审批" not in task.context
 
 
 def test_blind_followup_tasks_are_built_only_from_original_sources() -> None:

@@ -35,7 +35,7 @@ def validate() -> tuple[str, ...]:
         ROOT / "scripts" / "run_cashflow_direct.py",
         ROOT / "src" / "cashflow_direct" / "pipeline.py",
         ROOT / "references" / "一般企业正表项目.json",
-        ROOT / "references" / "直接法分类规则.json",
+        ROOT / "references" / "摘要语义规则.json",
         ROOT / "references" / "字段语义词典.json",
         ROOT / "references" / "标准一级科目并集去重表.md",
     )

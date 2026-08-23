@@ -22,8 +22,6 @@ from cashflow_direct.account_mapping import (
 from cashflow_direct.account_dictionary import (
     AccountDictionary,
     AccountSemanticEntry,
-    SummaryDictionary,
-    SummarySemanticEntry,
     collect_detail_segments,
     load_common_dictionary,
     merge_dictionaries,
@@ -41,6 +39,7 @@ from cashflow_direct.ai_review import (
     review_text_pattern as _review_text_pattern,
     structured_ai_result_from_mapping,
     validate_basis_text,
+    write_ai_tasks_jsonl,
 )
 from cashflow_direct.classification import (
     classify_all,
@@ -68,7 +67,7 @@ from cashflow_direct.consistency import (
     apply_consistency_forced_checks,
     find_consistency_groups,
 )
-from cashflow_direct.decision_policy import materiality_level
+from cashflow_direct.decision_policy import EvidenceQuality, materiality_level
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
 from cashflow_direct.differences import build_original_auto_differences
 from cashflow_direct.excel_recalculation import recalculate_workbook_with_excel
@@ -102,6 +101,15 @@ from cashflow_direct.statement import (
     detect_statement_sheets,
     parse_existing_statement,
     reconcile_cash,
+)
+from cashflow_direct.summary_semantics import (
+    SummarySemanticResult,
+    SummarySpan,
+    analyze_summary,
+    build_summary_agent_task,
+    load_summary_rules,
+    merge_summary_agent_slots,
+    validate_summary_batch,
 )
 from cashflow_direct.trace_output import build_trace_rows
 from cashflow_direct.storage import RunStore
@@ -221,13 +229,13 @@ def _load_state(run_dir: Path) -> dict[str, object]:
 
 
 def _replace_with_windows_retry(source: Path, target: Path) -> Path:
-    for attempt in range(5):
+    for attempt in range(10):
         try:
             return source.replace(target)
         except PermissionError:
-            if attempt == 4:
+            if attempt == 9:
                 raise
-            sleep(0.05 * (2**attempt))
+            sleep(min(0.05 * (2**attempt), 2.0))
     raise AssertionError("文件替换重试次数计算错误")
 
 
@@ -300,7 +308,6 @@ def _evidence_assessment_payload(
         "company_rule_conflict": decision.company_rule_conflict,
         "vat_base_missing": decision.vat_base_missing,
         "net_item_facts_missing": decision.net_item_facts_missing,
-        "new_reversal_pattern": decision.new_reversal_pattern,
         "direction_status": decision.direction_status,
         "evidence_score": decision.evidence_score,
     }
@@ -1238,40 +1245,53 @@ def _dictionary_from_state(state: Mapping[str, object]) -> AccountDictionary:
     return merge_dictionaries(common, AccountDictionary(custom_entries))
 
 
-def _summary_dictionary_from_state(
-    state: Mapping[str, object],
-) -> SummaryDictionary | None:
-    valid = tuple(state.get("summary_dictionary", {}).get("valid_results", ()))
-    if not valid:
-        return None
-    return SummaryDictionary(
-        tuple(
-            SummarySemanticEntry(
-                summary=str(item["summary"]),
-                semantic=str(item.get("semantic", "")),
-                item_id=str(item.get("item_id", "")),
-                basis=str(item.get("basis", "")),
-                confidence=str(item.get("confidence", "low")),
-                classification_facts=tuple(
-                    str(value) for value in item.get("classification_facts", ())
-                ),
-                candidate_item_ids=tuple(
-                    str(value) for value in item.get("candidate_item_ids", ())
-                ),
-                negation=tuple(str(value) for value in item.get("negation", ())),
-                uncertainty=tuple(
-                    str(value) for value in item.get("uncertainty", ())
-                ),
-                conditionality=tuple(
-                    str(value) for value in item.get("conditionality", ())
-                ),
-                source_spans=tuple(
-                    str(value) for value in item.get("source_spans", ())
-                ),
+def _summary_result_to_dict(result: SummarySemanticResult) -> dict[str, object]:
+    return {
+        "summary": result.summary,
+        "status": result.status,
+        "spans": [asdict(span) for span in result.spans],
+        "candidate_item_ids": list(result.candidate_item_ids),
+        "quality": result.quality.value,
+        "reason": result.reason,
+        "unresolved_slots": list(result.unresolved_slots),
+    }
+
+
+def _summary_result_from_dict(payload: Mapping[str, object]) -> SummarySemanticResult:
+    return SummarySemanticResult(
+        summary=str(payload["summary"]),
+        status=str(payload["status"]),
+        spans=tuple(
+            SummarySpan(
+                slot=str(span["slot"]),
+                text=str(span["text"]),
+                start=int(span["start"]),
+                end=int(span["end"]),
+                source=str(span.get("source", "rule")),
             )
-            for item in valid
-        )
+            for span in payload.get("spans", ())
+        ),
+        candidate_item_ids=tuple(
+            str(value) for value in payload.get("candidate_item_ids", ())
+        ),
+        quality=EvidenceQuality(int(payload.get("quality", 0))),
+        reason=str(payload.get("reason", "")),
+        unresolved_slots=tuple(
+            str(value) for value in payload.get("unresolved_slots", ())
+        ),
     )
+
+
+def _summary_semantics_from_state(
+    state: Mapping[str, object],
+) -> dict[str, SummarySemanticResult]:
+    payload = state.get("summary_semantics", {})
+    return {
+        result.summary: result
+        for result in (
+            _summary_result_from_dict(item) for item in payload.get("results", ())
+        )
+    }
 
 
 def _write_dictionary_batches(run_dir: Path, tasks: Sequence[dict[str, object]]) -> None:
@@ -1404,7 +1424,6 @@ def confirm_company_notes(
     )
     dependency_keys = (
         "account_dictionary",
-        "summary_dictionary",
         "classification_summary",
         "components",
         "decisions",
@@ -1429,7 +1448,6 @@ def confirm_company_notes(
         for key in invalidated:
             state.pop(key, None)
         state["account_dictionary_completed"] = False
-        state["summary_dictionary_completed"] = False
         state["note_dependency_rebuild"] = {
             "changed_note_ids": changed_note_ids,
             "invalidated_results": invalidated,
@@ -1443,94 +1461,6 @@ def confirm_company_notes(
     _write_trace_json(run_dir, "公司规则登记.json", validated)
     return StageResult(
         str(state["run_id"]), Path(run_dir), "company_notes", "completed", "执行科目语义确认"
-    )
-
-
-def confirm_reversal_patterns(
-    run_dir: Path,
-    decisions: Mapping[str, str],
-) -> StageResult:
-    """由Agent转交用户确认整体重要性以上的新退款或反向冲减模式。"""
-    state = _load_state(run_dir)
-    _assert_inputs_unchanged(state)
-    requests = tuple(state.get("reversal_confirmation_requests", ()))
-    if not requests:
-        raise RuntimeError("当前没有待确认的退款或反向冲减模式")
-    request_by_id = {str(item["component_id"]): item for item in requests}
-    if set(decisions) != set(request_by_id):
-        raise ValueError("必须逐项确认全部退款或反向冲减请求")
-    existing_notes = [dict(item) for item in state.get("company_notes", ())]
-    used_numbers = {
-        int(match.group(1))
-        for note in existing_notes
-        if (match := re.fullmatch(r"NOTE-(\d{2})", str(note.get("note_id", ""))))
-    }
-
-    def next_note_id() -> str:
-        for number in range(1, 100):
-            if number not in used_numbers:
-                used_numbers.add(number)
-                return f"NOTE-{number:02d}"
-        raise RuntimeError("公司规则编号已用尽，请先整理历史规则")
-
-    generated = []
-    for component_id, choice in decisions.items():
-        if choice not in {"仅本次采用", "长期采用", "拒绝"}:
-            raise ValueError(f"退款或反向冲减确认选项非法：{component_id}")
-        request = request_by_id[component_id]
-        item_id = str(request["候选项目"])
-        item_name = str(request["候选项目名称"])
-        status = "冲突未采用" if choice == "拒绝" else choice
-        generated.append(
-            {
-                "note_id": next_note_id(),
-                "内容": (
-                    f"本业务按{item_name}的退款或反向冲减处理"
-                    if choice != "拒绝"
-                    else f"拒绝将本业务按{item_name}的退款或反向冲减处理"
-                ),
-                "规则类型": "退款或反向冲减",
-                "建议处理": item_id,
-                "依据": "用户通过Agent确认",
-                "原始证据示例": (
-                    f"摘要：{request['摘要']}；完整路径："
-                    + "、".join(request["完整对方科目路径"])
-                ),
-                "判断理由": "现金方向与候选项目通常方向相反，用户确认按退款或反向冲减处理",
-                "确认人": "用户通过Agent确认",
-                "确认时间": datetime.now(timezone.utc).isoformat(),
-                "影响业务组成": [component_id],
-                "影响业务组成数量": 1,
-                "影响金额分": int(request["现金变化金额分"]),
-                "适用公司": str(state.get("company_name", "本次运行主体")),
-                "适用期间": str(state.get("period", "本次运行期间")),
-                "后续期间影响": (
-                    "后续期间持续适用"
-                    if choice == "长期采用"
-                    else "仅影响本次运行"
-                    if choice == "仅本次采用"
-                    else "本次拒绝采用，后续不自动沿用"
-                ),
-                "状态": status,
-                "涉及科目或词": list(request["完整对方科目路径"]),
-                "适用完整路径": list(request["完整对方科目路径"]),
-                "适用摘要词": [str(request["摘要"])],
-            }
-        )
-    confirm_company_notes(run_dir, (*existing_notes, *generated))
-    refreshed = _load_state(run_dir)
-    refreshed["reversal_confirmation_history"] = [
-        *refreshed.get("reversal_confirmation_history", ()),
-        *generated,
-    ]
-    refreshed.pop("reversal_confirmation_requests", None)
-    _save_state(run_dir, refreshed)
-    return StageResult(
-        str(refreshed["run_id"]),
-        Path(run_dir),
-        "reversal_confirmation",
-        "completed",
-        "已记录确认并使依赖结果失效；重新执行分类",
     )
 
 
@@ -2009,21 +1939,21 @@ def import_dictionary_results(run_dir: Path, result_path: Path) -> dict[str, obj
 
 
 def import_summary_results(run_dir: Path, result_path: Path) -> dict[str, object]:
-    """导入摘要的完整语义、质量和分类事实；缺一项就继续等待。"""
+    """导入受限Agent补充的原文槽位，候选和质量始终由固定程序重算。"""
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
-    pending = state.get("summary_dictionary")
+    pending = state.get("summary_semantics")
     if not pending or not pending.get("tasks"):
         raise RuntimeError("尚未生成摘要语义待判断任务，请先执行 classify")
     expected = {task["task_id"]: task for task in pending["tasks"]}
-    statement_items = tuple(
-        item for item in load_rule_pack(PROJECT_ROOT).statement_items if item.is_leaf
-    )
-    leaf_ids = {item.item_id for item in statement_items}
-    item_by_id = {item.item_id: item for item in statement_items}
-    valid: list[dict[str, object]] = []
+    rules = load_summary_rules(PROJECT_ROOT)
+    results = {
+        result.summary: result
+        for result in (
+            _summary_result_from_dict(item) for item in pending.get("results", ())
+        )
+    }
     seen: set[str] = set()
-    invalid: set[str] = set()
     with Path(result_path).open("r", encoding="utf-8-sig") as source:
         for raw in source:
             if not raw.strip():
@@ -2031,91 +1961,46 @@ def import_summary_results(run_dir: Path, result_path: Path) -> dict[str, object
             record = json.loads(raw)
             task_id = str(record.get("task_id", ""))
             task = expected.get(task_id)
-            if task is None or task_id in seen:
-                if task_id:
-                    invalid.add(task_id)
-                continue
-            summary = str(record.get("summary", ""))
-            item_id = str(record.get("item_id", ""))
-            candidate_item_ids = tuple(
-                dict.fromkeys(
-                    str(value) for value in record.get("candidate_item_ids", ())
-                )
-            )
-            confidence = str(record.get("confidence", ""))
-            basis = str(record.get("basis", ""))
-            standard_basis = str(record.get("standard_basis", ""))
-            facts = tuple(str(value) for value in record.get("classification_facts", ()))
-            negation = tuple(str(value) for value in record.get("negation", ()))
-            uncertainty = tuple(str(value) for value in record.get("uncertainty", ()))
-            conditionality = tuple(
-                str(value) for value in record.get("conditionality", ())
-            )
-            source_spans = tuple(
-                str(value) for value in record.get("source_spans", ())
-            )
-            facts = tuple(
-                dict.fromkeys(
-                    (
-                        *facts,
-                        *(f"negation:{value}" for value in negation),
-                        *(f"uncertainty:{value}" for value in uncertainty),
-                        *(f"conditionality:{value}" for value in conditionality),
-                    )
-                )
-            )
-            if (
-                summary != task["summary"]
-                or any(value not in leaf_ids for value in candidate_item_ids)
-                or (item_id and item_id not in leaf_ids)
-                or confidence not in {"high", "medium", "low"}
-                or summary not in basis
-                or "摘要" not in basis
-                or ((item_id or candidate_item_ids) and not facts)
-                or (len(candidate_item_ids) > 1 and confidence != "low")
-                or (item_id and candidate_item_ids)
-                or (
-                    (negation or uncertainty or conditionality)
-                    and not source_spans
-                )
-                or any(span not in summary for span in source_spans)
-                or ((uncertainty or conditionality) and confidence != "low")
-                or not _standard_basis_matches_items(
-                    standard_basis,
-                    (item_id, *candidate_item_ids),
-                    item_by_id,
-                )
-            ):
-                invalid.add(task_id)
-                continue
+            if task is None:
+                raise ValueError(f"Agent结果任务编号不属于当前运行：{task_id}")
+            if task_id in seen:
+                raise ValueError(f"同一导入文件包含重复摘要任务：{task_id}")
             seen.add(task_id)
-            valid.append(
-                {
-                    "task_id": task_id,
-                    "summary": summary,
-                    "semantic": str(record.get("semantic", "")),
-                    "item_id": item_id,
-                    "candidate_item_ids": list(candidate_item_ids),
-                    "confidence": confidence,
-                    "basis": basis,
-                    "standard_basis": standard_basis.strip(),
-                    "classification_facts": list(facts),
-                    "negation": list(negation),
-                    "uncertainty": list(uncertainty),
-                    "conditionality": list(conditionality),
-                    "source_spans": list(source_spans),
-                }
-            )
-    missing = (set(expected) - seen) | invalid
+            base = analyze_summary(str(task["summary"]), rules)
+            merged = merge_summary_agent_slots(base, record, rules)
+            previous = results.get(merged.summary)
+            if previous is not None and previous.status == "agent_complete" and previous != merged:
+                raise ValueError(f"摘要任务存在相互冲突的重复结果：{task_id}")
+            results[merged.summary] = merged
+
+    missing = sorted(
+        task_id
+        for task_id, task in expected.items()
+        if results.get(str(task["summary"]), SummarySemanticResult(
+            str(task["summary"]), "needs_agent", (), (), EvidenceQuality.INVALID, ""
+        )).status
+        != "agent_complete"
+    )
+    pending["results"] = [
+        _summary_result_to_dict(result)
+        for result in sorted(results.values(), key=lambda item: item.summary)
+    ]
+    pending["missing_ids"] = missing
+    state["summary_semantics"] = pending
     if missing:
-        return {"status": "AI 未完成", "missing_ids": sorted(missing)}
-    pending["valid_results"] = valid
-    pending["missing_ids"] = []
-    state["summary_dictionary"] = pending
-    state["summary_dictionary_completed"] = True
-    state["stage"] = "summary_dictionary_completed"
+        _save_state(run_dir, state)
+        return {"status": "AI 未完成", "missing_ids": missing}
+
+    ordered = tuple(sorted(results.values(), key=lambda item: item.summary))
+    validate_summary_batch(
+        ordered,
+        tuple(result.summary for result in ordered),
+    )
+    state["summary_semantics_completed"] = True
+    state["summary_semantics_version"] = str(rules["schema_version"])
+    state["stage"] = "summary_semantics_completed"
     _save_state(run_dir, state)
-    return {"status": "摘要语义已导入", "count": len(valid)}
+    return {"status": "摘要语义已导入", "count": len(ordered)}
 
 
 def _structure_ai_task_from_dict(payload: Mapping[str, object]) -> StructureAITask:
@@ -2572,38 +2457,33 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         )
         for component in raw_components
     )
-    if not state.get("summary_dictionary_completed"):
-        tasks = [
-            {
-                "task_id": stable_id("SUM", summary),
-                "summary": summary,
-                "instruction": (
-                    "只根据本行摘要原文解释动作、对象、用途、项目、资产、对方角色、"
-                    "资本化、投资筹资税费及退款冲减含义；不得查看或引用对方科目、"
-                    "原现金流项目、金额或系统候选。若摘要同时支持多个候选，必须填写"
-                    "candidate_item_ids并评为low，不得强行挑选一个item_id。凡填写任何"
-                    "候选项目，必须另填standard_basis，逐项引用与该项目相符的现金流量表"
-                    "准则条款或应用指南。另须分别填写negation、uncertainty、"
-                    "conditionality和source_spans；不确定或条件性表述只能评为low。"
-                ),
-                "negation": [],
-                "uncertainty": [],
-                "conditionality": [],
-                "source_spans": [],
-            }
+    if not state.get("summary_semantics_completed"):
+        summary_rules = load_summary_rules(PROJECT_ROOT)
+        semantic_results = tuple(
+            analyze_summary(summary, summary_rules)
             for summary in sorted(
-                {component.summary.strip() for component in components if component.summary.strip()}
+                {
+                    component.summary.strip()
+                    for component in components
+                    if component.summary.strip()
+                }
             )
-        ]
-        state["summary_dictionary"] = {
-            "tasks": tasks,
-            "valid_results": [],
+        )
+        tasks = tuple(
+            task
+            for task in (build_summary_agent_task(result) for result in semantic_results)
+            if task is not None
+        )
+        state["summary_semantics"] = {
+            "tasks": list(tasks),
+            "results": [_summary_result_to_dict(result) for result in semantic_results],
             "missing_ids": [task["task_id"] for task in tasks],
         }
-        state["summary_dictionary_completed"] = not tasks
+        state["summary_semantics_version"] = str(summary_rules["schema_version"])
+        state["summary_semantics_completed"] = not tasks
         if tasks:
             _write_summary_batches(run_dir, tasks)
-            state["stage"] = "waiting_summary_dictionary"
+            state["stage"] = "waiting_summary_semantics"
             _save_state(run_dir, state)
             return ClassificationStageResult(
                 str(state["run_id"]),
@@ -2615,12 +2495,16 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
                 len(tasks),
                 "待摘要语义确认",
             )
+        validate_summary_batch(
+            semantic_results,
+            tuple(result.summary for result in semantic_results),
+        )
     rules = load_rule_pack(PROJECT_ROOT)
     candidate_decisions = classify_all(
         components,
         rules,
         _dictionary_from_state(state),
-        _summary_dictionary_from_state(state),
+        _summary_semantics_from_state(state),
     )
     routing = route_classification_decisions(
         components,
@@ -2633,83 +2517,6 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     if not checked.valid:
         raise RuntimeError("自动分类不变量失败：" + "；".join(checked.errors))
     tasks = routing.ai_tasks
-    component_by_id = {item.component_id: item for item in components}
-    reversal_confirmation_requests = [
-        {
-            "component_id": item.component_id,
-            "摘要": component_by_id[item.component_id].summary,
-            "完整对方科目路径": list(
-                component_by_id[item.component_id].counterpart_accounts
-            ),
-            "现金变化金额分": component_by_id[item.component_id].cash_delta_cent,
-            "候选项目": item.system_item_id,
-            "候选项目名称": item.system_item_name,
-            "可选处理": ["仅本次采用", "长期采用", "拒绝"],
-        }
-        for item in decisions
-        if item.decision_action == "confirm_reversal_rule"
-    ]
-    assessment_by_id = {
-        item.record_id: item for item in routing.materiality_assessments
-    }
-    pending_group_ids = tuple(
-        dict.fromkeys(
-            item.materiality_group_id
-            for item in decisions
-            if item.materiality_group_confirmation_status
-            == "pending_in_final_workbook"
-        )
-    )
-    materiality_group_requests = []
-    for group_id in pending_group_ids:
-        members = tuple(
-            item for item in decisions if item.materiality_group_id == group_id
-        )
-        first_assessment = assessment_by_id[members[0].component_id]
-        materiality_group_requests.append(
-            {
-                "group_id": group_id,
-                "component_ids": [item.component_id for item in members],
-                "component_count": len(members),
-                "same_class_total_cent": first_assessment.same_class_total_cent,
-                "group_key": list(first_assessment.group_key),
-                "summaries": list(
-                    dict.fromkeys(
-                        component_by_id[item.component_id].summary for item in members
-                    )
-                ),
-                "instruction": (
-                    "程序处理完成后，请在最终工作簿内一次确认本组全部处理结果；"
-                    "组内明细通过公式继承该确认结果。"
-                ),
-            }
-        )
-    potential_group_warnings = []
-    potential_group_ids = tuple(
-        dict.fromkeys(
-            item.materiality_group_id
-            for item in decisions
-            if item.materiality_grouping_status == "potential"
-            and assessment_by_id[item.component_id].cumulative_level
-            != assessment_by_id[item.component_id].single_level
-        )
-    )
-    for group_id in potential_group_ids:
-        members = tuple(
-            item for item in decisions if item.materiality_group_id == group_id
-        )
-        first_assessment = assessment_by_id[members[0].component_id]
-        potential_group_warnings.append(
-            {
-                "group_id": group_id,
-                "component_ids": [item.component_id for item in members],
-                "component_count": len(members),
-                "same_class_total_cent": first_assessment.same_class_total_cent,
-                "cumulative_level": first_assessment.cumulative_level.value,
-                "grouping_reason": first_assessment.grouping_reason,
-                "effect": "仅风险提示；不升层、不隔离、不触发确认、不改变逐笔动作",
-            }
-        )
     serialized_components = [asdict(item) for item in components]
     serialized_decisions = [asdict(item) for item in decisions]
     digest_source = json.dumps(serialized_components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2719,14 +2526,11 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         and not item.excluded
         and item.decision_action
         not in {"ai_review", "double_ai_review"}
-        and item.decision_action != "confirm_reversal_rule"
         for item in decisions
     )
     classification_status = (
         "waiting_ai"
         if tasks
-        else "waiting_reversal_confirmation"
-        if reversal_confirmation_requests
         else "waiting_human"
         if has_pending_human
         else "classification_completed"
@@ -2846,9 +2650,6 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     state["materiality_assessments"] = [
         asdict(item) for item in routing.materiality_assessments
     ]
-    state["materiality_group_confirmation_requests"] = materiality_group_requests
-    state["reversal_confirmation_requests"] = reversal_confirmation_requests
-    state["materiality_potential_group_warnings"] = potential_group_warnings
     state["source_allocations"] = [
         asdict(item) for item in build.source_allocations
     ]
@@ -2856,18 +2657,11 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     state["classification_summary"] = summary
     state["stage"] = summary["status"]
     for batch_number, batch in enumerate(chunk_ai_tasks(tasks), 1):
-        _write_trace_jsonl(run_dir, f"AI复核请求_第{batch_number:02d}批.jsonl", batch)
+        write_ai_tasks_jsonl(
+            _trace_dir(run_dir) / f"AI复核请求_第{batch_number:02d}批.jsonl",
+            batch,
+        )
     _write_trace_jsonl(run_dir, "内部划转排除.jsonl", build.excluded_internal_transfers)
-    _write_trace_jsonl(
-        run_dir,
-        "累计重大组确认请求.jsonl",
-        materiality_group_requests,
-    )
-    _write_trace_jsonl(
-        run_dir,
-        "潜在累计组风险提示.jsonl",
-        potential_group_warnings,
-    )
     if not tasks and not has_pending_human:
         _prepare_consistency_stage(state, run_dir)
     _save_state(run_dir, state)
@@ -3110,26 +2904,15 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
                 state["classification_summary"]["status"] = "waiting_ai"
                 state["stage"] = "waiting_ai"
                 for batch_number, batch in enumerate(chunk_ai_tasks(followups), 1):
-                    _write_trace_jsonl(
-                        run_dir,
-                        f"AI后续复核请求_第{batch_number:02d}批.jsonl",
+                    write_ai_tasks_jsonl(
+                        _trace_dir(run_dir)
+                        / f"AI后续复核请求_第{batch_number:02d}批.jsonl",
                         batch,
                     )
                 status = "待AI后续复核"
                 missing_count = len(followups)
             elif all(item.resolved or item.excluded for item in resolved):
                 status, missing_count = _prepare_consistency_stage(state, run_dir)
-            elif any(
-                item.decision_action == "confirm_reversal_rule"
-                for item in resolved
-            ):
-                state["classification_summary"]["ai_tasks_missing"] = 0
-                state["classification_summary"]["status"] = (
-                    "waiting_reversal_confirmation"
-                )
-                state["stage"] = "waiting_reversal_confirmation"
-                status = "待确认新的退款或反向冲减模式"
-                missing_count = 0
             else:
                 state["classification_summary"]["ai_tasks_missing"] = 0
                 state["classification_summary"]["status"] = "waiting_human"
@@ -3339,8 +3122,6 @@ def confirm_manual_decisions(
 def _assert_agent_gates_closed(state: Mapping[str, object]) -> None:
     if state.get("component_structure_requests"):
         raise RuntimeError("业务组成结构仍待Agent或用户确认，不能生成最终工作簿")
-    if state.get("reversal_confirmation_requests"):
-        raise RuntimeError("新的退款或反向冲减模式仍待Agent转交用户确认，不能生成最终工作簿")
 
 
 def finalize_run(run_dir: Path) -> FinalizeResult:
@@ -3874,7 +3655,6 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     elif (
         review_batches
         or any(group.blocks_manual_completion for group in duplicate_groups)
-        or state.get("materiality_group_confirmation_requests")
     ):
         status = "待完成人工确认"
     elif reconciliation.status != "现金流量表与货币资金变动的勾稽核对：相符":
@@ -4014,14 +3794,6 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         unconfirmed_statement=statement_unconfirmed,
         dictionary_rows=dictionary_rows,
         consistency_rows=consistency_rows,
-        materiality_group_requests=tuple(
-            state.get("materiality_group_confirmation_requests", ())
-        ),
-        materiality_group_components=tuple(state.get("components", ())),
-        materiality_group_decisions=tuple(state.get("decisions", ())),
-        materiality_group_assessments=tuple(
-            state.get("materiality_assessments", ())
-        ),
     )
     sequence = 1
     while True:

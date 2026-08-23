@@ -169,63 +169,8 @@ def test_component_structure_ai_low_first_result_gets_second_review_then_finishe
     assert state["stage"] == "component_structure_confirmed"
 
 
-@pytest.mark.parametrize(
-    ("choice", "expected_status"),
-    (("长期采用", "长期采用"), ("拒绝", "冲突未采用")),
-)
-def test_overall_material_reversal_confirmation_creates_a_scoped_company_note(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    choice: str,
-    expected_status: str,
-) -> None:
-    state: dict[str, object] = {
-        "run_id": "RUN-1",
-        "company_notes": [],
-        "reversal_confirmation_requests": [
-            {
-                "component_id": "CF-1",
-                "候选项目": "CFI-06",
-                "候选项目名称": "购建长期资产支付的现金",
-                "完整对方科目路径": ["应付账款_应付设备款_往来款"],
-                "摘要": "退回设备尾款",
-                "现金变化金额分": 2_200_000_00,
-            }
-        ],
-    }
-    saved_states: list[dict[str, object]] = []
-
-    def confirm_notes(_run_dir: Path, notes: object) -> None:
-        state["company_notes"] = [dict(item) for item in notes]
-        state["stage"] = "cash_scope_confirmed"
-
-    monkeypatch.setattr(pipeline_module, "_load_state", lambda _path: state)
-    monkeypatch.setattr(pipeline_module, "_assert_inputs_unchanged", lambda _state: None)
-    monkeypatch.setattr(
-        pipeline_module,
-        "_save_state",
-        lambda _path, new_state: saved_states.append(dict(new_state)),
-    )
-    monkeypatch.setattr(pipeline_module, "confirm_company_notes", confirm_notes)
-
-    result = pipeline_module.confirm_reversal_patterns(
-        tmp_path, {"CF-1": choice}
-    )
-
-    note = state["company_notes"][0]
-    assert result.status == "completed"
-    assert note["规则类型"] == "退款或反向冲减"
-    assert note["状态"] == expected_status
-    assert note["建议处理"] == "CFI-06"
-    assert note["适用完整路径"] == ["应付账款_应付设备款_往来款"]
-    assert note["适用摘要词"] == ["退回设备尾款"]
-    assert note["适用公司"]
-    assert note["适用期间"]
-    assert note["影响业务组成数量"] == 1
-    assert note["影响金额分"] == 2_200_000_00
-    assert note["后续期间影响"]
-    assert "reversal_confirmation_requests" not in state
-    assert saved_states
+def test_refund_confirmation_api_has_been_removed() -> None:
+    assert "confirm_reversal_patterns" not in dir(pipeline_module)
 from cashflow_direct.models import ClassificationDecision
 from tests.fixture_factory import mark_dictionary_complete, write_end_to_end_case
 
@@ -242,7 +187,6 @@ def test_evidence_record_keeps_every_forced_check_that_can_change_the_route() ->
         company_rule_conflict=True,
         vat_base_missing=True,
         net_item_facts_missing=True,
-        new_reversal_pattern=True,
     )
 
     payload = pipeline_module._evidence_assessment_payload(decision)
@@ -250,7 +194,7 @@ def test_evidence_record_keeps_every_forced_check_that_can_change_the_route() ->
     assert payload["company_rule_conflict"] is True
     assert payload["vat_base_missing"] is True
     assert payload["net_item_facts_missing"] is True
-    assert payload["new_reversal_pattern"] is True
+    assert "new_reversal_pattern" not in payload
 
 
 def test_final_ai_records_include_valid_results_and_technical_failure_terminal_states() -> None:
@@ -283,17 +227,13 @@ def test_final_ai_records_include_valid_results_and_technical_failure_terminal_s
     }
 
 
-def test_finalization_is_blocked_before_agent_confirms_a_new_reversal_pattern() -> None:
-    with pytest.raises(RuntimeError, match="退款或反向冲减"):
-        pipeline_module._assert_agent_gates_closed(
-            {
-                "stage": "waiting_reversal_confirmation",
-                "reversal_confirmation_requests": [{"component_id": "CF-1"}],
-            }
-        )
+def test_removed_refund_state_cannot_create_a_completion_gate() -> None:
+    pipeline_module._assert_agent_gates_closed(
+        {"stage": "cash_scope_confirmed", "历史退款记录": [{"component_id": "CF-1"}]}
+    )
 
 
-def test_reliable_group_has_no_separate_confirmation_command() -> None:
+def test_removed_group_has_no_separate_confirmation_command() -> None:
     from cashflow_direct.cli import build_parser
 
     with pytest.raises(SystemExit):
@@ -328,7 +268,7 @@ def test_state_save_retries_when_windows_temporarily_locks_target(
         ) == {"stage": "test"}
 
 
-def test_state_save_raises_after_five_persistent_windows_lock_failures(
+def test_state_save_raises_after_ten_persistent_windows_lock_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attempts = 0
@@ -339,11 +279,12 @@ def test_state_save_raises_after_five_persistent_windows_lock_failures(
         raise PermissionError(5, "Windows持续拒绝访问", str(target))
 
     monkeypatch.setattr(Path, "replace", persistently_locked)
+    monkeypatch.setattr(pipeline_module, "sleep", lambda _seconds: None)
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(PermissionError, match="Windows持续拒绝访问"):
             pipeline_module._save_state(Path(tmp) / "构造运行目录", {"stage": "test"})
 
-    assert attempts == 5
+    assert attempts == 10
 
 
 def test_state_save_does_not_retry_non_permission_file_errors(

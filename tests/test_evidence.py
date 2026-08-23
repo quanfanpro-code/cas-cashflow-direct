@@ -7,30 +7,32 @@ from cashflow_direct.account_dictionary import (
     AccountSemanticEntry,
     score_dictionary_hits,
 )
-from cashflow_direct.classification import ClassificationRule
 from cashflow_direct.evidence import (
+    RuleScore,
     aggregate_evidence,
-    score_rule,
     split_account_levels,
 )
 from cashflow_direct.models import CashflowComponent
 
 
-def make_rule(**overrides) -> ClassificationRule:
+def make_score(**overrides) -> RuleScore:
     base = dict(
         rule_id="R1",
         item_id="CFO-05",
         priority=20,
-        direction="outflow",
-        summary_terms=("工资",),
-        account_terms=("工资",),
-        exclude_terms=(),
-        account_exclude_terms=(),
-        evidence_level="high",
-        sole_account_terms=(),
+        source="summary",
+        score=90,
+        summary_part=45,
+        account_part=45,
+        direction_compatible=True,
+        summary_hits=("工资",),
+        account_hits=("工资",),
+        channels=("summary", "account_path"),
+        summary_facts=("business:CFO-05", "summary_context:发放工资"),
+        account_facts=("business:CFO-05", "account_context:应付职工薪酬工资"),
     )
     base.update(overrides)
-    return ClassificationRule(**base)
+    return RuleScore(**base)
 
 
 def make_component(
@@ -68,56 +70,16 @@ class SplitAccountLevelsTests(unittest.TestCase):
         self.assertEqual(("财务费用-利息收入",), split_account_levels("财务费用-利息收入"))
 
 
-class ScoreRuleTests(unittest.TestCase):
-    def test_strong_summary_only_scores_45(self) -> None:
-        score = score_rule(make_rule(account_terms=()), make_component(accounts=()), "outflow")
-        self.assertIsNotNone(score)
-        self.assertEqual(45, score.summary_part)
-        self.assertEqual(0, score.account_part)
-
-    def test_strong_detail_only_scores_45(self) -> None:
-        score = score_rule(make_rule(summary_terms=()), make_component(summary="转账"), "outflow")
-        self.assertIsNotNone(score)
-        self.assertEqual(45, score.account_part)
-        self.assertEqual(0, score.summary_part)
-
-    def test_level1_only_is_medium_when_the_path_is_not_specific(self) -> None:
-        score = score_rule(
-            make_rule(summary_terms=(), account_terms=("职工薪酬",)),
-            make_component(summary="转账", accounts=("应付职工薪酬",)),
-            "outflow",
-        )
-        self.assertIsNotNone(score)
-        self.assertEqual(25, score.account_part)
-
-    def test_overlapping_summary_terms_score_once(self) -> None:
-        rule = make_rule(summary_terms=("工资", "职工工资", "职工"), account_terms=())
-        score = score_rule(rule, make_component(summary="发放职工工资", accounts=()), "outflow")
-        self.assertIsNotNone(score)
-        self.assertEqual(45, score.summary_part)
-
-    def test_same_account_level1_and_detail_counted_once(self) -> None:
-        rule = make_rule(summary_terms=(), account_terms=("应付职工薪酬", "工资"))
-        score = score_rule(rule, make_component(summary="转账"), "outflow")
-        self.assertIsNotNone(score)
-        self.assertEqual(45, score.account_part)
-
-    def test_require_account_rule_returns_none_without_account_hit(self) -> None:
-        rule = make_rule(require_account=True)
-        score = score_rule(rule, make_component(accounts=("其他应付款_杂项",)), "outflow")
-        self.assertIsNone(score)
-
-
 class AggregateEvidenceTests(unittest.TestCase):
     def test_strong_summary_plus_strong_detail_equals_90(self) -> None:
-        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "outflow")])
+        agg = aggregate_evidence([make_score()])
         self.assertIsNotNone(agg)
         self.assertEqual(90, agg.score)
         self.assertEqual({"summary", "account_path"}, set(agg.sources))
 
     def test_structure_selected_from_existing_summary_cannot_count_path_as_independent(self) -> None:
         agg = aggregate_evidence(
-            [score_rule(make_rule(), make_component(), "outflow")],
+            [make_score()],
             sources_independent=False,
         )
 
@@ -128,10 +90,10 @@ class AggregateEvidenceTests(unittest.TestCase):
     def test_strong_summary_plus_medium_level1_equals_70(self) -> None:
         agg = aggregate_evidence(
             [
-                score_rule(
-                    make_rule(account_terms=("职工薪酬",)),
-                    make_component(accounts=("应付职工薪酬",)),
-                    "outflow",
+                make_score(
+                    score=70,
+                    account_part=25,
+                    account_hits=("职工薪酬",),
                 )
             ]
         )
@@ -140,23 +102,20 @@ class AggregateEvidenceTests(unittest.TestCase):
 
     def test_label_agreement_adds_nothing(self) -> None:
         # 汇总不接受原标签参数：标签一致不加分
-        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "outflow")])
+        agg = aggregate_evidence([make_score()])
         self.assertIsNotNone(agg)
         self.assertEqual(90, agg.score)
 
     def test_two_sources_pointing_to_different_items_have_no_usable_score(self) -> None:
-        summary_source = score_rule(
-            make_rule(rule_id="A", account_terms=()), make_component(), "outflow"
+        summary_source = make_score(
+            rule_id="A", score=45, account_part=0, account_hits=(),
+            channels=("summary",), account_facts=(),
         )
-        path_source = score_rule(
-            make_rule(
-                rule_id="B",
-                item_id="CFI-06",
-                summary_terms=(),
-                account_terms=("厂房",),
-            ),
-            make_component(accounts=("在建工程_厂房",)),
-            "outflow",
+        path_source = make_score(
+            rule_id="B", item_id="CFI-06", source="account_path", score=45,
+            summary_part=0, summary_hits=(), channels=("account_path",),
+            summary_facts=(), account_hits=("厂房",),
+            account_facts=("business:CFI-06", "account_context:在建工程厂房"),
         )
         agg = aggregate_evidence([summary_source, path_source])
         self.assertIsNotNone(agg)
@@ -166,24 +125,38 @@ class AggregateEvidenceTests(unittest.TestCase):
 
     def test_summary_that_only_repeats_the_path_does_not_add_score(self) -> None:
         agg = aggregate_evidence(
-            [score_rule(make_rule(), make_component(summary="工资"), "outflow")]
+            [
+                make_score(
+                    score=90,
+                    summary_facts=("business:CFO-05",),
+                    account_facts=("business:CFO-05",),
+                )
+            ]
         )
         self.assertIsNotNone(agg)
         self.assertEqual(45, agg.score)
         self.assertEqual(("account_path",), agg.sources)
 
     def test_direction_incompatible_does_not_reduce_evidence_score(self) -> None:
-        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "inflow")])
+        agg = aggregate_evidence([make_score(direction_compatible=False)])
         self.assertIsNotNone(agg)
         self.assertEqual(90, agg.score)
 
     def test_two_source_score_and_independence_are_recorded_without_deciding_action(self) -> None:
-        agg = aggregate_evidence([score_rule(make_rule(), make_component(), "outflow")])
+        agg = aggregate_evidence([make_score()])
         self.assertIsNotNone(agg)
         self.assertEqual(90, agg.score)
         self.assertTrue(agg.sources_independent)
         only_summary = aggregate_evidence(
-            [score_rule(make_rule(account_terms=()), make_component(accounts=()), "outflow")]
+            [
+                make_score(
+                    score=45,
+                    account_part=0,
+                    account_hits=(),
+                    channels=("summary",),
+                    account_facts=(),
+                )
+            ]
         )
         self.assertIsNotNone(only_summary)
         self.assertEqual(45, only_summary.score)

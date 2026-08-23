@@ -36,7 +36,6 @@ EXPECTED_SHEETS = [
     "现金流量表正表",
     "正表核对报告",
     "重要待复核事项",
-    "可靠同类组批量处理",
     "疑似重复事项",
     "AI复核记录",
     "原表与系统决定差异",
@@ -54,55 +53,6 @@ def _column_is_hidden(sheet, one_based_index: int) -> bool:
         and int(dimension.min or 0) <= one_based_index <= int(dimension.max or 0)
         for dimension in sheet.column_dimensions.values()
     )
-
-
-def _reliable_group_payloads():
-    requests = (
-        {
-            "group_id": "MATGRP_A",
-            "component_ids": ["A1", "A2"],
-            "component_count": 2,
-            "same_class_total_cent": 12_000,
-            "group_key": ["outflow", "CFO-04", "应付账款", "应付商品款"],
-        },
-        {
-            "group_id": "MATGRP_B",
-            "component_ids": ["B1"],
-            "component_count": 1,
-            "same_class_total_cent": 15_000,
-            "group_key": ["inflow", "CFO-01", "应收账款", "应收商品款"],
-        },
-    )
-    components = tuple(
-        {
-            "component_id": component_id,
-            "voucher_date": f"2026-01-0{index}",
-            "voucher_no": f"记-{index}",
-            "summary": summary,
-            "counterpart_accounts": [path],
-            "cash_delta_cent": amount,
-            "original_item_text": item,
-        }
-        for index, (component_id, summary, path, amount, item) in enumerate(
-            (
-                ("A1", "支付第一笔货款", "应付账款_应付商品款", -6_000, "购买商品、接受劳务支付的现金"),
-                ("A2", "支付第二笔货款", "应付账款_应付商品款", -6_000, "购买商品、接受劳务支付的现金"),
-                ("B1", "收到销售货款", "应收账款_应收商品款", 15_000, "销售商品、提供劳务收到的现金"),
-            ),
-            1,
-        )
-    )
-    decisions = (
-        {"component_id": "A1", "system_item_name": "购买商品、接受劳务支付的现金", "evidence_score": 55, "decision_action": "double_ai_review"},
-        {"component_id": "A2", "system_item_name": "购买商品、接受劳务支付的现金", "evidence_score": 70, "decision_action": "double_ai_review"},
-        {"component_id": "B1", "system_item_name": "销售商品、提供劳务收到的现金", "evidence_score": 90, "decision_action": "human_decision"},
-    )
-    assessments = (
-        {"record_id": "A1", "single_amount_cent": 6_000, "single_level": "M2", "cumulative_level": "M3"},
-        {"record_id": "A2", "single_amount_cent": 6_000, "single_level": "M2", "cumulative_level": "M3"},
-        {"record_id": "B1", "single_amount_cent": 15_000, "single_level": "M3", "cumulative_level": "M3"},
-    )
-    return requests, components, decisions, assessments
 
 
 class WorkbookOutputTests(unittest.TestCase):
@@ -182,10 +132,9 @@ class WorkbookOutputTests(unittest.TestCase):
                     self.assertIn(visible, headers)
                 for hidden in (
                     "摘要来源质量", "完整路径来源质量", "两个来源是否独立",
-                    "证据质量说明", "证据得分", "同类累计金额",
-                    "有效重要性层级", "强制检查", "唯一动作",
-                    "批次最不利影响金额", "批次现金变化金额", "同类分组",
-                    "同类批次原因", "明确排除原因", "人工依据", "外部资料位置",
+                    "证据质量说明", "证据得分", "单笔重要性层级",
+                    "强制检查", "唯一动作", "批次最不利影响金额",
+                    "批次现金变化金额", "明确排除原因", "人工依据", "外部资料位置",
                     "处理人", "处理时间",
                 ):
                     index = headers.index(hidden) + 1
@@ -213,7 +162,6 @@ class WorkbookOutputTests(unittest.TestCase):
             "证据质量说明": "合计70分",
             "证据得分": "70",
             "单笔金额": "100",
-            "同类累计金额": "100",
             "强制检查": "无",
             "异常": "未发现异常",
             "AI复核过程": "详细过程",
@@ -240,7 +188,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     "一级科目映射候选", "一级科目映射依据", "现金方向依据",
                     "原现流项目", "系统候选项目", "判断理由", "摘要来源质量",
                     "完整路径来源质量", "两个来源是否独立", "证据质量说明",
-                    "证据得分", "单笔金额", "同类累计金额", "强制检查", "异常",
+                    "证据得分", "单笔金额", "强制检查", "异常",
                     "AI复核过程", "本行分配现金变化", "组成明细", "评分版本", "动作表版本",
                 ):
                     self.assertTrue(_column_is_hidden(sheet, headers.index(hidden) + 1))
@@ -283,47 +231,16 @@ class WorkbookOutputTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_reliable_group_confirmation_is_a_sheet_in_the_final_workbook(self) -> None:
-        requests, components, decisions, assessments = _reliable_group_payloads()
-        model = replace(
-            workbook_model(0, 0),
-            materiality_group_requests=requests,
-            materiality_group_components=components,
-            materiality_group_decisions=decisions,
-            materiality_group_assessments=assessments,
-        )
+    def test_reliable_group_sheet_and_completion_gate_are_absent(self) -> None:
+        model = workbook_model(0, 0)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "最终输出.xlsx"
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
                 self.assertEqual(EXPECTED_SHEETS, workbook.sheetnames)
-                sheet = workbook["可靠同类组批量处理"]
-                self.assertEqual("序号", sheet["A7"].value)
-                self.assertEqual("生效结果(公式)", sheet["B7"].value)
-                self.assertTrue(str(sheet["B8"].value).startswith("=IF(C8<>"))
-                self.assertFalse(sheet["C8"].protection.locked)
-                self.assertFalse(sheet["B3"].protection.locked)
-                self.assertFalse(sheet["B4"].protection.locked)
-                self.assertFalse(sheet["B6"].protection.locked)
-                self.assertTrue(sheet.row_dimensions[3].hidden)
-                self.assertTrue(sheet.row_dimensions[4].hidden)
-                self.assertTrue(sheet.row_dimensions[6].hidden)
-                detail_header_row = next(
-                    row
-                    for row in range(1, sheet.max_row + 1)
-                    if sheet.cell(row, 1).value == "组内序号"
-                )
-                self.assertEqual(3, sheet.max_row - detail_header_row)
-                self.assertTrue(
-                    all(
-                        str(sheet.cell(row, 2).value).startswith("=IFERROR(INDEX(")
-                        for row in range(detail_header_row + 1, sheet.max_row + 1)
-                    )
-                )
                 status_formula = workbook["使用说明与状态"]["B3"].value
-                self.assertIn("可靠同类组批量处理", status_formula)
-                self.assertNotIn("COUNTBLANK", status_formula)
+                self.assertNotIn("可靠同类组", str(status_formula))
             finally:
                 workbook.close()
 
@@ -376,7 +293,7 @@ class WorkbookOutputTests(unittest.TestCase):
             "映射状态": "已确认",
             "现金账户路径": "银行存款_一般户",
             "现金账户范围状态": "现金及现金等价物范围内",
-            "借方": "未记录",
+            "借方": 0.0,
             "贷方": 100.0,
             "流量金额（原币）": 100.0,
             "本行分配现金变化": -100.0,
@@ -388,8 +305,7 @@ class WorkbookOutputTests(unittest.TestCase):
             "证据质量说明": "摘要中、路径中，两个来源独立但互相冲突，不形成总分",
             "证据得分": "来源冲突，无可用总分",
             "单笔金额": 100.0,
-            "同类累计金额": 100.0,
-            "有效重要性层级": "M2（实际执行至整体重要性）",
+            "单笔重要性层级": "M2（实际执行至整体重要性）",
             "强制检查": "两个来源冲突",
             "异常": "两个来源冲突",
             "AI复核过程": "第一次AI复核后仍冲突",
@@ -409,8 +325,8 @@ class WorkbookOutputTests(unittest.TestCase):
                     "本行完整对方科目路径", "标准一级科目", "现金账户路径",
                     "借方", "贷方", "流量金额（原币）", "本行分配现金变化",
                     "原项目标准化结果", "系统候选项目", "判断理由",
-                    "证据质量说明", "证据得分", "单笔金额", "同类累计金额",
-                    "有效重要性层级", "强制检查", "异常",
+                    "证据质量说明", "证据得分", "单笔金额",
+                    "单笔重要性层级", "强制检查", "异常",
                     "人工可选标准项目", "人工确认项目", "明确排除原因",
                     "人工依据", "外部资料位置", "处理人", "处理时间",
                     "人工处理状态",
@@ -431,9 +347,18 @@ class WorkbookOutputTests(unittest.TestCase):
                 options = sheet.cell(
                     2, headers.index("人工可选标准项目") + 1
                 ).value
+                self.assertNotIn(USE_SYSTEM_RECOMMENDATION, options)
                 self.assertIn("支付其他与经营活动有关的现金", options)
                 self.assertIn("支付其他与投资活动有关的现金", options)
                 self.assertIn("明确排除", options)
+                money_format = sheet.cell(
+                    2, headers.index("单笔金额") + 1
+                ).number_format
+                for header in ("借方", "贷方", "本行分配现金变化"):
+                    self.assertEqual(
+                        money_format,
+                        sheet.cell(2, headers.index(header) + 1).number_format,
+                    )
                 helper_values = {
                     cell.value
                     for row in sheet.iter_rows()
@@ -441,6 +366,38 @@ class WorkbookOutputTests(unittest.TestCase):
                     if isinstance(cell.value, str)
                 }
                 self.assertIn("明确排除", helper_values)
+            finally:
+                workbook.close()
+
+    def test_every_manual_dropdown_starts_with_the_system_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "逐行人工下拉.xlsx"
+            build_output_workbook(workbook_model(2, 0), path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                sheet = workbook["重要待复核事项"]
+                headers = [cell.value for cell in sheet[1]]
+                options_column = headers.index("人工可选标准项目") + 1
+                manual_column = headers.index("人工确认项目") + 1
+                validations = tuple(sheet.data_validations.dataValidation)
+                for row in (2, 3):
+                    self.assertNotIn(
+                        USE_SYSTEM_RECOMMENDATION,
+                        str(sheet.cell(row, options_column).value),
+                    )
+                    coordinate = sheet.cell(row, manual_column).coordinate
+                    validation = next(
+                        item
+                        for item in validations
+                        if any(coordinate in cell_range for cell_range in item.sqref.ranges)
+                    )
+                    range_ref = validation.formula1.split("!", 1)[1].replace("$", "")
+                    start, end = range_ref.split(":", 1)
+                    self.assertEqual(
+                        USE_SYSTEM_RECOMMENDATION,
+                        sheet[start].value,
+                    )
+                    self.assertEqual("明确排除", sheet[end].value)
             finally:
                 workbook.close()
 

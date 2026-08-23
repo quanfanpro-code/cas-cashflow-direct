@@ -11,12 +11,11 @@ from cashflow_direct.account_dictionary import (
     load_common_dictionary,
 )
 from cashflow_direct.classification import (
-    _rule_matches,
-    ClassificationRule,
-    classify_component,
+    classify_component as _classify_component,
     load_rule_pack,
     standardize_flow_item,
 )
+from cashflow_direct.summary_semantics import analyze_summary, load_summary_rules
 from cashflow_direct.models import CashflowComponent
 from cashflow_direct.validation import validate_classification
 from cashflow_direct.money import statement_amount_cent
@@ -24,6 +23,15 @@ from tests.fixture_factory import cashflow_component
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def classify_component(component, rules, dictionary=None, summary_semantics=None):
+    """测试入口始终先形成正式摘要语义，禁止回退到旧关键词分类。"""
+    semantics = summary_semantics or {
+        component.summary: analyze_summary(component.summary, load_summary_rules(ROOT))
+    }
+    account_dictionary = dictionary or load_common_dictionary(ROOT)
+    return _classify_component(component, rules, account_dictionary, semantics)
 
 
 class ClassificationTests(unittest.TestCase):
@@ -39,54 +47,14 @@ class ClassificationTests(unittest.TestCase):
         self.assertIsNone(standardize_flow_item("客户自定义项目", rules))
         self.assertIsNone(standardize_flow_item("经营活动现金流入小计", rules))
 
-    def test_sole_account_terms_matches_only_when_sole_counterpart(self) -> None:
-        rule = ClassificationRule(
-            rule_id="CFO-06-SOLE",
-            item_id="CFO-06",
-            priority=20,
-            direction="outflow",
-            summary_terms=(),
-            account_terms=(),
-            exclude_terms=(),
-            account_exclude_terms=(),
-            evidence_level="medium",
-            sole_account_terms=("应交税费",),
-        )
-        component = CashflowComponent(
-            component_id="C1",
-            voucher_key="V1",
-            summary="支付款项",
-            cash_delta_cent=-1000,
-            counterpart_accounts=("应交税费",),
-        )
-        self.assertTrue(_rule_matches(rule, component))
-
-        component_with_trade = CashflowComponent(
-            component_id="C2",
-            voucher_key="V2",
-            summary="支付律师费",
-            cash_delta_cent=-1000,
-            counterpart_accounts=("应交税费", "管理费用"),
-        )
-        self.assertFalse(_rule_matches(rule, component_with_trade))
-
-        inflow = CashflowComponent(
-            component_id="C3",
-            voucher_key="V3",
-            summary="收到利息",
-            cash_delta_cent=1000,
-            counterpart_accounts=("应交税费",),
-        )
-        self.assertFalse(_rule_matches(rule, inflow))
-
     def test_vat_accompanies_trade_classification(self) -> None:
         rules = load_rule_pack(ROOT)
         cases = [
             (cashflow_component("支付律师费", -298496, counterpart_accounts=("管理费用", "应交税费")), "CFO-07"),
-            (cashflow_component("支付CS Fee", -152430, counterpart_accounts=("应付账款", "应交税费")), "CFO-04"),
+            (cashflow_component("支付CS Fee", -152430, counterpart_accounts=("应付账款", "应交税费")), ""),
             (cashflow_component("收取物业租赁款", 209411655, counterpart_accounts=("预收账款", "应交税费")), "CFO-01"),
             (cashflow_component("缴纳增值税", -1000, counterpart_accounts=("应交税费",)), "CFO-06"),
-            (cashflow_component("支付款项", -1000, counterpart_accounts=("应交税费",)), "CFO-06"),
+            (cashflow_component("支付款项", -1000, counterpart_accounts=("应交税费",)), ""),
         ]
         for component, expected in cases:
             with self.subTest(summary=component.summary):
@@ -168,9 +136,10 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-07", decision.system_item_id)
-        self.assertEqual("CFO-07-PENALTY", decision.matched_rule_id)
-        self.assertEqual(70, decision.evidence_score)
-        self.assertEqual("high", decision.evidence_level)
+        self.assertTrue(decision.matched_rule_id.startswith("DICT-COMMON-"))
+        self.assertEqual(55, decision.evidence_score)
+        self.assertEqual("medium", decision.evidence_level)
+        self.assertTrue(decision.sources_independent)
         self.assertFalse(decision.resolved)
         self.assertEqual("conflicts", decision.original_item_state)
         self.assertIn("滞纳金", decision.reason)
@@ -188,14 +157,14 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-01", decision.system_item_id)
-        self.assertEqual("CFO-01-SALES", decision.matched_rule_id)
+        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
         self.assertEqual("high", decision.evidence_level)
-        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual(90, decision.evidence_score)
         self.assertFalse(decision.resolved)
         self.assertIn("销售商品", decision.reason)
         self.assertIn("主营业务收入", decision.reason)
         self.assertIn("原项目能够标准化并与候选一致", decision.reason)
-        self.assertNotIn("CFO-01-SALES", decision.reason)
+        self.assertNotIn("SUMMARY-SEMANTICS", decision.reason)
 
     def test_unlabeled_business_gap_does_not_invent_a_direction_fallback(self) -> None:
         decision = classify_component(
@@ -218,10 +187,10 @@ class ClassificationTests(unittest.TestCase):
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFI-06", decision.system_item_id)
-        self.assertEqual("CFI-06-BUILD-ASSET", decision.matched_rule_id)
-        self.assertEqual(70, decision.evidence_score)
-        self.assertEqual(("CFI-06",), decision.candidate_item_ids)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("AMBIGUOUS-SOURCE-CANDIDATES", decision.matched_rule_id)
+        self.assertEqual(10, decision.evidence_score)
+        self.assertEqual(("CFI-06", "CFI-07"), decision.candidate_item_ids)
         self.assertFalse(decision.resolved)
 
     def test_guarantee_candidate_and_investing_original_are_recorded_as_conflicting(self) -> None:
@@ -236,9 +205,9 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-07", decision.system_item_id)
-        self.assertEqual("CFO-07-CURRENT", decision.matched_rule_id)
-        self.assertEqual(50, decision.evidence_score)
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
+        self.assertEqual(25, decision.evidence_score)
+        self.assertEqual("low", decision.evidence_level)
         self.assertFalse(decision.resolved)
         self.assertEqual("conflicts", decision.original_item_state)
 
@@ -303,7 +272,7 @@ class ClassificationTests(unittest.TestCase):
             cashflow_component("收到债券投资利息", 12_000, ("投资收益",)), rules
         )
         self.assertEqual("CFO-03", bank_interest.system_item_id)
-        self.assertEqual(70, bank_interest.evidence_score)
+        self.assertEqual(90, bank_interest.evidence_score)
         self.assertEqual("high", bank_interest.evidence_level)
         self.assertEqual("CFI-02", investment_interest.system_item_id)
 
@@ -358,7 +327,9 @@ class ClassificationTests(unittest.TestCase):
             rules,
         )
         self.assertEqual("CFO-07", decision.system_item_id)
-        self.assertEqual("CFO-07-PENALTY", decision.matched_rule_id)
+        self.assertTrue(decision.matched_rule_id.startswith("DICT-COMMON-"))
+        self.assertEqual(55, decision.evidence_score)
+        self.assertTrue(decision.sources_independent)
         self.assertFalse(decision.resolved)
         self.assertEqual("conflicts", decision.original_item_state)
         self.assertIn("原项目", decision.reason)
@@ -377,7 +348,7 @@ class ClassificationTests(unittest.TestCase):
             rules,
         )
         self.assertEqual("CFO-01", decision.system_item_id)
-        self.assertEqual("CFO-01-SALES", decision.matched_rule_id)
+        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
         self.assertFalse(decision.resolved)
         self.assertEqual("agrees", decision.original_item_state)
         self.assertIn("原项目能够标准化并与候选一致", decision.reason)
@@ -401,7 +372,7 @@ class ClassificationTests(unittest.TestCase):
         # Task 2 Step 4 新增规则词条逐一核对
         rules = load_rule_pack(ROOT)
         cases = (
-            ("税收滞纳金", -100, ("营业外支出",), "CFO-07"),
+            ("支付税收滞纳金", -100, ("营业外支出",), "CFO-07"),
             ("缴纳车船税", -100, ("应交税费",), "CFO-06"),
             ("收到结构性存款利息", 100, ("结构性存款",), "CFI-02"),
             ("支付长期待摊费用装修款", -100, ("长期待摊费用",), "CFI-06"),
@@ -422,10 +393,10 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("", decision.system_item_id)
-        self.assertEqual("ambiguous", decision.candidate_status)
-        self.assertGreater(len(decision.candidate_item_ids), 1)
-        self.assertEqual("low", decision.evidence_level)
-        self.assertEqual(10, decision.evidence_score)
+        self.assertEqual("no_candidate", decision.candidate_status)
+        self.assertEqual((), decision.candidate_item_ids)
+        self.assertEqual("invalid", decision.evidence_level)
+        self.assertEqual(0, decision.evidence_score)
 
     def test_pay_huokuan_summary_is_medium_purchase_evidence(self) -> None:
         # 摘要强45分与完整路径中25分相互印证，合计70分。
@@ -435,8 +406,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-04", decision.system_item_id)
-        self.assertEqual("high", decision.evidence_level)
-        self.assertEqual(70, decision.evidence_score)
+        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(45, decision.evidence_score)
 
     def test_input_vat_does_not_turn_a_purchase_payment_into_tax_payment(self) -> None:
         decision = classify_component(
@@ -492,10 +463,10 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-01", receipt.system_item_id)
-        self.assertEqual(70, receipt.evidence_score)
-        self.assertEqual("high", receipt.evidence_level)
+        self.assertEqual(50, receipt.evidence_score)
+        self.assertEqual("medium", receipt.evidence_level)
         self.assertEqual("CFO-01", refund.system_item_id)
-        self.assertEqual(45, refund.evidence_score)
+        self.assertEqual(50, refund.evidence_score)
         self.assertEqual("medium", refund.evidence_level)
 
     def test_withheld_individual_income_tax_belongs_to_staff_payments(self) -> None:
@@ -507,8 +478,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertEqual(45, decision.evidence_score)
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(25, decision.evidence_score)
+        self.assertEqual("low", decision.evidence_level)
 
     def test_plain_individual_income_tax_payment_also_goes_to_staff_payments(self) -> None:
         # 复核修复：缴纳个人所得税同样随职工薪酬归 CFO-05（企业缴个税本质是代扣款的缴纳动作），
@@ -519,7 +490,7 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertEqual("CFO-05-STAFF", decision.matched_rule_id)
+        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
         self.assertEqual("medium", decision.evidence_level)
 
     def test_short_individual_tax_word_and_common_detail_path_go_to_staff_payments(self) -> None:
@@ -529,7 +500,7 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertEqual("CFO-05-STAFF", decision.matched_rule_id)
+        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
         self.assertFalse(decision.source_conflict)
 
     def test_dividend_individual_tax_is_staff_payment_not_dividend_distribution(self) -> None:
@@ -539,7 +510,7 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertEqual("CFO-05-STAFF", decision.matched_rule_id)
+        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
 
     def test_enterprise_income_tax_still_uses_tax_payment_rule(self) -> None:
         # 回归保护：企业所得税仍命中 CFO-06 税费摘要词
@@ -549,8 +520,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-06", decision.system_item_id)
-        self.assertEqual(70, decision.evidence_score)
-        self.assertEqual("high", decision.evidence_level)
+        self.assertEqual(25, decision.evidence_score)
+        self.assertEqual("low", decision.evidence_level)
 
     def test_note_discounting_without_financing_facts_has_no_candidate(self) -> None:
         # 会计类第1号指引及上交所案例：贴现不符合终止确认条件时应列筹资流入并确认为借款，
@@ -572,8 +543,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-01", decision.system_item_id)
-        self.assertEqual(70, decision.evidence_score)
-        self.assertEqual("high", decision.evidence_level)
+        self.assertEqual(45, decision.evidence_score)
+        self.assertEqual("medium", decision.evidence_level)
 
     def test_wealth_management_redemption_principal_is_investment_recovery(self) -> None:
         # 应用指南三(二)1：理财/结构性存款赎回本金入"收回投资收到的现金"，
@@ -584,8 +555,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-01", decision.system_item_id)
-        self.assertEqual(70, decision.evidence_score)
-        self.assertEqual("high", decision.evidence_level)
+        self.assertEqual(45, decision.evidence_score)
+        self.assertEqual("medium", decision.evidence_level)
 
     def test_structured_deposit_interest_stays_investment_income(self) -> None:
         # 回归保护：结构性存款利息仍归 CFI-02，赎回排除词不能误伤收益场景
@@ -648,9 +619,9 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-06", decision.system_item_id)
-        self.assertEqual({"CFI-06", "CFO-06"}, set(decision.candidate_item_ids))
-        self.assertTrue(decision.source_conflict)
-        self.assertIsNone(decision.evidence_score)
+        self.assertEqual(("CFI-06",), decision.candidate_item_ids)
+        self.assertFalse(decision.source_conflict)
+        self.assertEqual(45, decision.evidence_score)
 
     def test_vehicle_purchase_tax_follows_asset_acquisition(self) -> None:
         # 车辆购置税为购置车辆的直接相关税费，随资产购建归 CFI-06
@@ -660,9 +631,9 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-06", decision.system_item_id)
-        self.assertEqual({"CFI-06", "CFO-06"}, set(decision.candidate_item_ids))
-        self.assertTrue(decision.source_conflict)
-        self.assertIsNone(decision.evidence_score)
+        self.assertEqual(("CFI-06",), decision.candidate_item_ids)
+        self.assertFalse(decision.source_conflict)
+        self.assertEqual(45, decision.evidence_score)
 
     def test_returned_vat_credit_refund_is_tax_payment(self) -> None:
         # 应用指南：缴回留抵退税款属于"支付的各项税费"
@@ -672,8 +643,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-06", decision.system_item_id)
-        self.assertEqual(70, decision.evidence_score)
-        self.assertEqual("high", decision.evidence_level)
+        self.assertEqual(25, decision.evidence_score)
+        self.assertEqual("low", decision.evidence_level)
 
     def test_received_vat_credit_refund_stays_tax_refund(self) -> None:
         # 回归保护：收到留抵退税款仍归"收到的税费返还"
@@ -684,13 +655,11 @@ class ClassificationTests(unittest.TestCase):
 
         self.assertEqual("CFO-02", decision.system_item_id)
         # 重构后口径：单摘要词50分=中
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual("low", decision.evidence_level)
 
 
 def test_complete_path_dictionary_recognizes_equipment_payable():
     """完整路径中的“应付设备款”按通用科目语义形成投资活动候选。"""
-    from cashflow_direct.classification import classify_component, load_rule_pack
-
     rules = load_rule_pack(ROOT)
     component = CashflowComponent(
         component_id="CMP-LIFT", voucher_key="K", summary="付日立电梯公司电梯安装工程款",
@@ -706,8 +675,6 @@ def test_complete_path_dictionary_recognizes_equipment_payable():
 
 def test_fee_type_split_categories():
     """明确业务属性的复合词才允许形成唯一费用类候选。"""
-    from cashflow_direct.classification import classify_component, load_rule_pack
-
     rules = load_rule_pack(ROOT)
     cases = (
         ("审计费", ("管理费用",), "CFO-07"),
@@ -744,7 +711,7 @@ def test_plain_vat_in_purchase_summary_is_not_tax_payment():
         load_rule_pack(ROOT),
     )
     assert decision.system_item_id == "CFO-04"
-    assert decision.evidence_score == 70
+    assert decision.evidence_score == 55
     assert decision.resolved is False
 
 
@@ -755,7 +722,7 @@ def test_explicit_vat_payment_is_tax_payment():
         load_rule_pack(ROOT),
     )
     assert decision.system_item_id == "CFO-06"
-    assert decision.evidence_level == "high"
+    assert decision.summary_quality == 25
 
 
 def test_staff_tax_for_construction_is_a_two_source_conflict():

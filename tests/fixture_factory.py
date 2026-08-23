@@ -416,7 +416,9 @@ def duplicate_components(
 
 
 def classified_components():
+    from cashflow_direct.account_dictionary import load_common_dictionary
     from cashflow_direct.classification import classify_all, load_rule_pack
+    from cashflow_direct.summary_semantics import analyze_summary, load_summary_rules
 
     root = Path(__file__).resolve().parents[1]
     rules = load_rule_pack(root)
@@ -426,7 +428,17 @@ def classified_components():
         cashflow_component("收回长期股权投资", 300_000, component_id="S3"),
         cashflow_component("取得银行借款", 200_000, component_id="S4"),
     )
-    candidate_decisions = classify_all(components, rules)
+    summary_rules = load_summary_rules(root)
+    summary_semantics = {
+        component.summary: analyze_summary(component.summary, summary_rules)
+        for component in components
+    }
+    candidate_decisions = classify_all(
+        components,
+        rules,
+        load_common_dictionary(root),
+        summary_semantics,
+    )
     decisions = tuple(
         replace(
             decision,
@@ -719,13 +731,11 @@ def write_detail_plus_statement_fixture(path: Path) -> None:
 
 
 def mark_dictionary_complete(run_dir) -> None:
-    """测试辅助：与语义门禁无关的旧测试直接标记两类语义已齐备。"""
+    """测试辅助：仅跳过与目标行为无关的科目语义人工确认。"""
     import json
     from pathlib import Path
 
     state_path = Path(run_dir) / "计算留痕数据" / "运行状态.json"
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))
     state["account_dictionary_completed"] = True
-    state["summary_dictionary_completed"] = True
-    state.setdefault("summary_dictionary", {"tasks": [], "valid_results": [], "missing_ids": []})
-    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8-sig")

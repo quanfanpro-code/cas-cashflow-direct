@@ -1,19 +1,135 @@
 from __future__ import annotations
 
+import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from cashflow_direct.account_dictionary import (
     AccountDictionary,
     AccountSemanticEntry,
-    SummaryDictionary,
-    SummarySemanticEntry,
     load_common_dictionary,
 )
-from cashflow_direct.classification import classify_component, load_rule_pack
+from cashflow_direct.classification import (
+    classify_component as _classify_component,
+    load_rule_pack,
+)
+from cashflow_direct.decision_policy import EvidenceQuality
+from cashflow_direct.summary_semantics import (
+    SummarySemanticResult,
+    SummarySpan,
+    analyze_summary,
+    load_summary_rules,
+)
 from tests.fixture_factory import cashflow_component
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class SummarySemanticEntry:
+    """旧测试数据的最小承载体；进入分类前一律转换为正式摘要语义结果。"""
+
+    summary: str
+    semantic: str
+    item_id: str
+    basis: str
+    confidence: str
+    classification_facts: tuple[str, ...]
+    candidate_item_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SummaryDictionary:
+    entries: tuple[SummarySemanticEntry, ...]
+
+
+def _fixture_semantics(fixtures: SummaryDictionary) -> dict[str, SummarySemanticResult]:
+    quality_by_name = {
+        "invalid": EvidenceQuality.INVALID,
+        "low": EvidenceQuality.WEAK,
+        "weak": EvidenceQuality.WEAK,
+        "medium": EvidenceQuality.MEDIUM,
+        "high": EvidenceQuality.STRONG,
+    }
+    results: dict[str, SummarySemanticResult] = {}
+    for entry in fixtures.entries:
+        spans = tuple(
+            SummarySpan(
+                fact.split(":", 1)[0],
+                fact.split(":", 1)[-1],
+                0,
+                len(entry.summary),
+                "test_fixture",
+            )
+            for fact in entry.classification_facts
+        )
+        candidates = entry.candidate_item_ids or ((entry.item_id,) if entry.item_id else ())
+        results[entry.summary] = SummarySemanticResult(
+            entry.summary,
+            "complete",
+            spans,
+            candidates,
+            quality_by_name[entry.confidence],
+            entry.basis,
+        )
+    return results
+
+
+def classify_component(
+    component,
+    rules,
+    dictionary=None,
+    summary_semantics=None,
+    *,
+    summary_dictionary=None,
+):
+    """测试也必须通过正式摘要语义边界，不允许旧关键词回退。"""
+    if summary_dictionary is not None:
+        summary_semantics = summary_dictionary
+    if isinstance(summary_semantics, SummaryDictionary):
+        semantics = _fixture_semantics(summary_semantics)
+        if component.summary not in semantics:
+            semantics[component.summary] = analyze_summary(
+                component.summary, load_summary_rules(ROOT)
+            )
+    elif summary_semantics is None:
+        semantics = {
+            component.summary: analyze_summary(component.summary, load_summary_rules(ROOT))
+        }
+    else:
+        semantics = summary_semantics
+    account_dictionary = dictionary or load_common_dictionary(ROOT)
+    return _classify_component(component, rules, account_dictionary, semantics)
+
+
+class FormalSummarySemanticsTests(unittest.TestCase):
+    def test_classification_requires_formal_summary_semantics_and_never_falls_back(self) -> None:
+        component = cashflow_component(
+            "支付工资",
+            -100,
+            original_item_text="支付给职工以及为职工支付的现金",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "摘要语义尚未完成"):
+            _classify_component(
+                component,
+                load_rule_pack(ROOT),
+                summary_semantics=None,
+            )
+
+    def test_formal_summary_semantics_is_the_only_summary_source(self) -> None:
+        component = cashflow_component("缴纳税款", -100)
+        semantic = analyze_summary(component.summary, load_summary_rules(ROOT))
+
+        decision = classify_component(
+            component,
+            load_rule_pack(ROOT),
+            summary_semantics={component.summary: semantic},
+        )
+
+        self.assertEqual(("CFO-06",), decision.summary_candidate_item_ids)
+        self.assertEqual(25, decision.summary_quality)
 
 
 def test_original_label_alone_is_not_a_candidate_or_evidence() -> None:
@@ -83,7 +199,7 @@ def test_complete_path_semantics_survive_when_hard_rule_wins_same_candidate() ->
     decision = classify_component(component, load_rule_pack(ROOT), dictionary)
 
     assert decision.system_item_id == "CFO-05"
-    assert decision.business_object == "支付职工工资"
+    assert "支付职工工资" in decision.business_object
     assert decision.purpose == "应付工资"
 
 
@@ -506,7 +622,8 @@ def test_original_item_conflict_is_recorded_without_classification_auto_change()
 
     assert decision.system_item_id == "CFO-07"
     assert decision.original_item_state == "conflicts"
-    assert decision.evidence_score == 70
+    assert decision.evidence_score == 55
+    assert decision.sources_independent is True
     assert decision.resolved is False
     assert decision.decision_source == "candidate"
 
@@ -533,7 +650,6 @@ def test_illegal_input_is_isolated_before_candidate_generation() -> None:
         -100,
         ("应付账款_供应商",),
         original_item_text="购买商品、接受劳务支付的现金",
-        anomalies=("summary_empty",),
     )
 
     decision = classify_component(component, load_rule_pack(ROOT))

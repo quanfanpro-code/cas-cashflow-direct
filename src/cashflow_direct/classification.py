@@ -2,17 +2,16 @@
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from cashflow_direct.account_dictionary import score_dictionary_hits, score_summary_hit
+from cashflow_direct.account_dictionary import score_dictionary_hits
 from cashflow_direct.evidence import (
     SOURCE_ACCOUNT_PATH,
     SOURCE_SUMMARY,
+    RuleScore,
     aggregate_evidence,
-    score_rule,
-    split_account_levels,
 )
 from cashflow_direct.decision_policy import (
     DecisionAction,
@@ -28,6 +27,7 @@ from cashflow_direct.materiality import (
 )
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
 from cashflow_direct.money import stable_id
+from cashflow_direct.summary_semantics import SummarySemanticResult
 
 # 来源中文名映射（用于 reason 展示，最终 xlsx 人类可读列一律中文）
 _SOURCE_CN = {
@@ -48,27 +48,8 @@ class StatementItem:
 
 
 @dataclass(frozen=True, slots=True)
-class ClassificationRule:
-    rule_id: str
-    item_id: str
-    priority: int
-    direction: str
-    summary_terms: tuple[str, ...]
-    account_terms: tuple[str, ...]
-    exclude_terms: tuple[str, ...]
-    account_exclude_terms: tuple[str, ...]
-    evidence_level: str
-    sole_account_terms: tuple[str, ...] = ()
-    candidate_item_ids: tuple[str, ...] = ()
-    # 为 True 时规则必须命中对方科目才参与打分（用于按服务对象分流的职工类规则）
-    require_account: bool = False
-    require_detail_path: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class RulePack:
     statement_items: tuple[StatementItem, ...]
-    rules: tuple[ClassificationRule, ...]
 
     @property
     def item_by_id(self) -> dict[str, StatementItem]:
@@ -90,7 +71,6 @@ def _read_json(path: Path) -> dict[str, object]:
 def load_rule_pack(root: Path) -> RulePack:
     reference_root = Path(root) / "references"
     item_payload = _read_json(reference_root / "一般企业正表项目.json")
-    rule_payload = _read_json(reference_root / "直接法分类规则.json")
     items = tuple(
         StatementItem(
             item_id=item["item_id"],
@@ -103,101 +83,59 @@ def load_rule_pack(root: Path) -> RulePack:
         )
         for item in item_payload["statement_items"]
     )
-    rules = tuple(
-        ClassificationRule(
-            rule_id=rule["rule_id"],
-            item_id=rule["item_id"],
-            priority=int(rule["priority"]),
-            direction=rule["direction"],
-            summary_terms=tuple(rule["summary_terms"]),
-            account_terms=tuple(rule["account_terms"]),
-            exclude_terms=tuple(rule["exclude_terms"]),
-            account_exclude_terms=tuple(rule.get("account_exclude_terms", ())),
-            evidence_level=rule["evidence_level"],
-            sole_account_terms=tuple(rule.get("sole_account_terms", ())),
-            candidate_item_ids=tuple(rule.get("candidate_item_ids", ())),
-            require_account=bool(rule.get("require_account", False)),
-            require_detail_path=bool(rule.get("require_detail_path", False)),
-        )
-        for rule in rule_payload["rules"]
-    )
     if len(items) != 35 or len({item.item_id for item in items}) != 35:
         raise ValueError("一般企业正表项目必须恰好包含 35 个唯一行项目")
-    item_ids = {item.item_id for item in items}
-    if any(rule.item_id not in item_ids for rule in rules):
-        raise ValueError("分类规则引用了不存在的正表项目")
-    return RulePack(items, tuple(sorted(rules, key=lambda item: (item.priority, item.rule_id))))
+    return RulePack(items)
 
 
-def _matched_terms(
-    rule: ClassificationRule,
+def _score_summary_semantics(
     component: CashflowComponent,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    summary_text = component.summary
-    account_text = "|".join(component.counterpart_accounts)
-    summary_hits = tuple(
-        dict.fromkeys(
-            term
-            for term in (*rule.summary_terms, *rule.account_terms)
-            if term in summary_text
-        )
+    result: SummarySemanticResult,
+    rules: RulePack,
+) -> RuleScore | None:
+    if result.summary != component.summary:
+        raise ValueError("摘要语义结果与当前业务摘要不一致")
+    if result.status == "needs_agent":
+        raise RuntimeError("摘要语义尚未完成，不能进入现金流分类")
+    if result.quality.value == 0 or not result.candidate_item_ids:
+        return None
+    unknown = set(result.candidate_item_ids).difference(rules.item_by_id)
+    if unknown:
+        raise ValueError(f"摘要语义引用了不存在的正表项目：{'、'.join(sorted(unknown))}")
+    item_id = result.candidate_item_ids[0] if len(result.candidate_item_ids) == 1 else ""
+    semantic_spans = tuple(
+        span
+        for span in result.spans
+        if span.slot not in {"noise", "noise_date", "noise_amount", "noise_number"}
     )
-    account_hits = tuple(
-        term
-        for term in (*rule.account_terms, *rule.sole_account_terms)
-        if term in account_text
+    return RuleScore(
+        rule_id=f"SUMMARY-SEMANTICS-{component.component_id}",
+        item_id=item_id,
+        priority=-100,
+        source=SOURCE_SUMMARY,
+        score=result.quality.value,
+        summary_part=result.quality.value,
+        account_part=0,
+        direction_compatible=(
+            True
+            if not item_id
+            else rules.item_by_id[item_id].normal_direction
+            == ("inflow" if component.cash_delta_cent > 0 else "outflow")
+        ),
+        summary_hits=tuple(span.text for span in semantic_spans),
+        account_hits=(),
+        channels=(SOURCE_SUMMARY,),
+        summary_facts=tuple(f"{span.slot}:{span.text}" for span in semantic_spans),
+        business_object="、".join(
+            dict.fromkeys(span.text for span in result.spans if span.slot == "business_object")
+        ),
+        purpose="、".join(
+            dict.fromkeys(
+                span.text for span in result.spans if span.slot in {"purpose", "attribute"}
+            )
+        ),
+        candidate_item_ids=result.candidate_item_ids,
     )
-    return summary_hits, account_hits
-
-
-def _rule_matches(rule: ClassificationRule, component: CashflowComponent) -> bool:
-    direction = "inflow" if component.cash_delta_cent > 0 else "outflow"
-    if rule.direction not in {"any", direction}:
-        return False
-    account_text = "|".join(component.counterpart_accounts)
-    if any(term in component.summary for term in rule.exclude_terms):
-        return False
-    if any(term in account_text for term in rule.account_exclude_terms):
-        return False
-    if (
-        rule.require_detail_path
-        and len(component.counterpart_accounts) == 1
-        and not any(
-            len(split_account_levels(account)) > 1
-            for account in component.counterpart_accounts
-        )
-    ):
-        return False
-    if rule.sole_account_terms:
-        counterpart = component.counterpart_accounts
-        if not counterpart:
-            return False
-        # 唯一对方科目判断：每个对方科目名称只需包含任一 sole 词，
-        # 以兼容“应交税费_应交个人所得税”这类带明细级次的科目名
-        return all(
-            any(sole_term in account for sole_term in rule.sole_account_terms)
-            for account in counterpart
-        )
-    if not rule.summary_terms and not rule.account_terms:
-        return True
-    summary_hits, account_hits = _matched_terms(rule, component)
-    return bool(summary_hits or account_hits)
-
-
-def _business_reason(
-    rule: ClassificationRule,
-    component: CashflowComponent,
-    item: StatementItem,
-) -> str:
-    summary_hits, account_hits = _matched_terms(rule, component)
-    parts = []
-    if summary_hits:
-        parts.append(f"摘要包含“{'、'.join(summary_hits)}”")
-    if account_hits:
-        parts.append(f"对方科目包含“{'、'.join(account_hits)}”")
-    parts.append(f"现金为{'流入' if component.cash_delta_cent > 0 else '流出'}")
-    parts.append(f"因此判断为“{item.name}”")
-    return "；".join(parts)
 
 
 def _normalize_item_name(value: str) -> str:
@@ -220,7 +158,7 @@ def classify_component(
     component: CashflowComponent,
     rules: RulePack,
     dictionary: object | None = None,
-    summary_dictionary: object | None = None,
+    summary_semantics: Mapping[str, SummarySemanticResult] | None = None,
 ) -> ClassificationDecision:
     if component.account_mapping_status != "confirmed":
         raise ValueError("一级科目映射未全部确认，不能进入现金流分类")
@@ -232,7 +170,7 @@ def classify_component(
     else:
         pending_original_state = "pending_comparison"
     illegal_markers = {"summary_empty", "account_path_empty", "account_path_invalid"}
-    if illegal_markers.intersection(component.anomalies):
+    if not component.summary.strip() or illegal_markers.intersection(component.anomalies):
         return ClassificationDecision(
             component_id=component.component_id,
             system_item_id="",
@@ -267,18 +205,9 @@ def classify_component(
         )
 
     evidence_component = component
-    matches = [rule for rule in rules.rules if _rule_matches(rule, evidence_component)]
-    business_matches = [
-        rule
-        for rule in matches
-        if rule.summary_terms or rule.account_terms or rule.sole_account_terms
-    ]
-    structured_semantics_ready = dictionary is not None and summary_dictionary is not None
-    if structured_semantics_ready:
-        # 正式运行已经完成“完整路径语义确认 + 摘要语义确认”后，只使用这两类
-        # 结构化证据。旧关键词规则仅保留给尚未迁移的兼容场景，不能再次参与
-        # 正式评分，否则会把同一文本机械拆成额外候选并制造虚假冲突。
-        business_matches = []
+    if summary_semantics is None or component.summary not in summary_semantics:
+        raise RuntimeError("摘要语义尚未完成，不能进入现金流分类")
+    summary_result = summary_semantics[component.summary]
     dictionary_scores = (
         list(score_dictionary_hits(evidence_component, dictionary))
         if dictionary is not None
@@ -296,12 +225,8 @@ def classify_component(
         if candidate_id
     }
     path_business_conflict = len(non_vat_path_candidates) > 1
-    summary_score = (
-        score_summary_hit(evidence_component, summary_dictionary)
-        if summary_dictionary is not None
-        else None
-    )
-    if not business_matches and not dictionary_scores and summary_score is None:
+    summary_score = _score_summary_semantics(evidence_component, summary_result, rules)
+    if not dictionary_scores and summary_score is None:
         return ClassificationDecision(
             component_id=component.component_id,
             system_item_id="",
@@ -314,16 +239,14 @@ def classify_component(
             resolved=False,
             evidence_score=0,
             candidate_item_ids=(),
+            summary_candidate_item_ids=summary_result.candidate_item_ids,
             original_item_state=pending_original_state,
+            summary_quality=summary_result.quality.value,
             candidate_status="no_candidate",
             original_standard_item_id="" if exact_item is None else exact_item.item_id,
         )
 
-    rule_scores = [
-        score_rule(rule, evidence_component, rules.item_by_id[rule.item_id].normal_direction)
-        for rule in business_matches
-    ]
-    rule_scores.extend(dictionary_scores)
+    rule_scores = list(dictionary_scores)
     if summary_score is not None:
         rule_scores.append(summary_score)
     agg = aggregate_evidence(
@@ -379,7 +302,6 @@ def classify_component(
             original_standard_item_id="" if exact_item is None else exact_item.item_id,
         )
 
-    rule_by_id = {rule.rule_id: rule for rule in business_matches}
     best_score = min(
         (
             score
@@ -405,11 +327,21 @@ def classify_component(
         sorted({score.purpose for score in semantic_scores if score.purpose})
     )
     item = rules.item_by_id[agg.item_id]
-    chosen_rule = rule_by_id.get(best_score.rule_id)
-    if chosen_rule is not None:
-        reason = _business_reason(chosen_rule, evidence_component, item)
+    if best_score.summary_part:
+        reason = (
+            f"摘要固定语义形成“{item.name}”候选："
+            f"{'、'.join(best_score.summary_hits)}"
+        )
+        path_hits = tuple(
+            hit
+            for score in agg.rule_scores
+            if score.account_part
+            and (score.item_id == agg.item_id or agg.item_id in score.candidate_item_ids)
+            for hit in score.account_hits
+        )
+        if path_hits:
+            reason += f"；完整对方科目路径同时支持：{'、'.join(path_hits)}"
     else:
-        # 词典命中的完整路径语义没有 rule JSON 实体，命中内容即对方科目完整路径
         account_text = "、".join(best_score.account_hits) if best_score.account_hits else ""
         reason = (
             f"对方科目包含“{account_text}”，符合“{item.name}”的科目语义词典定义"
@@ -502,10 +434,10 @@ def classify_all(
     components: Sequence[CashflowComponent],
     rules: RulePack,
     dictionary: object | None = None,
-    summary_dictionary: object | None = None,
+    summary_semantics: Mapping[str, SummarySemanticResult] | None = None,
 ) -> tuple[ClassificationDecision, ...]:
     return tuple(
-        classify_component(component, rules, dictionary, summary_dictionary)
+        classify_component(component, rules, dictionary, summary_semantics)
         for component in components
     )
 
@@ -529,62 +461,6 @@ def _is_unknown_service_individual_tax(component: CashflowComponent) -> bool:
             "劳务报酬",
         )
     )
-
-
-def _materiality_grouping_basis(
-    component: CashflowComponent,
-    decision: ClassificationDecision,
-    level1_accounts: Sequence[str],
-) -> tuple[bool, str, str]:
-    """判断是否具备会影响动作的可靠同类依据，并返回稳定用途。"""
-    if not decision.system_item_id or decision.candidate_status != "available":
-        return False, "候选项目尚未唯一，只作潜在累计风险提示", ""
-    if not level1_accounts or any(not value.strip() for value in level1_accounts):
-        return False, "标准一级科目不完整，只作潜在累计风险提示", ""
-    semantic_purposes = {
-        value.strip()
-        for value in decision.purpose.split("、")
-        if value.strip()
-    }
-    if len(semantic_purposes) > 1:
-        return False, "存在多个不同明细用途，只作潜在累计风险提示", ""
-    detail_purposes = semantic_purposes or {
-        levels[-1]
-        for account in component.counterpart_accounts
-        if len(levels := split_account_levels(account)) > 1
-        and levels[-1].strip()
-    }
-    if len(detail_purposes) != 1:
-        reason = "明细用途缺失" if not detail_purposes else "存在多个不同明细用途"
-        return False, reason + "，只作潜在累计风险提示", ""
-    purpose = next(iter(detail_purposes))
-    broad_purposes = {
-        "其他",
-        "往来",
-        "往来款",
-        "其他应收款",
-        "其他应付款",
-        "其他收入",
-        "其他支出",
-        "其他费用",
-        "未分类",
-        "待判断",
-    }
-    broad_by_wording = bool(
-        "往来" in purpose
-        or "进项税" in purpose
-        or "销项税" in purpose
-        or (
-            purpose.startswith("其他")
-            and any(
-                term in purpose
-                for term in ("收入", "收益", "支出", "费用", "应收", "应付")
-            )
-        )
-    )
-    if purpose in broad_purposes or broad_by_wording:
-        return False, f"明细用途“{purpose}”过宽，只作潜在累计风险提示", purpose
-    return True, "唯一候选、标准一级科目和单一明细用途均明确", purpose
 
 
 def route_classification_decisions(
@@ -618,38 +494,10 @@ def route_classification_decisions(
     )
     decision_by_id = {item.component_id: item for item in decisions}
     rule_pack = load_rule_pack(Path(__file__).resolve().parents[2])
-    records = []
-    for component in components:
-        decision = decision_by_id[component.component_id]
-        level1_accounts = tuple(
-            sorted(
-                {
-                    levels[0]
-                    for account in component.counterpart_accounts
-                    if (levels := split_account_levels(account))
-                }
-            )
-        )
-        grouping_reliable, grouping_reason, stable_purpose = (
-            _materiality_grouping_basis(component, decision, level1_accounts)
-        )
-        records.append(
-            MaterialityRecord(
-                record_id=component.component_id,
-                amount_cent=component.cash_delta_cent,
-                cash_direction=(
-                    "inflow" if component.cash_delta_cent > 0 else "outflow"
-                ),
-                candidate_item_id=(
-                    "" if decision.source_conflict else decision.system_item_id
-                ),
-                standard_level1_account="、".join(level1_accounts),
-                business_object=decision.business_object,
-                purpose=stable_purpose,
-                grouping_reliable=grouping_reliable,
-                grouping_reason=grouping_reason,
-            )
-        )
+    records = [
+        MaterialityRecord(component.component_id, component.cash_delta_cent)
+        for component in components
+    ]
     assessments = assess_materiality_records(tuple(records), materiality)
     assessment_by_id = {item.record_id: item for item in assessments}
     routed: list[ClassificationDecision] = []
@@ -667,59 +515,14 @@ def route_classification_decisions(
         assessment = assessment_by_id[component.component_id]
         original_state = OriginalItemState(decision.original_item_state)
         actual_direction = "inflow" if component.cash_delta_cent > 0 else "outflow"
-        approved_reversal_rule_ids = tuple(
-            rule.rule_id
-            for rule in rule_pack.rules
-            if rule.item_id == decision.system_item_id
-            and _rule_matches(rule, component)
-            and rule_pack.item_by_id[rule.item_id].normal_direction != actual_direction
-        )
-        approved_reversal_rule_ids += tuple(
-            str(note.get("note_id", ""))
-            for note in company_notes
-            if company_note_is_active(note)
-            and str(note.get("规则类型", "")) == "退款或反向冲减"
-            and company_note_applies(
-                note, component.summary, component.counterpart_accounts
-            )
-        )
-        if approved_reversal_rule_ids:
-            direction_status = "approved_reversal"
-        elif decision.system_item_id and decision.normal_direction != actual_direction:
+        if decision.system_item_id and decision.normal_direction != actual_direction:
             direction_status = "incompatible"
         else:
             direction_status = "compatible"
-        new_reversal_pattern = bool(
-            direction_status == "incompatible"
-            and any(
-                term in f"{component.summary}|{decision.purpose}"
-                for term in (
-                    "退款",
-                    "退回",
-                    "退还",
-                    "退货",
-                    "返还",
-                    "冲减",
-                    "冲回",
-                    "红字",
-                    "撤销",
-                    "退付",
-                )
-            )
-        )
-        reversal_rejected = any(
-            str(note.get("规则类型", "")) == "退款或反向冲减"
-            and str(note.get("状态", "")) == "冲突未采用"
-            and company_note_applies(
-                {**note, "状态": "采用"},
-                component.summary,
-                component.counterpart_accounts,
-            )
-            for note in company_notes
-        )
-        new_reversal_pattern = new_reversal_pattern and not reversal_rejected
         invalid_input = bool(
-            {"summary_empty", "account_path_empty", "account_path_invalid"}
+            not component.summary.strip()
+            or decision.candidate_status == "invalid_input"
+            or {"summary_empty", "account_path_empty", "account_path_invalid"}
             .intersection(component.anomalies)
         )
         individual_tax_fact_missing = _is_unknown_service_individual_tax(component)
@@ -777,22 +580,6 @@ def route_classification_decisions(
         business_conflict = bool(
             getattr(decision, "business_conflict", False)
         )
-        ordinary_group = not (
-            invalid_input
-            or company_rule_conflict
-            or vat_base_missing
-            or net_item_facts_missing
-            or individual_tax_fact_missing
-            or decision.source_conflict
-            or business_conflict
-            or direction_status == "incompatible"
-        )
-        needs_group_confirmation = (
-            ordinary_group
-            and assessment.grouping_status == "reliable"
-            and assessment.single_level is not MaterialityLevel.M3
-            and assessment.cumulative_level is MaterialityLevel.M3
-        )
         routing_level = assessment.single_level
         route = route_decision(
             score=decision.evidence_score,
@@ -803,7 +590,6 @@ def route_classification_decisions(
             vat_base_missing=vat_base_missing,
             net_item_facts_missing=net_item_facts_missing,
             individual_tax_fact_missing=individual_tax_fact_missing,
-            new_reversal_pattern=new_reversal_pattern,
             source_conflict=decision.source_conflict,
             business_conflict=business_conflict,
             direction_status=direction_status,
@@ -823,14 +609,6 @@ def route_classification_decisions(
             route_reason = (
                 f"{decision.reason}；净额资料尚未确认完整，"
                 "不能据此自动修改原项目"
-            )
-        elif (
-            assessment.grouping_status == "potential"
-            and assessment.cumulative_level != assessment.single_level
-        ):
-            route_reason = (
-                f"{decision.reason}；{assessment.grouping_reason}；"
-                f"潜在累计金额{assessment.same_class_total_cent / 100:.2f}元不参与升层"
             )
         else:
             route_reason = decision.reason
@@ -860,31 +638,18 @@ def route_classification_decisions(
             ai_review_policy=route.review_policy,
             materiality_level=routing_level.value,
             single_materiality_level=assessment.single_level.value,
-            cumulative_materiality_level=assessment.cumulative_level.value,
-            materiality_group_id=assessment.group_id,
-            materiality_group_confirmation_status=(
-                "pending_in_final_workbook"
-                if needs_group_confirmation
-                else "not_required"
-            ),
-            materiality_grouping_status=assessment.grouping_status,
-            materiality_grouping_reason=assessment.grouping_reason,
             direction_status=direction_status,
             business_conflict=business_conflict,
             company_rule_conflict=company_rule_conflict,
             vat_base_missing=vat_base_missing,
             net_item_facts_missing=net_item_facts_missing,
             individual_tax_fact_missing=individual_tax_fact_missing,
-            new_reversal_pattern=new_reversal_pattern,
-            approved_reversal_rule_ids=approved_reversal_rule_ids,
             reason=route_reason,
         )
         routed.append(current)
         if route.action is DecisionAction.AI_REVIEW:
             task_decision = current
-            if route.forced_check == "direction" or not any(
-                current.candidate_item_ids
-            ):
+            if not any(current.candidate_item_ids):
                 compatible_ids = tuple(
                     item.item_id
                     for item in load_rule_pack(
@@ -913,9 +678,7 @@ def route_classification_decisions(
             tasks.append(build_ai_task(component, task_decision, company_notes))
         elif route.action is DecisionAction.DOUBLE_AI_REVIEW:
             task_decision = current
-            if route.forced_check == "direction" or not any(
-                current.candidate_item_ids
-            ):
+            if not any(current.candidate_item_ids):
                 compatible_ids = tuple(
                     item.item_id
                     for item in load_rule_pack(

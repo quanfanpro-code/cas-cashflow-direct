@@ -27,7 +27,7 @@ from cashflow_direct.pipeline import (
     supplement_cash_balances,
 )
 from cashflow_direct.statement import ExistingStatementResult, detect_statement_sheets
-from cashflow_direct.workbook_output import USE_SYSTEM_RECOMMENDATION
+from cashflow_direct.workbook_output import SHEET_NAMES, USE_SYSTEM_RECOMMENDATION
 
 
 ALLOWED_SCORES = {0, 10, 20, 25, 35, 45, 50, 55, 70, 90, None}
@@ -153,29 +153,34 @@ def _complete_dictionary(run_dir: Path, result_path: Path) -> None:
     assert imported["status"] == "科目语义已导入"
 
 
-def _complete_summary_dictionary(run_dir: Path, result_path: Path) -> None:
+def _complete_summary_semantics(run_dir: Path, result_path: Path | None) -> None:
     state = _state(run_dir)
     expected = {
         task["task_id"]: task["summary"]
-        for task in state["summary_dictionary"]["tasks"]
+        for task in state["summary_semantics"]["tasks"]
     }
-    if result_path.suffix.lower() == ".jsonl":
-        records = tuple(
-            json.loads(line)
-            for line in result_path.read_text(encoding="utf-8-sig").splitlines()
-            if line.strip()
-        )
-    else:
-        payload = json.loads(result_path.read_text(encoding="utf-8-sig"))
-        records = tuple(payload["summary_dictionary"]["valid_results"])
+    if not expected:
+        return
+    assert result_path is not None and result_path.is_file(), (
+        "固定规则仍有未决语言槽位时，必须提供当前Agent形成的受限槽位结果"
+    )
+    records = tuple(
+        json.loads(line)
+        for line in result_path.read_text(encoding="utf-8-sig").splitlines()
+        if line.strip()
+    )
     selected = tuple(record for record in records if record.get("task_id") in expected)
     assert {record["task_id"] for record in selected} == set(expected)
     assert all(record["summary"] == expected[record["task_id"]] for record in selected)
-    assert any(
-        (record.get("item_id") or record.get("candidate_item_ids"))
-        and record.get("classification_facts")
-        for record in selected
-    ), "摘要语义结果全部为空候选或空分类事实，属于占位结果，不能用于真实验收"
+    forbidden = {
+        "item_id",
+        "candidate_item_ids",
+        "quality",
+        "score",
+        "confidence",
+        "decision_action",
+    }
+    assert all(not forbidden.intersection(record) for record in selected)
     matched_path = run_dir / "摘要语义判断结果_匹配当前输入.jsonl"
     matched_path.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in selected),
@@ -233,11 +238,8 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         pytest.skip("未设置已经完成的科目语义判断结果")
     dictionary_results_path = Path(dictionary_results_value)
     assert dictionary_results_path.is_file()
-    summary_results_value = os.environ.get("CAS_CASHFLOW_REAL_SUMMARY_RESULTS")
-    if not summary_results_value:
-        pytest.skip("未设置已经完成的摘要语义判断结果")
-    summary_results_path = Path(summary_results_value)
-    assert summary_results_path.is_file()
+    summary_results_value = os.environ.get("CAS_CASHFLOW_REAL_SUMMARY_SLOT_RESULTS")
+    summary_results_path = Path(summary_results_value) if summary_results_value else None
     case_dir = Path(raw_directory)
     detail_value = os.environ.get("CAS_CASHFLOW_REAL_DETAIL")
     statement_value = os.environ.get("CAS_CASHFLOW_REAL_STATEMENT")
@@ -331,9 +333,9 @@ def test_real_files_complete_the_generic_pipeline() -> None:
     )
 
     first_classification = run_classification(run_dir)
-    assert first_classification.status == "待摘要语义确认"
-    _complete_summary_dictionary(run_dir, summary_results_path)
-    run_classification(run_dir)
+    if first_classification.status == "待摘要语义确认":
+        _complete_summary_semantics(run_dir, summary_results_path)
+        run_classification(run_dir)
     state = _state(run_dir)
     components = {item["component_id"]: item for item in state["components"]}
     allocations: dict[str, int] = {}
@@ -354,12 +356,17 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         for item in state["decisions"]
     )
     assert all(item["decision_action"] for item in state["decisions"])
+    assert "materiality_group_confirmation_requests" not in state
+    assert "materiality_potential_group_warnings" not in state
     assert all(
         item["sources_independent"]
         for item in state["decisions"]
         if item["evidence_score"] in {70, 90}
     )
-    if len(state["summary_dictionary"]["tasks"]) >= 100:
+    summary_results = state["summary_semantics"]["results"]
+    assert summary_results
+    assert any(item["candidate_item_ids"] for item in summary_results)
+    if len(summary_results) >= 100:
         assert any(
             item["evidence_score"] in {70, 90}
             for item in state["decisions"]
@@ -379,13 +386,29 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         item for item in state["decisions"] if not item["resolved"] and not item["excluded"]
     )
     assert unresolved, "真实验收不得用自动化夹具冒充人工决定"
-    assert all(
-        str(item.get("proposed_item_code") or "").strip()
+    decisions_by_component = {
+        item["component_id"]: item for item in state["decisions"]
+    }
+    no_preferred_item = tuple(
+        item
         for item in state["review_batches"]
-    ), "每项人工事项都必须形成可供采用的系统首选项目"
+        if not str(item.get("proposed_item_code") or "").strip()
+    )
+    assert all(
+        all(
+            decisions_by_component[component_id]["candidate_status"]
+            == "invalid_input"
+            for component_id in item["component_ids"]
+        )
+        and item["alternative_item_codes"]
+        for item in no_preferred_item
+    ), "只有摘要和原项目均无法形成首选的非法输入，才允许提示人工改选具体项目"
 
     workbook = load_workbook(final.workbook_path, data_only=False, read_only=False)
+    difference_business_rows = 0
     try:
+        assert tuple(workbook.sheetnames) == SHEET_NAMES
+        assert "可靠同类组批量处理" not in workbook.sheetnames
         review = workbook["重要待复核事项"]
         review_headers = [cell.value for cell in review[1]]
         review_data_end_row = len(state["review_batches"]) + 1
@@ -399,7 +422,7 @@ def test_real_files_complete_the_generic_pipeline() -> None:
             "原项目标准化结果",
             "系统候选项目",
             "证据得分",
-            "有效重要性层级",
+            "单笔重要性层级",
             "唯一动作",
             "人工确认项目",
             "人工依据",
@@ -460,6 +483,10 @@ def test_real_files_complete_the_generic_pipeline() -> None:
             for row in range(2, differences.max_row + 1)
             if differences.cell(row, result_column).value == "不进入正表"
         ), "内部划转不得显示为按0分修改项目"
+        difference_business_rows = sum(
+            bool(differences.cell(row, result_column).value)
+            for row in range(2, differences.max_row + 1)
+        )
         if state["internal_transfers"]:
             assert any(
                 differences.cell(row, result_column).value == "不进入正表"
@@ -565,6 +592,32 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         "input_hashes_after": after_hashes,
         "component_count": len(state["components"]),
         "source_entry_count": len(state["entries"]),
+        "summary_count": len(summary_results),
+        "summary_agent_task_count": len(state["summary_semantics"]["tasks"]),
+        "summary_candidate_count": sum(
+            bool(item["candidate_item_ids"]) for item in summary_results
+        ),
+        "summary_quality_distribution": dict(
+            Counter(str(item["quality"]) for item in summary_results)
+        ),
+        "score_distribution": dict(
+            Counter(
+                str(item["evidence_score"])
+                for item in state["decisions"]
+                if not item["excluded"]
+            )
+        ),
+        "score_70_or_90_count": sum(
+            item["evidence_score"] in {70, 90}
+            for item in state["decisions"]
+            if not item["excluded"]
+        ),
+        "automatic_change_count": sum(
+            item["decision_action"] == "automatic_change"
+            for item in state["decisions"]
+        ),
+        "difference_business_rows": difference_business_rows,
+        "workbook_sheets": list(SHEET_NAMES),
         "reconciliation_difference_cent": state["reconciliation"]["difference_cent"],
         "overall_status": final.overall_status,
         "versions": state["versions"],
@@ -582,7 +635,7 @@ def test_manual_filtered_detail_has_only_the_user_confirmed_omissions() -> None:
     filtered_value = os.environ.get("CAS_CASHFLOW_REAL_DETAIL_FILTERED")
     statement_value = os.environ.get("CAS_CASHFLOW_REAL_STATEMENT")
     dictionary_value = os.environ.get("CAS_CASHFLOW_REAL_DICTIONARY_RESULTS")
-    summary_value = os.environ.get("CAS_CASHFLOW_REAL_SUMMARY_RESULTS")
+    summary_value = os.environ.get("CAS_CASHFLOW_REAL_SUMMARY_SLOT_RESULTS")
     expected_omissions_value = os.environ.get(
         "CAS_CASHFLOW_REAL_FILTERED_EXPECTED_OMISSIONS"
     )
@@ -593,7 +646,6 @@ def test_manual_filtered_detail_has_only_the_user_confirmed_omissions() -> None:
             filtered_value,
             statement_value,
             dictionary_value,
-            summary_value,
             expected_omissions_value,
             output_value,
         )
@@ -604,7 +656,7 @@ def test_manual_filtered_detail_has_only_the_user_confirmed_omissions() -> None:
     filtered_path = Path(filtered_value)
     statement_path = Path(statement_value)
     dictionary_path = Path(dictionary_value)
-    summary_path = Path(summary_value)
+    summary_path = Path(summary_value) if summary_value else None
     expected_omissions_path = Path(expected_omissions_value)
     assert all(
         path.is_file()
@@ -613,7 +665,6 @@ def test_manual_filtered_detail_has_only_the_user_confirmed_omissions() -> None:
             filtered_path,
             statement_path,
             dictionary_path,
-            summary_path,
             expected_omissions_path,
         )
     )
@@ -650,9 +701,9 @@ def test_manual_filtered_detail_has_only_the_user_confirmed_omissions() -> None:
             "用户确认：期初期末取客户现有正表，汇率影响取外部确认参数",
         )
         first_classification = run_classification(preflight.run_dir)
-        assert first_classification.status == "待摘要语义确认"
-        _complete_summary_dictionary(preflight.run_dir, summary_path)
-        run_classification(preflight.run_dir)
+        if first_classification.status == "待摘要语义确认":
+            _complete_summary_semantics(preflight.run_dir, summary_path)
+            run_classification(preflight.run_dir)
         return _state(preflight.run_dir)
 
     original_state = classified_state(original_path)

@@ -3,9 +3,12 @@ from __future__ import annotations
 import unittest
 from collections import defaultdict
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from cashflow_direct.account_dictionary import load_common_dictionary
+from cashflow_direct.classification import classify_component, load_rule_pack
 from cashflow_direct.components import (
     _signed_flow,
     _minimum_amount_row_combinations,
@@ -16,7 +19,20 @@ from cashflow_direct.components import (
     find_cash_row_cleanup_requests,
     flow_direction_source,
 )
+from cashflow_direct.summary_semantics import analyze_summary, load_summary_rules
 from tests.fixture_factory import _component_entry, component_entries
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _classify(component):
+    return classify_component(
+        component,
+        load_rule_pack(ROOT),
+        load_common_dictionary(ROOT),
+        {component.summary: analyze_summary(component.summary, load_summary_rules(ROOT))},
+    )
 
 
 def _confirmed_scope(case: str):
@@ -903,9 +919,6 @@ class ComponentTests(unittest.TestCase):
 
     def test_accrual_with_real_cash_leg_goes_to_ai_not_excluded(self) -> None:
         # 摘要写"计提"、但凭证有真实现金腿 → 打新标记送 AI，不再 EXCLUDED
-        from pathlib import Path
-        from cashflow_direct.classification import classify_component, load_rule_pack
-
         entries = (
             _component_entry(1, "V1", "1002 银行存款", credit_cent=100_000, retained_side="cash", summary="计提坏账准备"),
             _component_entry(2, "V1", "信用减值损失", debit_cent=100_000, retained_side="counterpart", summary="计提坏账准备"),
@@ -918,8 +931,7 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(1, len(result.components))
         self.assertIn("accrual_with_cash_leg", result.components[0].anomalies)
         self.assertNotIn("non_cash", result.components[0].anomalies)
-        rules = load_rule_pack(Path(__file__).resolve().parents[1])
-        self.assertFalse(classify_component(result.components[0], rules).excluded)
+        self.assertFalse(_classify(result.components[0]).excluded)
 
     def test_non_cash_flow_rows_without_a_confirmed_cash_leg_request_cleanup(self) -> None:
         entries = (
@@ -988,8 +1000,6 @@ class ComponentTests(unittest.TestCase):
     def test_note_receipt_with_cash_counterpart_stays_real_cash(self) -> None:
         # 票据贴现/到期收款：应收票据 + 银行存款对方科目 → 真实现金流，不得误标 non_cash
         from pathlib import Path
-        from cashflow_direct.classification import classify_component, load_rule_pack
-
         entries = (
             _component_entry(
                 1, "V3", "1121 应收票据_银行承兑汇票",
@@ -1005,8 +1015,7 @@ class ComponentTests(unittest.TestCase):
         result = build_cashflow_components(entries, scope)
         self.assertEqual(1, len(result.components))
         self.assertNotIn("non_cash", result.components[0].anomalies)
-        rules = load_rule_pack(Path(__file__).resolve().parents[1])
-        self.assertFalse(classify_component(result.components[0], rules).excluded)
+        self.assertFalse(_classify(result.components[0]).excluded)
 
     def test_note_only_voucher_with_standard_flow_label_requests_cleanup(self) -> None:
         entries = (

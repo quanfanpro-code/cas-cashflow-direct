@@ -167,7 +167,6 @@ def apply_consistency_forced_checks(
                 vat_base_missing=decision.vat_base_missing,
                 net_item_facts_missing=decision.net_item_facts_missing,
                 individual_tax_fact_missing=decision.individual_tax_fact_missing,
-                new_reversal_pattern=decision.new_reversal_pattern,
                 source_conflict=decision.source_conflict,
                 business_conflict=True,
                 direction_status=decision.direction_status or "compatible",

@@ -1,0 +1,152 @@
+﻿{
+  "schema_version": "1.1.0",
+  "scope": "一般企业现金流量表直接法摘要语义",
+  "noise_patterns": [
+    {"slot": "noise_date", "pattern": "(?:20\\d{2}[年./-])?\\d{1,2}[月./-]\\d{0,2}日?"},
+    {"slot": "noise_amount", "pattern": "(?<![A-Za-z0-9])[-+]?\\d[\\d,]*(?:\\.\\d+)?\\s*(?:元|万元|人民币)"},
+    {"slot": "noise_number", "pattern": "(?:凭证|票据|发票|合同|项目)?[A-Za-z]{1,6}[-_/]?[0-9]{4,}"}
+  ],
+  "organization_suffix_pattern": "(?:有限责任公司|股份有限公司|有限公司|公司|银行|中心|事务所|合作社|工厂)",
+  "non_entity_organization_terms": ["子公司", "母公司", "本公司"],
+  "organization_suffix_non_entity_follow": ["存款", "借款", "贷款", "利息", "账户", "手续费"],
+  "lexicons": {
+    "cash_actions": [
+      {"slot": "cash_action", "value": "inflow", "terms": ["收到退回", "收到", "收取", "收款", "回款", "到账", "收回", "赎回", "取得"]},
+      {"slot": "cash_action", "value": "outflow", "terms": ["支付", "付款", "缴纳", "缴回", "偿还", "发放", "退回", "退还", "汇出", "付给", "支出"]}
+    ],
+    "business_relations": [
+      {"slot": "business_relation", "value": "sale", "terms": ["销售", "销货", "提供劳务"]},
+      {"slot": "business_relation", "value": "purchase", "terms": ["采购", "接受劳务"]},
+      {"slot": "business_relation", "value": "acquire", "terms": ["购买", "购建", "购置", "收购", "取得"]},
+      {"slot": "business_relation", "value": "dispose", "terms": ["处置", "出售", "转让"]},
+      {"slot": "business_relation", "value": "borrow", "terms": ["借入", "借款"]},
+      {"slot": "business_relation", "value": "repay", "terms": ["归还借款", "偿还", "还本", "偿债"]}
+    ],
+    "business_objects": [
+      {"slot": "business_object", "value": "trade_goods", "terms": ["销售商品款", "销售货款", "采购货款", "购买货款", "采购款", "原材料", "库存商品", "商品款", "材料款", "货款"]},
+      {"slot": "business_object", "value": "service_revenue", "terms": ["物业租赁款", "劳务收入", "服务收入", "服务款"]},
+      {"slot": "business_object", "value": "generic_service", "terms": ["咨询服务费", "技术服务费", "咨询费", "服务费"]},
+      {"slot": "business_object", "value": "operating_professional_service", "terms": ["法律咨询费", "管理咨询费", "会计服务费", "律师费", "审计费", "佣金", "中介费"]},
+      {"slot": "business_object", "value": "production_service", "terms": ["生产外包服务费", "设备运维费", "矿山作业费", "产品检测费", "生产服务费"]},
+      {"slot": "business_object", "value": "engineering_service", "terms": ["工程勘察费", "工程设计费", "施工监理费", "工程监理费", "监理费", "勘察设计费", "工程咨询费"]},
+      {"slot": "business_object", "value": "financing_service", "terms": ["融资顾问费", "债券发行费", "贷款担保费", "承销服务费", "发行服务费", "融资服务费", "保荐承销费"]},
+      {"slot": "business_object", "value": "acquisition_service", "terms": ["并购咨询费", "投资并购服务费", "并购尽调费", "尽调服务费", "股权收购服务费"]},
+      {"slot": "business_object", "value": "staff_compensation", "terms": ["职工薪酬", "员工薪酬", "工资薪金", "社会保险费", "住房公积金", "工资", "奖金", "社保", "公积金"]},
+      {"slot": "business_object", "value": "staff_individual_tax", "terms": ["代扣代缴个人所得税", "代扣个人所得税", "代缴个人所得税", "缴纳个人所得税", "个人所得税", "分红个税", "代扣个税", "代缴个税", "个税"]},
+      {"slot": "business_object", "value": "tax_refund", "terms": ["增值税留抵退税", "出口退税", "税费返还", "退税款", "退税"]},
+      {"slot": "business_object", "value": "tax_payment", "terms": ["企业所得税", "增值税", "车船税", "房产税", "土地使用税", "土地增值税", "消费税", "资源税", "城建税", "教育费附加", "印花税", "附加税", "税费", "税款"]},
+      {"slot": "business_object", "value": "asset_acquisition_tax", "terms": ["车辆购置税", "耕地占用税", "契税"]},
+      {"slot": "business_object", "value": "penalty", "terms": ["税收滞纳金", "滞纳金", "罚款"]},
+      {"slot": "business_object", "value": "bank_deposit_interest", "terms": ["银行存款利息", "活期存款利息", "定期存款利息", "银行利息", "存款利息"]},
+      {"slot": "business_object", "value": "sales_note_collection", "terms": ["票据到期收款", "销售票据到期款"]},
+      {"slot": "business_object", "value": "customer_advance", "terms": ["预收退款", "退预收款"]},
+      {"slot": "business_object", "value": "utility_fund", "terms": ["电费基金", "电价附加"]},
+      {"slot": "business_object", "value": "employee_advance", "terms": ["员工备用金", "职工备用金", "备用金"]},
+      {"slot": "business_object", "value": "operating_deposit", "terms": ["履约保证金", "投标保证金", "经营保证金", "押金", "保证金"]},
+      {"slot": "business_object", "value": "travel_expense", "terms": ["差旅费", "交通费", "住宿费"]},
+      {"slot": "business_object", "value": "utilities", "terms": ["水电费", "电费", "水费", "燃气费"]},
+      {"slot": "business_object", "value": "operating_other", "terms": ["办公费", "业务招待费", "手续费", "往来款"]},
+      {"slot": "business_object", "value": "investment_principal", "terms": ["理财产品本金", "长期股权投资", "理财本金", "投资本金", "股权投资款", "债权投资款", "投资款"]},
+      {"slot": "business_object", "value": "investment_income", "terms": ["被投资单位分红", "收到股利", "债券投资利息", "结构性存款利息", "投资收益", "理财收益", "股利收入", "分红收入"]},
+      {"slot": "business_object", "value": "long_asset", "terms": ["固定资产", "无形资产", "长期资产", "机器设备", "生产设备", "使用权资产"]},
+      {"slot": "business_object", "value": "subsidiary_business", "terms": ["子公司", "营业单位"]},
+      {"slot": "business_object", "value": "long_asset_disposal", "terms": ["处置固定资产款", "出售固定资产款", "无形资产转让款", "资产处置款"]},
+      {"slot": "business_object", "value": "subsidiary_disposal", "terms": ["处置子公司款", "出售子公司款", "处置营业单位款"]},
+      {"slot": "business_object", "value": "investing_other", "terms": ["其他与投资活动有关的款项", "其他投资活动款项", "投资活动保证金", "投资活动往来款", "投资活动其他款"]},
+      {"slot": "business_object", "value": "long_asset_acquisition", "terms": ["长期待摊费用装修款", "固定资产购置款", "设备购置款", "无形资产购置款", "生产线设备款", "在建工程款", "土地购置款", "设备款"]},
+      {"slot": "business_object", "value": "subsidiary_acquisition", "terms": ["收购子公司款", "取得子公司款", "收购营业单位款"]},
+      {"slot": "business_object", "value": "capital_contribution", "terms": ["股东出资款", "增资款", "资本金", "实收资本", "吸收投资款"]},
+      {"slot": "business_object", "value": "borrowing", "terms": ["银行借款", "借款本金", "贷款本金", "借款"]},
+      {"slot": "business_object", "value": "financing_other", "terms": ["其他与筹资活动有关的款项", "其他筹资活动款项", "融资保证金", "融资租赁款", "融资租赁租金", "租赁负债", "分期付款购建", "筹资活动往来款", "筹资活动其他款"]},
+      {"slot": "business_object", "value": "debt_principal", "terms": ["偿还借款本金", "归还借款本金", "偿还贷款本金", "偿还本金", "债务本金", "还本"]},
+      {"slot": "business_object", "value": "dividend_interest", "terms": ["股利分配款", "利润分配款", "借款利息", "贷款利息", "偿付利息", "分红款", "股利", "利息"]}
+    ],
+    "counterparty_roles": [
+      {"slot": "counterparty_role", "value": "customer", "terms": ["客户", "购货方"]},
+      {"slot": "counterparty_role", "value": "supplier", "terms": ["供应商", "供货方"]},
+      {"slot": "counterparty_role", "value": "employee", "terms": ["本公司员工", "公司员工", "职工", "员工"]},
+      {"slot": "counterparty_role", "value": "shareholder", "terms": ["股东", "投资人"]},
+      {"slot": "counterparty_role", "value": "bank", "terms": ["开户行", "贷款银行"]}
+    ],
+    "document_contexts": [
+      {"slot": "document_context", "value": "invoice", "terms": ["增值税专用发票", "增值税普通发票", "专票", "普票", "发票"]},
+      {"slot": "document_context", "value": "input_vat", "terms": ["进项税额", "进项税", "进项"]},
+      {"slot": "document_context", "value": "output_vat", "terms": ["销项税额", "销项税", "销项"]},
+      {"slot": "document_context", "value": "contract", "terms": ["合同", "协议"]}
+    ],
+    "modifiers": [
+      {"slot": "refund", "value": "completed", "terms": ["已退回", "退回", "退款", "退还", "返还", "冲回", "冲减"]},
+      {"slot": "conditional", "value": "conditional", "terms": ["以后", "后续", "拟", "预计", "待", "如", "若"]},
+      {"slot": "uncertainty", "value": "uncertain", "terms": ["可能", "暂估", "疑似", "不确定"]},
+      {"slot": "negation", "value": "negative", "terms": ["未支付", "未收到", "不付款", "不收款", "非现金"]}
+    ],
+    "purposes_attributes": [
+      {"slot": "purpose", "value": "capital_use", "terms": ["用于生产线建设", "用于在建工程", "用于固定资产购建", "生产线建设", "资本化"]},
+      {"slot": "purpose", "value": "operating_use", "terms": ["用于日常经营", "经营周转", "日常经营"]},
+      {"slot": "attribute", "value": "principal", "terms": ["本金"]},
+      {"slot": "attribute", "value": "interest", "terms": ["利息"]},
+      {"slot": "attribute", "value": "net_amount", "terms": ["现金净额", "净额"]}
+    ]
+  },
+  "frames": [
+    {"frame_id": "action-object", "required_slots": ["cash_action", "business_object"]},
+    {"frame_id": "action-role-object", "required_slots": ["cash_action", "counterparty_role", "business_object"]},
+    {"frame_id": "object-relation", "required_slots": ["business_object", "business_relation"]}
+  ],
+  "agent_trigger_patterns": ["代.+向.+转", "代.+转.+款", "处理尾款", "转处理"],
+  "candidate_rules": [
+    {"rule_id": "CFO-01-trade", "candidate_item_ids": ["CFO-01"], "all": {"cash_action": ["inflow"], "business_object": ["trade_goods", "service_revenue"]}, "without": {"refund": ["completed"]}},
+    {"rule_id": "CFO-01-sale-relation", "candidate_item_ids": ["CFO-01"], "all": {"cash_action": ["inflow"], "business_relation": ["sale"]}},
+    {"rule_id": "CFO-01-sales-note", "candidate_item_ids": ["CFO-01"], "all": {"business_object": ["sales_note_collection"]}},
+    {"rule_id": "CFO-02-tax-refund", "candidate_item_ids": ["CFO-02"], "all": {"cash_action": ["inflow"], "business_object": ["tax_refund"]}},
+    {"rule_id": "CFO-03-bank-interest", "candidate_item_ids": ["CFO-03"], "all": {"business_object": ["bank_deposit_interest"]}},
+    {"rule_id": "CFO-03-other", "candidate_item_ids": ["CFO-03"], "all": {"cash_action": ["inflow"], "business_object": ["employee_advance", "operating_deposit", "travel_expense", "utilities", "operating_other"]}},
+    {"rule_id": "CFO-04-trade", "candidate_item_ids": ["CFO-04"], "all": {"cash_action": ["outflow"], "business_object": ["trade_goods"]}, "without": {"refund": ["completed"]}},
+    {"rule_id": "CFO-04-purchase-relation", "candidate_item_ids": ["CFO-04"], "all": {"cash_action": ["outflow"], "business_relation": ["purchase"]}, "without": {"refund": ["completed"]}},
+    {"rule_id": "CFO-04-production-service", "candidate_item_ids": ["CFO-04"], "all": {"business_object": ["production_service", "utility_fund"]}},
+    {"rule_id": "CFO-05-staff", "candidate_item_ids": ["CFO-05"], "all": {"cash_action": ["outflow"], "business_object": ["staff_compensation"]}},
+    {"rule_id": "CFO-05-staff-tax", "candidate_item_ids": ["CFO-05"], "all": {"business_object": ["staff_individual_tax"]}},
+    {"rule_id": "CFO-06-tax", "candidate_item_ids": ["CFO-06"], "all": {"cash_action": ["outflow"], "business_object": ["tax_payment"]}},
+    {"rule_id": "CFO-06-return-tax-refund", "candidate_item_ids": ["CFO-06"], "all": {"cash_action": ["outflow"], "business_object": ["tax_refund"]}},
+    {"rule_id": "CFO-07-other", "candidate_item_ids": ["CFO-07"], "all": {"cash_action": ["outflow"], "business_object": ["employee_advance", "operating_deposit", "travel_expense", "utilities", "operating_other"]}},
+    {"rule_id": "CFO-07-professional-service", "candidate_item_ids": ["CFO-07"], "all": {"business_object": ["operating_professional_service"]}},
+    {"rule_id": "CFO-03-penalty-receipt", "candidate_item_ids": ["CFO-03"], "all": {"cash_action": ["inflow"], "business_object": ["penalty"]}},
+    {"rule_id": "CFO-07-penalty-payment", "candidate_item_ids": ["CFO-07"], "all": {"cash_action": ["outflow"], "business_object": ["penalty"]}},
+    {"rule_id": "CFO-penalty-action-missing", "candidate_item_ids": ["CFO-03", "CFO-07"], "all": {"business_object": ["penalty"]}, "without": {"cash_action": ["inflow", "outflow"]}},
+    {"rule_id": "CFO-generic-service-ambiguous", "candidate_item_ids": ["CFO-04", "CFO-07", "CFI-06", "CFI-07", "CFF-06"], "all": {"business_object": ["generic_service"]}},
+    {"rule_id": "CFO-01-customer-refund", "candidate_item_ids": ["CFO-01"], "all": {"refund": ["completed"], "counterparty_role": ["customer"], "business_object": ["trade_goods"]}},
+    {"rule_id": "CFO-01-advance-refund", "candidate_item_ids": ["CFO-01"], "all": {"refund": ["completed"], "business_object": ["customer_advance"]}},
+    {"rule_id": "CFO-04-supplier-refund", "candidate_item_ids": ["CFO-04"], "all": {"refund": ["completed"], "counterparty_role": ["supplier"], "business_object": ["trade_goods"]}},
+    {"rule_id": "CFO-04-purchase-refund", "candidate_item_ids": ["CFO-04"], "all": {"refund": ["completed"], "business_relation": ["purchase"], "business_object": ["trade_goods"]}},
+    {"rule_id": "CFI-01-recover-investment", "candidate_item_ids": ["CFI-01"], "all": {"cash_action": ["inflow"], "business_object": ["investment_principal"]}},
+    {"rule_id": "CFI-02-income", "candidate_item_ids": ["CFI-02"], "all": {"cash_action": ["inflow"], "business_object": ["investment_income"]}},
+    {"rule_id": "CFI-03-dispose-assets", "candidate_item_ids": ["CFI-03"], "all": {"cash_action": ["inflow"], "business_object": ["long_asset_disposal"]}},
+    {"rule_id": "CFI-03-dispose-assets-relation", "candidate_item_ids": ["CFI-03"], "all": {"cash_action": ["inflow"], "business_relation": ["dispose"], "business_object": ["long_asset"]}},
+    {"rule_id": "CFI-04-dispose-subsidiary", "candidate_item_ids": ["CFI-04"], "all": {"cash_action": ["inflow"], "business_object": ["subsidiary_disposal"]}},
+    {"rule_id": "CFI-04-dispose-subsidiary-relation", "candidate_item_ids": ["CFI-04"], "all": {"cash_action": ["inflow"], "business_relation": ["dispose"], "business_object": ["subsidiary_business"]}},
+    {"rule_id": "CFI-05-other", "candidate_item_ids": ["CFI-05"], "all": {"cash_action": ["inflow"], "business_object": ["investing_other"]}},
+    {"rule_id": "CFI-06-acquire-assets", "candidate_item_ids": ["CFI-06"], "all": {"cash_action": ["outflow"], "business_object": ["long_asset_acquisition"]}, "without": {"business_object": ["financing_other"]}},
+    {"rule_id": "CFI-06-asset-tax", "candidate_item_ids": ["CFI-06"], "all": {"business_object": ["asset_acquisition_tax"]}},
+    {"rule_id": "CFI-06-engineering-service", "candidate_item_ids": ["CFI-06"], "all": {"business_object": ["engineering_service"]}},
+    {"rule_id": "CFI-06-acquire-assets-relation", "candidate_item_ids": ["CFI-06"], "all": {"cash_action": ["outflow"], "business_relation": ["acquire"], "business_object": ["long_asset"]}, "without": {"business_object": ["financing_other"]}},
+    {"rule_id": "CFI-07-invest", "candidate_item_ids": ["CFI-07"], "all": {"cash_action": ["outflow"], "business_object": ["investment_principal"]}},
+    {"rule_id": "CFI-07-acquisition-service", "candidate_item_ids": ["CFI-07"], "all": {"business_object": ["acquisition_service"]}},
+    {"rule_id": "CFI-08-acquire-subsidiary", "candidate_item_ids": ["CFI-08"], "all": {"cash_action": ["outflow"], "business_object": ["subsidiary_acquisition"]}},
+    {"rule_id": "CFI-08-acquire-subsidiary-relation", "candidate_item_ids": ["CFI-08"], "all": {"cash_action": ["outflow"], "business_relation": ["acquire"], "business_object": ["subsidiary_business"]}},
+    {"rule_id": "CFI-09-other", "candidate_item_ids": ["CFI-09"], "all": {"cash_action": ["outflow"], "business_object": ["investing_other"]}},
+    {"rule_id": "CFF-01-capital", "candidate_item_ids": ["CFF-01"], "all": {"cash_action": ["inflow"], "business_object": ["capital_contribution"]}},
+    {"rule_id": "CFF-02-borrow", "candidate_item_ids": ["CFF-02"], "all": {"cash_action": ["inflow"], "business_object": ["borrowing"]}},
+    {"rule_id": "CFF-03-other", "candidate_item_ids": ["CFF-03"], "all": {"cash_action": ["inflow"], "business_object": ["financing_other"]}},
+    {"rule_id": "CFF-04-repay", "candidate_item_ids": ["CFF-04"], "all": {"cash_action": ["outflow"], "business_object": ["debt_principal"]}},
+    {"rule_id": "CFF-04-repay-borrowing", "candidate_item_ids": ["CFF-04"], "all": {"cash_action": ["outflow"], "business_relation": ["repay"], "business_object": ["borrowing"]}},
+    {"rule_id": "CFF-05-dividend-interest", "candidate_item_ids": ["CFF-05"], "all": {"cash_action": ["outflow"], "business_object": ["dividend_interest"]}, "without": {"business_object": ["financing_other"]}},
+    {"rule_id": "CFF-06-other", "candidate_item_ids": ["CFF-06"], "all": {"cash_action": ["outflow"], "business_object": ["financing_other"]}}
+    ,{"rule_id": "CFF-06-financing-service", "candidate_item_ids": ["CFF-06"], "all": {"business_object": ["financing_service"]}}
+  ],
+  "quality_rules": {
+    "strong_values": {
+      "business_object": ["trade_goods", "service_revenue", "operating_professional_service", "production_service", "engineering_service", "financing_service", "acquisition_service", "staff_compensation", "staff_individual_tax", "asset_acquisition_tax", "penalty", "bank_deposit_interest", "sales_note_collection", "customer_advance", "utility_fund", "investment_principal", "investment_income", "long_asset", "subsidiary_business", "long_asset_disposal", "subsidiary_disposal", "subsidiary_acquisition", "capital_contribution", "borrowing", "financing_other", "debt_principal", "dividend_interest"],
+      "purpose": ["capital_use"]
+    }
+  }
+}

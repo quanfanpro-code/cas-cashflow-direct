@@ -183,18 +183,10 @@ def build_ai_task(
     candidates = tuple(
         dict.fromkeys(decision.candidate_item_ids or (decision.system_item_id,))
     )
-    direction = "inflow" if component.cash_delta_cent > 0 else "outflow"
-    direction_context = (
-        f"现金方向：{direction}；"
-        if decision.direction_status in {"incompatible", "approved_reversal"}
-        or decision.approved_reversal_rule_ids
-        else ""
-    )
     context = redact_text(
         f"摘要原文：{component.summary}；"
-        f"完整对方科目路径：{'、'.join(component.counterpart_accounts)}；"
-        f"{direction_context}"
-    ).rstrip("；")
+        f"完整对方科目路径：{'、'.join(component.counterpart_accounts)}"
+    )
     return AITask(
         task_id=stable_id("AI", component.component_id, decision.system_item_id),
         component_id=component.component_id,
@@ -203,8 +195,6 @@ def build_ai_task(
         system_item_id=decision.system_item_id,
         rule_evidence="系统候选仅供复核，不得作为新增事实",
         candidate_item_ids=candidates,
-        approved_reversal_rule_ids=decision.approved_reversal_rule_ids,
-        allow_one_time_reversal=decision.new_reversal_pattern,
         summary_candidate_item_ids=(
             candidates
             if decision.summary_candidate_item_ids is None
@@ -492,12 +482,7 @@ def validate_structured_ai_results(
             and component_id == task.component_id
             and isinstance(independent, bool)
             and isinstance(business_conflict, bool)
-            and direction_status in {"compatible", "approved_reversal", "incompatible"}
-            and (
-                direction_status != "approved_reversal"
-                or bool(task.approved_reversal_rule_ids)
-                or task.allow_one_time_reversal
-            )
+            and direction_status in {"compatible", "incompatible"}
             and isinstance(reason, str)
             and bool(reason.strip())
             and isinstance(alternatives, list)
@@ -922,7 +907,7 @@ def resolve_structured_ai_results(
             and assessment.candidate_item_id
             and not assessment.conflict
             and not result.business_conflict
-            and result.direction_status in {"compatible", "approved_reversal"}
+            and result.direction_status == "compatible"
         ]
 
         if action_kind is DecisionAction.AI_THIRD_REVIEW:
@@ -1250,7 +1235,7 @@ def resolve_structured_ai_results(
                     chosen_assessment is None
                     and not source_conflict
                     and not business_conflict
-                    and direction_status in {"compatible", "approved_reversal"}
+                    and direction_status == "compatible"
                 )
                 confirms_keep = bool(
                     no_modification_claim

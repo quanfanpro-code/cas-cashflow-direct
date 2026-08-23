@@ -13,7 +13,6 @@ from pathlib import Path
 from cashflow_direct.decision_policy import EvidenceQuality
 from cashflow_direct.evidence import (
     SOURCE_ACCOUNT_PATH,
-    SOURCE_SUMMARY,
     RuleScore,
     split_account_levels,
 )
@@ -111,29 +110,6 @@ class AccountDictionary:
             if hit is not None:
                 return hit
         return None
-
-
-@dataclass(frozen=True, slots=True)
-class SummarySemanticEntry:
-    summary: str
-    semantic: str
-    item_id: str
-    basis: str
-    confidence: str
-    classification_facts: tuple[str, ...]
-    candidate_item_ids: tuple[str, ...] = ()
-    negation: tuple[str, ...] = ()
-    uncertainty: tuple[str, ...] = ()
-    conditionality: tuple[str, ...] = ()
-    source_spans: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class SummaryDictionary:
-    entries: tuple[SummarySemanticEntry, ...]
-
-    def lookup(self, summary: str) -> SummarySemanticEntry | None:
-        return next((entry for entry in self.entries if entry.summary == summary), None)
 
 
 def _from_payload(payload: dict, default_layer: str) -> AccountSemanticEntry:
@@ -271,42 +247,3 @@ def score_dictionary_hits(component: CashflowComponent, dictionary: AccountDicti
             )
         )
     return tuple(scores)
-
-
-def score_summary_hit(
-    component: CashflowComponent,
-    dictionary: SummaryDictionary,
-) -> RuleScore | None:
-    """摘要只使用已结构化确认的完整语义，不在这里做关键词分类。"""
-    entry = dictionary.lookup(component.summary)
-    candidate_item_ids = tuple(
-        dict.fromkeys(
-            entry.candidate_item_ids
-            or ((entry.item_id,) if entry.item_id else ())
-        )
-    ) if entry is not None else ()
-    if entry is None or not candidate_item_ids or not entry.classification_facts:
-        return None
-    quality = {
-        "high": EvidenceQuality.STRONG,
-        "medium": EvidenceQuality.MEDIUM,
-        "low": EvidenceQuality.WEAK,
-    }.get(entry.confidence, EvidenceQuality.INVALID)
-    if quality is EvidenceQuality.INVALID:
-        return None
-    return RuleScore(
-        rule_id=f"SUMMARY-SEMANTIC-{component.component_id}",
-        item_id=candidate_item_ids[0] if len(candidate_item_ids) == 1 else "",
-        priority=-100,
-        source=SOURCE_SUMMARY,
-        score=quality.value,
-        summary_part=quality.value,
-        account_part=0,
-        direction_compatible=True,
-        summary_hits=(component.summary,),
-        account_hits=(),
-        channels=(SOURCE_SUMMARY,),
-        summary_facts=entry.classification_facts,
-        business_object=entry.semantic,
-        candidate_item_ids=candidate_item_ids,
-    )

@@ -165,8 +165,6 @@ def build_original_auto_differences(
             decision is None
             or (not decision.resolved and not decision.excluded)
             or decision.decision_source == "manual"
-            or decision.materiality_group_confirmation_status
-            == "pending_in_final_workbook"
         ):
             continue
         source_entries = tuple(

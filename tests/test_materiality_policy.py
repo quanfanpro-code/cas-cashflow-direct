@@ -1,10 +1,29 @@
 from __future__ import annotations
 
 import importlib
+import unittest
 
 import pytest
 
 from cashflow_direct.models import MaterialityAmounts
+
+
+class SingleItemMaterialityTests(unittest.TestCase):
+    def test_assessment_contains_only_single_item_materiality(self) -> None:
+        module = _materiality()
+        records = (
+            module.MaterialityRecord("A", -60),
+            module.MaterialityRecord("B", -60),
+        )
+
+        results = module.assess_materiality_records(records, _thresholds())
+
+        self.assertEqual(["M0", "M0"], [item.single_level.value for item in results])
+        for item in results:
+            self.assertFalse(hasattr(item, "same_class_total_cent"))
+            self.assertFalse(hasattr(item, "cumulative_level"))
+            self.assertFalse(hasattr(item, "group_id"))
+            self.assertFalse(hasattr(item, "grouping_status"))
 
 
 def _materiality():
@@ -24,17 +43,7 @@ def _record(
     grouping_reason: str = "候选、一级科目和明细用途均明确",
 ):
     module = _materiality()
-    return module.MaterialityRecord(
-        record_id=record_id,
-        amount_cent=amount_cent,
-        cash_direction=direction,
-        candidate_item_id=candidate,
-        standard_level1_account=level1,
-        business_object=business_object,
-        purpose=purpose,
-        grouping_reliable=grouping_reliable,
-        grouping_reason=grouping_reason,
-    )
+    return module.MaterialityRecord(record_id=record_id, amount_cent=amount_cent)
 
 
 def _thresholds() -> MaterialityAmounts:
@@ -45,19 +54,17 @@ def _thresholds() -> MaterialityAmounts:
     )
 
 
-def test_reliable_same_class_cumulative_amount_never_promotes_each_item() -> None:
+def test_two_small_items_remain_individually_small() -> None:
     module = _materiality()
     records = (_record("A", -60), _record("B", -60))
 
     results = module.assess_materiality_records(records, _thresholds())
 
     assert {item.single_level.value for item in results} == {"M0"}
-    assert {item.same_class_total_cent for item in results} == {120}
-    assert {item.single_level.value for item in results} == {"M0"}
-    assert {item.cumulative_level.value for item in results} == {"M1"}
+    assert all(not hasattr(item, "group_id") for item in results)
 
 
-def test_inflows_and_outflows_are_never_netted_or_grouped_together() -> None:
+def test_inflows_and_outflows_use_their_own_absolute_amount() -> None:
     module = _materiality()
     records = (
         _record("IN", 700, direction="inflow"),
@@ -66,11 +73,10 @@ def test_inflows_and_outflows_are_never_netted_or_grouped_together() -> None:
 
     results = module.assess_materiality_records(records, _thresholds())
 
-    assert {item.same_class_total_cent for item in results} == {700}
     assert {item.single_level.value for item in results} == {"M1"}
 
 
-def test_pending_candidate_uses_one_conservative_pending_group() -> None:
+def test_candidate_state_cannot_change_single_item_materiality() -> None:
     module = _materiality()
     records = (
         _record("A", -600, candidate="", purpose="可能用途一"),
@@ -79,14 +85,10 @@ def test_pending_candidate_uses_one_conservative_pending_group() -> None:
 
     results = module.assess_materiality_records(records, _thresholds())
 
-    assert {item.same_class_total_cent for item in results} == {1_200}
-    assert {item.cumulative_level.value for item in results} == {"M2"}
     assert {item.single_level.value for item in results} == {"M1"}
-    assert {item.grouping_status for item in results} == {"potential"}
-    assert all(item.group_key[1] == "待判断" for item in results)
 
 
-def test_potential_group_only_warns_and_never_promotes_materiality() -> None:
+def test_three_performance_level_items_do_not_become_overall_material() -> None:
     module = _materiality()
     records = tuple(
         _record(
@@ -102,13 +104,10 @@ def test_potential_group_only_warns_and_never_promotes_materiality() -> None:
     results = module.assess_materiality_records(records, _thresholds())
 
     assert {item.single_level.value for item in results} == {"M2"}
-    assert {item.cumulative_level.value for item in results} == {"M3"}
     assert {item.single_level.value for item in results} == {"M2"}
-    assert {item.grouping_status for item in results} == {"potential"}
-    assert {item.grouping_reason for item in results} == {"用途缺失"}
 
 
-def test_different_candidates_are_not_combined() -> None:
+def test_candidate_difference_does_not_affect_single_amount_level() -> None:
     module = _materiality()
     records = (
         _record("A", -600, candidate="CFO-04"),
@@ -117,10 +116,10 @@ def test_different_candidates_are_not_combined() -> None:
 
     results = module.assess_materiality_records(records, _thresholds())
 
-    assert {item.same_class_total_cent for item in results} == {600}
+    assert {item.single_level.value for item in results} == {"M1"}
 
 
-def test_same_business_object_and_purpose_are_combined() -> None:
+def test_same_business_text_does_not_create_a_group() -> None:
     module = _materiality()
     records = (
         _record(
@@ -139,8 +138,8 @@ def test_same_business_object_and_purpose_are_combined() -> None:
 
     results = module.assess_materiality_records(records, _thresholds())
 
-    assert {item.same_class_total_cent for item in results} == {1_200}
-    assert len({item.group_id for item in results}) == 1
+    assert {item.single_level.value for item in results} == {"M1"}
+    assert all(not hasattr(item, "group_id") for item in results)
 
 
 def test_duplicate_record_id_is_rejected_instead_of_double_counted() -> None:
@@ -153,7 +152,7 @@ def test_duplicate_record_id_is_rejected_instead_of_double_counted() -> None:
         )
 
 
-def test_same_class_records_share_one_stable_materiality_group_id() -> None:
+def test_same_class_records_never_receive_a_group_id() -> None:
     module = _materiality()
 
     results = module.assess_materiality_records(
@@ -161,5 +160,5 @@ def test_same_class_records_share_one_stable_materiality_group_id() -> None:
         _thresholds(),
     )
 
-    assert len({item.group_id for item in results}) == 1
-    assert results[0].group_id.startswith("MATGRP_")
+    assert {item.single_level.value for item in results} == {"M2"}
+    assert all(not hasattr(item, "group_id") for item in results)
