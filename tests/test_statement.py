@@ -7,13 +7,17 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from cashflow_direct.models import ClassificationDecision
+from cashflow_direct.components import InternalTransferLeg
+from cashflow_direct.models import NormalizedEntry, SourceLocator
 from cashflow_direct.classification import load_rule_pack
 from cashflow_direct.semantic_mapping import MappingQuestion
 from cashflow_direct.statement import (
     ExistingStatementResult,
     aggregate_statement,
+    build_statement_layers,
     compare_statement,
     detect_statement_sheets,
+    internal_transfer_statement_adjustments,
     parse_existing_statement,
     reconcile_cash,
 )
@@ -26,6 +30,46 @@ from tests.fixture_factory import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _existing_with_leaf(item_id: str, amount_cent: int) -> ExistingStatementResult:
+    rules = load_rule_pack(ROOT)
+    values = {item.item_id: 0 for item in rules.statement_items}
+    values[item_id] = amount_cent
+    return ExistingStatementResult(
+        values=values,
+        prior_values={item.item_id: None for item in rules.statement_items},
+        standardized_values=dict(values),
+        custom_rows=(),
+        unit_multiplier=1,
+    )
+
+
+def _layer_decision(
+    component_id: str,
+    *,
+    original_item_id: str,
+    target_item_id: str,
+    resolved: bool,
+    source: str,
+    action: str,
+) -> ClassificationDecision:
+    rules = load_rule_pack(ROOT)
+    target = rules.item_by_id[target_item_id]
+    return ClassificationDecision(
+        component_id=component_id,
+        system_item_id=target_item_id,
+        system_item_name=target.name,
+        normal_direction=target.normal_direction,
+        matched_rule_id="TEST-LAYER",
+        reason="测试金额层",
+        evidence_level="strong",
+        resolved=resolved,
+        decision_source=source,
+        decision_action=action,
+        original_item_state="valid",
+        original_standard_item_id=original_item_id,
+    )
 
 
 def _single_decision_case(
@@ -52,6 +96,160 @@ def _single_decision_case(
 
 
 class StatementTests(unittest.TestCase):
+    def test_customer_statement_is_the_baseline_when_item_waits_for_human(self) -> None:
+        rules = load_rule_pack(ROOT)
+        component = cashflow_component(
+            "待人工判断",
+            -10_000,
+            original_item_text=rules.item_by_id["CFO-07"].name,
+            component_id="LAYER-PENDING",
+        )
+        decision = _layer_decision(
+            component.component_id,
+            original_item_id="CFO-07",
+            target_item_id="CFO-05",
+            resolved=False,
+            source="candidate",
+            action="human_decision",
+        )
+
+        layers = build_statement_layers(
+            (component,),
+            (decision,),
+            rules,
+            existing=_existing_with_leaf("CFO-07", 10_000),
+        )
+
+        self.assertEqual(0, layers.system_adjustments["CFO-07"])
+        self.assertEqual(10_000, layers.automatic_baseline.values["CFO-07"])
+        self.assertEqual(0, layers.automatic_baseline.values["CFO-05"])
+
+    def test_automatic_change_subtracts_original_and_adds_target(self) -> None:
+        rules = load_rule_pack(ROOT)
+        component = cashflow_component(
+            "自动改判",
+            -10_000,
+            original_item_text=rules.item_by_id["CFO-07"].name,
+            component_id="LAYER-AUTO",
+        )
+        decision = _layer_decision(
+            component.component_id,
+            original_item_id="CFO-07",
+            target_item_id="CFO-05",
+            resolved=True,
+            source="system_automatic",
+            action="automatic_change",
+        )
+
+        layers = build_statement_layers(
+            (component,),
+            (decision,),
+            rules,
+            existing=_existing_with_leaf("CFO-07", 10_000),
+        )
+
+        self.assertEqual(-10_000, layers.system_adjustments["CFO-07"])
+        self.assertEqual(10_000, layers.system_adjustments["CFO-05"])
+        self.assertEqual(0, layers.automatic_baseline.values["CFO-07"])
+        self.assertEqual(10_000, layers.automatic_baseline.values["CFO-05"])
+
+    def test_manual_change_only_changes_manual_adjustment(self) -> None:
+        rules = load_rule_pack(ROOT)
+        component = cashflow_component(
+            "人工改判",
+            -10_000,
+            original_item_text=rules.item_by_id["CFO-07"].name,
+            component_id="LAYER-MANUAL",
+        )
+        decision = _layer_decision(
+            component.component_id,
+            original_item_id="CFO-07",
+            target_item_id="CFO-05",
+            resolved=True,
+            source="manual",
+            action="manual_decision",
+        )
+
+        layers = build_statement_layers(
+            (component,),
+            (decision,),
+            rules,
+            existing=_existing_with_leaf("CFO-07", 10_000),
+        )
+
+        self.assertEqual(10_000, layers.automatic_baseline.values["CFO-07"])
+        self.assertEqual(0, layers.automatic_baseline.values["CFO-05"])
+        self.assertEqual(-10_000, layers.manual_adjustments["CFO-07"])
+        self.assertEqual(10_000, layers.manual_adjustments["CFO-05"])
+
+    def test_internal_transfer_difference_also_reduces_automatic_baseline(self) -> None:
+        rules = load_rule_pack(ROOT)
+        entry = NormalizedEntry(
+            entry_id="TRANSFER-IN",
+            source=SourceLocator("FILE", "Sheet1", 2, 2, "A2:R2"),
+            voucher_key="V-TRANSFER",
+            voucher_date="2025-01-01",
+            voucher_no="1",
+            summary="现金账户内部划转",
+            account_name="银行存款",
+            counterpart_name="其他货币资金",
+            debit_cent=27_002,
+            credit_cent=0,
+            flow_amount_cent=27_002,
+            original_flow_item=rules.item_by_id["CFO-03"].name,
+            retained_side="cash",
+        )
+        adjustments = internal_transfer_statement_adjustments(
+            (entry,),
+            (InternalTransferLeg("V-TRANSFER", entry.entry_id, 27_002),),
+            rules,
+        )
+
+        layers = build_statement_layers(
+            (),
+            (),
+            rules,
+            existing=_existing_with_leaf("CFO-03", 100_000),
+            additional_system_adjustments=adjustments,
+        )
+
+        self.assertEqual(-27_002, layers.system_adjustments["CFO-03"])
+        self.assertEqual(72_998, layers.automatic_baseline.values["CFO-03"])
+
+    def test_internal_transfer_removes_negative_original_amount_with_positive_adjustment(self) -> None:
+        rules = load_rule_pack(ROOT)
+        entry = NormalizedEntry(
+            entry_id="TRANSFER-REVERSE",
+            source=SourceLocator("FILE", "Sheet1", 3, 3, "A3:R3"),
+            voucher_key="V-TRANSFER",
+            voucher_date="2025-01-01",
+            voucher_no="1",
+            summary="现金账户内部划转",
+            account_name="其他货币资金",
+            counterpart_name="银行存款",
+            debit_cent=0,
+            credit_cent=27_002,
+            flow_amount_cent=27_002,
+            original_flow_item=rules.item_by_id["CFO-03"].name,
+            retained_side="cash",
+        )
+        adjustments = internal_transfer_statement_adjustments(
+            (entry,),
+            (InternalTransferLeg("V-TRANSFER", entry.entry_id, 27_002),),
+            rules,
+        )
+
+        layers = build_statement_layers(
+            (),
+            (),
+            rules,
+            existing=_existing_with_leaf("CFO-03", 100_000),
+            additional_system_adjustments=adjustments,
+        )
+
+        self.assertEqual(27_002, layers.system_adjustments["CFO-03"])
+        self.assertEqual(127_002, layers.automatic_baseline.values["CFO-03"])
+
     def test_leaf_subtotals_and_net_cash_reconcile(self) -> None:
         case = classified_components()
         result = aggregate_statement(case.components, case.decisions, case.rules)

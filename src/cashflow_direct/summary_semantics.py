@@ -362,6 +362,80 @@ def _normalize_nested_actions(summary: str, facts: Sequence[_Fact]) -> list[_Fac
     ]
 
 
+def _normalize_business_relations(
+    summary: str,
+    facts: Sequence[_Fact],
+) -> list[_Fact]:
+    """先绑定复合名词和服务对象，避免孤立关键词越级形成候选。"""
+    normalized = list(facts)
+
+    wage_account_spans = tuple(
+        match.span()
+        for match in re.finditer(
+            r"(?:农民工?)?工资(?:专用)?(?:账户|专户)|工资保证金",
+            summary,
+        )
+    )
+    if wage_account_spans:
+        normalized = [
+            fact
+            for fact in normalized
+            if not (
+                fact.slot == "business_object"
+                and fact.value == "staff_compensation"
+                and _overlaps(fact.start, fact.end, wage_account_spans)
+            )
+        ]
+        normalized.extend(
+            _Fact("attribute", "restricted_account", summary[start:end], start, end)
+            for start, end in wage_account_spans
+        )
+
+    employee_role = any(
+        fact.slot == "counterparty_role" and fact.value == "employee"
+        for fact in normalized
+    )
+    advance_match = re.search(
+        r"(?:退回|归还|收回)[^，,。；;]{0,6}(借款|借支)|"
+        r"(借款|借支)[^，,。；;]{0,6}(?:退回|归还)",
+        summary,
+    )
+    if employee_role and advance_match is not None:
+        normalized = [
+            fact
+            for fact in normalized
+            if not (
+                (fact.slot == "business_object" and fact.value == "borrowing")
+                or (fact.slot == "business_relation" and fact.value == "borrow")
+            )
+        ]
+        start, end = next(
+            span
+            for index in (1, 2)
+            if (span := advance_match.span(index)) != (-1, -1)
+        )
+        normalized.append(
+            _Fact("business_object", "employee_advance", summary[start:end], start, end)
+        )
+
+    trade_object = any(
+        fact.slot == "business_object" and fact.value == "trade_goods"
+        for fact in normalized
+    )
+    asset_match = re.search(r"设备|固定资产|无形资产|生产线|在建工程|软件", summary)
+    if trade_object and asset_match is not None:
+        normalized.append(
+            _Fact(
+                "business_object",
+                "long_asset_acquisition",
+                asset_match.group(0),
+                asset_match.start(),
+                asset_match.end(),
+            )
+        )
+    return normalized
+
+
 def _facts_by_slot(facts: Sequence[_Fact]) -> dict[str, set[str]]:
     values: dict[str, set[str]] = {}
     for fact in facts:
@@ -466,6 +540,7 @@ def _analyze(
         )
     ]
     facts = _normalize_nested_actions(summary, (*noise, *entities, *lexical, *agent_facts))
+    facts = _normalize_business_relations(summary, facts)
     unresolved = () if agent_facts else _unresolved_slots(summary, facts, rules)
     meaningful = [
         fact

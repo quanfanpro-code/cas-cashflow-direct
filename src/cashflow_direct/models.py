@@ -145,6 +145,7 @@ class ReviewBatch:
     counterpart_group: str = ""
     source_locations: tuple[str, ...] = ()
     mandatory: bool = False
+    baseline_item_code: str = ""
 
     @property
     def alternative_item_code(self) -> str:
@@ -180,6 +181,7 @@ class UnresolvedDecision:
     source_locations: tuple[str, ...] = ()
     group_impact_cent: int = 0
     mandatory: bool = False
+    baseline_item_code: str = ""
 
 
 def validate_materiality_order(amounts: MaterialityAmounts) -> MaterialityAmounts:

@@ -5,8 +5,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from cashflow_direct.classification import RulePack
-from cashflow_direct.models import CashflowComponent, ClassificationDecision
+from cashflow_direct.classification import RulePack, standardize_flow_item
+from cashflow_direct.components import InternalTransferLeg, entry_cash_delta_cent
+from cashflow_direct.models import CashflowComponent, ClassificationDecision, NormalizedEntry
 from cashflow_direct.money import statement_amount_cent, yuan_to_cent
 from cashflow_direct.semantic_mapping import ColumnMapping, MappingQuestion
 from cashflow_direct.workbook_structure import open_workbook_robust
@@ -17,6 +18,22 @@ class StatementResult:
     values: dict[str, int]
     prior_values: dict[str, int | None]
     support_component_ids: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class StatementLayers:
+    automatic_baseline: StatementResult
+    final_statement: StatementResult
+    detail_reconstruction: StatementResult
+    system_adjustments: dict[str, int]
+    manual_adjustments: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class StatementAdjustment:
+    item_id: str
+    amount_cent: int
+    source_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +64,9 @@ class ComparisonRow:
     final_cent: int
     difference_cent: int | None
     support_component_ids: tuple[str, ...]
+    system_adjustment_cent: int = 0
+    detail_reconstruction_cent: int = 0
+    detail_gap_cent: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +162,250 @@ def aggregate_statement(
             for item in rules.statement_items
         },
         {item_id: tuple(component_ids) for item_id, component_ids in support.items()},
+    )
+
+
+def _roll_up_statement(
+    leaf_values: dict[str, int],
+    rules: RulePack,
+    *,
+    opening_cent: int | None = None,
+    fx_cent: int | None = None,
+    prior_values: dict[str, int | None] | None = None,
+    support: dict[str, tuple[str, ...]] | None = None,
+) -> StatementResult:
+    """从叶子项目统一重算小计和净额，不改变客户已经列示的叶子正负号。"""
+    values = {item.item_id: 0 for item in rules.statement_items}
+    values.update(leaf_values)
+    if fx_cent is not None:
+        values["FX"] = fx_cent
+    if opening_cent is not None:
+        values["CASH-OPENING"] = opening_cent
+    supports = {
+        item.item_id: tuple((support or {}).get(item.item_id, ()))
+        for item in rules.statement_items
+    }
+    for item in sorted(rules.statement_items, key=lambda value: value.display_order):
+        if not item.formula_components:
+            continue
+        values[item.item_id] = sum(
+            values[source_id] * multiplier
+            for source_id, multiplier in item.formula_components
+        )
+        supports[item.item_id] = tuple(
+            dict.fromkeys(
+                component_id
+                for source_id, _ in item.formula_components
+                for component_id in supports[source_id]
+            )
+        )
+    return StatementResult(
+        values,
+        {
+            item.item_id: (prior_values or {}).get(item.item_id)
+            for item in rules.statement_items
+        },
+        supports,
+    )
+
+
+def _decision_adjustments(
+    components: Sequence[CashflowComponent],
+    decisions: Sequence[ClassificationDecision],
+    rules: RulePack,
+    *,
+    manual: bool,
+) -> tuple[dict[str, int], dict[str, tuple[str, ...]]]:
+    leaf_ids = {item.item_id for item in rules.statement_items if item.is_leaf}
+    values = {item_id: 0 for item_id in leaf_ids}
+    support: dict[str, list[str]] = {item_id: [] for item_id in leaf_ids}
+    component_by_id = {item.component_id: item for item in components}
+    for decision in decisions:
+        is_manual = decision.decision_source == "manual"
+        if is_manual != manual or not decision.resolved:
+            continue
+        component = component_by_id[decision.component_id]
+        original_id = (
+            decision.original_standard_item_id
+            if decision.original_standard_item_id in leaf_ids
+            else ""
+        )
+        target_id = (
+            decision.system_item_id
+            if not decision.excluded and decision.system_item_id in leaf_ids
+            else ""
+        )
+        if original_id == target_id:
+            continue
+        if original_id:
+            values[original_id] -= statement_amount_cent(
+                component.cash_delta_cent,
+                rules.item_by_id[original_id].normal_direction,
+            )
+            support[original_id].append(component.component_id)
+        if target_id:
+            values[target_id] += statement_amount_cent(
+                component.cash_delta_cent,
+                rules.item_by_id[target_id].normal_direction,
+            )
+            support[target_id].append(component.component_id)
+    return values, {
+        item_id: tuple(component_ids) for item_id, component_ids in support.items()
+    }
+
+
+def _original_detail_values(
+    components: Sequence[CashflowComponent],
+    decisions: Sequence[ClassificationDecision],
+    rules: RulePack,
+) -> tuple[dict[str, int], dict[str, tuple[str, ...]]]:
+    leaf_ids = {item.item_id for item in rules.statement_items if item.is_leaf}
+    values = {item_id: 0 for item_id in leaf_ids}
+    support: dict[str, list[str]] = {item_id: [] for item_id in leaf_ids}
+    decision_by_id = {item.component_id: item for item in decisions}
+    for component in components:
+        decision = decision_by_id.get(component.component_id)
+        original_id = "" if decision is None else decision.original_standard_item_id
+        if original_id not in leaf_ids:
+            standardized = standardize_flow_item(component.original_item_text, rules)
+            original_id = "" if standardized is None else standardized.item_id
+        if original_id not in leaf_ids:
+            continue
+        values[original_id] += statement_amount_cent(
+            component.cash_delta_cent,
+            rules.item_by_id[original_id].normal_direction,
+        )
+        support[original_id].append(component.component_id)
+    return values, {
+        item_id: tuple(component_ids) for item_id, component_ids in support.items()
+    }
+
+
+def internal_transfer_statement_adjustments(
+    entries: Sequence[NormalizedEntry],
+    transfers: Sequence[InternalTransferLeg],
+    rules: RulePack,
+) -> tuple[StatementAdjustment, ...]:
+    """把现金范围阶段排除的内部划转转换为客户正表的系统减项。"""
+    entry_by_id = {entry.entry_id: entry for entry in entries}
+    adjustments: list[StatementAdjustment] = []
+    for transfer in transfers:
+        entry = entry_by_id.get(transfer.entry_id)
+        if entry is None:
+            continue
+        original = standardize_flow_item(entry.original_flow_item, rules)
+        if original is None or not original.is_leaf:
+            continue
+        signed_matched_cent = (
+            transfer.matched_cent
+            if entry_cash_delta_cent(entry) > 0
+            else -transfer.matched_cent
+        )
+        adjustments.append(
+            StatementAdjustment(
+                original.item_id,
+                -statement_amount_cent(
+                    signed_matched_cent,
+                    original.normal_direction,
+                ),
+                transfer.entry_id,
+            )
+        )
+    return tuple(adjustments)
+
+
+def build_statement_layers(
+    components: Sequence[CashflowComponent],
+    decisions: Sequence[ClassificationDecision],
+    rules: RulePack,
+    *,
+    existing: ExistingStatementResult | None = None,
+    opening_cent: int | None = None,
+    fx_cent: int | None = None,
+    additional_system_adjustments: Sequence[StatementAdjustment] = (),
+) -> StatementLayers:
+    """分别形成系统自动基线、人工调整和原项目明细重建值。"""
+    leaf_ids = tuple(
+        item.item_id for item in rules.statement_items if item.is_leaf
+    )
+    system_leaf, system_support = _decision_adjustments(
+        components, decisions, rules, manual=False
+    )
+    if existing is not None:
+        support_lists = {
+            item_id: list(source_ids)
+            for item_id, source_ids in system_support.items()
+        }
+        for adjustment in additional_system_adjustments:
+            if adjustment.item_id not in system_leaf:
+                raise ValueError(f"系统调整不能写入非叶子项目：{adjustment.item_id}")
+            system_leaf[adjustment.item_id] += adjustment.amount_cent
+            support_lists[adjustment.item_id].append(adjustment.source_id)
+        system_support = {
+            item_id: tuple(source_ids)
+            for item_id, source_ids in support_lists.items()
+        }
+    manual_leaf, _ = _decision_adjustments(
+        components, decisions, rules, manual=True
+    )
+    detail_leaf, detail_support = _original_detail_values(
+        components, decisions, rules
+    )
+    if existing is None:
+        automatic = aggregate_statement(
+            components,
+            tuple(
+                decision
+                for decision in decisions
+                if decision.decision_source != "manual"
+            ),
+            rules,
+            opening_cent=opening_cent,
+            fx_cent=fx_cent,
+        )
+    else:
+        customer_leaf = {
+            item_id: int(existing.standardized_values.get(item_id) or 0)
+            for item_id in leaf_ids
+        }
+        automatic = _roll_up_statement(
+            {
+                item_id: customer_leaf[item_id] + system_leaf[item_id]
+                for item_id in leaf_ids
+            },
+            rules,
+            opening_cent=opening_cent,
+            fx_cent=fx_cent,
+            prior_values=existing.prior_values,
+            support=system_support,
+        )
+    detail = _roll_up_statement(
+        detail_leaf,
+        rules,
+        opening_cent=opening_cent,
+        fx_cent=fx_cent,
+        prior_values=None if existing is None else existing.prior_values,
+        support=detail_support,
+    )
+    system = _roll_up_statement(system_leaf, rules).values
+    manual_values = _roll_up_statement(manual_leaf, rules).values
+    final_statement = _roll_up_statement(
+        {
+            item_id: automatic.values[item_id] + manual_leaf[item_id]
+            for item_id in leaf_ids
+        },
+        rules,
+        opening_cent=opening_cent,
+        fx_cent=fx_cent,
+        prior_values=None if existing is None else existing.prior_values,
+        support=automatic.support_component_ids,
+    )
+    return StatementLayers(
+        automatic,
+        final_statement,
+        detail,
+        system,
+        manual_values,
     )
 
 
@@ -485,19 +749,37 @@ def parse_existing_statement(
 def compare_statement(
     existing: ExistingStatementResult,
     computed: StatementResult,
+    *,
+    system_adjustments: dict[str, int] | None = None,
+    manual_adjustments: dict[str, int] | None = None,
+    detail_reconstruction: StatementResult | None = None,
 ) -> StatementComparison:
     rows: list[ComparisonRow] = []
     for item_id, computed_value in computed.values.items():
         existing_value = existing.standardized_values.get(item_id)
+        manual_value = (manual_adjustments or {}).get(item_id, 0)
+        final_value = computed_value + manual_value
+        detail_value = (
+            computed_value
+            if detail_reconstruction is None
+            else detail_reconstruction.values[item_id]
+        )
         rows.append(
             ComparisonRow(
                 item_id,
                 existing_value,
                 computed_value,
-                0,
-                computed_value,
-                None if existing_value is None else computed_value - existing_value,
+                manual_value,
+                final_value,
+                None if existing_value is None else final_value - existing_value,
                 computed.support_component_ids[item_id],
+                (
+                    computed_value - int(existing_value or 0)
+                    if system_adjustments is None
+                    else system_adjustments.get(item_id, 0)
+                ),
+                detail_value,
+                None if existing_value is None else detail_value - existing_value,
             )
         )
     return StatementComparison(tuple(rows))

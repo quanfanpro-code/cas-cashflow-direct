@@ -144,6 +144,10 @@ def _complete_dictionary(run_dir: Path, result_path: Path) -> None:
     selected = tuple(record for record in records if record.get("task_id") in expected)
     assert {record["task_id"] for record in selected} == set(expected)
     assert all(record["account"] == expected[record["task_id"]] for record in selected)
+    allowed_fields = {"task_id", "account", "node_concepts", "relations"}
+    assert all(set(record) <= allowed_fields for record in selected), (
+        "科目路径Agent只能补节点概念和父子关系，不能沿用旧项目、质量或置信度答案"
+    )
     matched_path = run_dir / "科目语义判断结果_匹配当前输入.jsonl"
     matched_path.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in selected),

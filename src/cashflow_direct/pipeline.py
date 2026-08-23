@@ -21,12 +21,17 @@ from cashflow_direct.account_mapping import (
 )
 from cashflow_direct.account_dictionary import (
     AccountDictionary,
+    AccountNodeConcept,
+    AccountPathRelation,
+    AccountPathSemanticResult,
+    AccountPathSlot,
     AccountSemanticEntry,
-    collect_detail_segments,
+    analyze_account_path,
+    build_account_agent_task,
+    load_account_semantic_rules,
     load_common_dictionary,
+    merge_account_agent_concepts,
     merge_dictionaries,
-    refuses_general_semantic_judgment,
-    path_basis_is_traceable,
     split_account_levels,
 )
 from cashflow_direct.ai_review import (
@@ -56,6 +61,7 @@ from cashflow_direct.component_structure_ai import (
 from cashflow_direct.components import (
     CashScope,
     ComponentSourceAllocation,
+    InternalTransferLeg,
     build_cashflow_components,
     compute_rough_reconciliation,
     confirm_cash_scope as make_cash_scope,
@@ -97,8 +103,10 @@ from cashflow_direct.semantic_mapping import (
 from cashflow_direct.statement import (
     ExistingStatementResult,
     aggregate_statement,
+    build_statement_layers,
     compare_statement,
     detect_statement_sheets,
+    internal_transfer_statement_adjustments,
     parse_existing_statement,
     reconcile_cash,
 )
@@ -1212,21 +1220,103 @@ def _prepare_consistency_stage(
     return "AI 已完成", 0
 
 
+def _account_path_result_to_dict(
+    result: AccountPathSemanticResult,
+) -> dict[str, object]:
+    return {
+        "account": result.account,
+        "status": result.status,
+        "concepts": [asdict(item) for item in result.concepts],
+        "candidate_item_ids": list(result.candidate_item_ids),
+        "inflow_candidate_item_ids": list(result.inflow_candidate_item_ids),
+        "outflow_candidate_item_ids": list(result.outflow_candidate_item_ids),
+        "quality_score": result.quality.value,
+        "semantic": result.semantic,
+        "basis": result.basis,
+        "unresolved_slots": [asdict(item) for item in result.unresolved_slots],
+        "matched_rule_ids": list(result.matched_rule_ids),
+        "relations": [asdict(item) for item in result.relations],
+    }
+
+
+def _account_path_result_from_dict(
+    payload: Mapping[str, object],
+) -> AccountPathSemanticResult:
+    return AccountPathSemanticResult(
+        account=str(payload["account"]),
+        status=str(payload.get("status", "未识别")),
+        concepts=tuple(
+            AccountNodeConcept(
+                int(item["level_index"]),
+                str(item["node_text"]),
+                str(item["concept"]),
+                str(item["source_text"]),
+                str(item.get("source", "rule")),
+            )
+            for item in payload.get("concepts", ())
+        ),
+        candidate_item_ids=tuple(str(value) for value in payload.get("candidate_item_ids", ())),
+        inflow_candidate_item_ids=tuple(
+            str(value) for value in payload.get("inflow_candidate_item_ids", ())
+        ),
+        outflow_candidate_item_ids=tuple(
+            str(value) for value in payload.get("outflow_candidate_item_ids", ())
+        ),
+        quality=EvidenceQuality(int(payload.get("quality_score", 0))),
+        semantic=str(payload.get("semantic", "")),
+        basis=str(payload.get("basis", "")),
+        unresolved_slots=tuple(
+            AccountPathSlot(
+                int(item["level_index"]),
+                str(item["node_text"]),
+                tuple(str(value) for value in item.get("allowed_concepts", ())),
+                tuple(str(value) for value in item.get("allowed_relations", ())),
+            )
+            for item in payload.get("unresolved_slots", ())
+        ),
+        matched_rule_ids=tuple(str(value) for value in payload.get("matched_rule_ids", ())),
+        relations=tuple(
+            AccountPathRelation(
+                int(item["parent_level_index"]),
+                int(item["child_level_index"]),
+                str(item["relation"]),
+                str(item.get("source", "agent")),
+            )
+            for item in payload.get("relations", ())
+        ),
+    )
+
+
 def _dictionary_from_state(state: Mapping[str, object]) -> AccountDictionary:
     """由运行状态中的企业专属自定义条目 + 内置通用词典，合并出本次分类所用的语义词典。"""
     common = load_common_dictionary(PROJECT_ROOT)
-    valid = state.get("account_dictionary", {}).get("valid_results", ())
+    dictionary_state = state.get("account_dictionary", {})
+    if dictionary_state and dictionary_state.get("schema_version") != "2.0.0":
+        raise RuntimeError("旧版科目路径语义结果不能用于当前规则，请重新执行科目扫描")
+    valid = dictionary_state.get("valid_results", ())
     custom_entries = tuple(
         AccountSemanticEntry(
             account=str(item["account"]),
             semantic=str(item.get("semantic", "")),
-            item_id=str(item.get("item_id", "")),
+            item_id=(
+                str(item.get("candidate_item_ids", ())[0])
+                if len(item.get("candidate_item_ids", ())) == 1
+                else ""
+            ),
             basis=str(item.get("basis", "")),
-            confidence=str(item.get("confidence", "low")),
-            layer="custom" if str(item.get("note_id", "")) else "runtime",
+            confidence="",
+            layer="runtime",
             note_id=str(item.get("note_id", "")),
-            inflow_item_id=str(item.get("inflow_item_id", "")),
-            outflow_item_id=str(item.get("outflow_item_id", "")),
+            inflow_item_id=(
+                str(item.get("inflow_candidate_item_ids", ())[0])
+                if len(item.get("inflow_candidate_item_ids", ())) == 1
+                else ""
+            ),
+            outflow_item_id=(
+                str(item.get("outflow_candidate_item_ids", ())[0])
+                if len(item.get("outflow_candidate_item_ids", ())) == 1
+                else ""
+            ),
             classification_facts=tuple(
                 str(value) for value in item.get("classification_facts", ())
             ),
@@ -1239,6 +1329,7 @@ def _dictionary_from_state(state: Mapping[str, object]) -> AccountDictionary:
             outflow_candidate_item_ids=tuple(
                 str(value) for value in item.get("outflow_candidate_item_ids", ())
             ),
+            quality_score=int(item.get("quality_score", 0)),
         )
         for item in valid
     )
@@ -1507,35 +1598,76 @@ def _standard_basis_matches_items(
     return True
 
 
-def _write_dictionary_doc(run_dir: Path, valid: Sequence[dict[str, object]], company_notes: Sequence[Mapping[str, object]] = ()) -> None:
-    lines = ["# 科目语义词典说明", "", "本文件按完整父路径展示本次运行的一般业务语义和企业专属补充语义。", ""]
+def _write_dictionary_doc(
+    run_dir: Path,
+    valid: Sequence[dict[str, object]],
+    company_notes: Sequence[Mapping[str, object]] = (),
+    coverage: Mapping[str, object] | None = None,
+) -> None:
+    lines = [
+        "# 科目语义词典说明",
+        "",
+        "本文件按完整父路径展示本次运行的固定语义结果；覆盖统计只用于完善规则，不参与分类、评分、重要性或人工门禁。",
+        "",
+    ]
+    if coverage:
+        path_counts = dict(coverage.get("path_counts", {}))
+        component_counts = dict(coverage.get("component_counts", {}))
+        component_amounts = dict(coverage.get("component_absolute_amount_cent", {}))
+        lines.extend(
+            [
+                "## 规则覆盖情况",
+                "",
+                f"- 完整路径总数：{coverage.get('path_total', 0)}",
+                f"- 业务组成总数：{coverage.get('component_total', 0)}",
+                "",
+                "| 状态 | 路径数 | 业务组成笔数 | 绝对金额（元） |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for status in ("固定规则完整解释", "Agent补充", "部分解释", "冲突", "未识别"):
+            lines.append(
+                f"| {status} | {path_counts.get(status, 0)} | "
+                f"{component_counts.get(status, 0)} | "
+                f"{int(component_amounts.get(status, 0)) / 100:,.2f} |"
+            )
+        pending_paths = tuple(coverage.get("pending_paths", ()))
+        if pending_paths:
+            lines.extend(
+                [
+                    "",
+                    "### 高频或高金额待补路径",
+                    "",
+                    "| 完整路径 | 状态 | 业务组成笔数 | 绝对金额（元） |",
+                    "|---|---|---:|---:|",
+                ]
+            )
+            for item in pending_paths:
+                lines.append(
+                    f"| {item.get('account', '')} | {item.get('status', '')} | "
+                    f"{item.get('component_count', 0)} | "
+                    f"{int(item.get('absolute_amount_cent', 0)) / 100:,.2f} |"
+                )
+        lines.extend(["", "## 完整路径明细", ""])
     lines.append(
         "| 客户原完整路径 | 客户一级科目 | 标准一级科目 | 中间层级 | 末级明细 | "
-        "规范化路径 | 科目语义 | 疑似现金流项目 | 证据状况 | 事实依据 | 准则依据 | 适用NOTE | 映射状态 |"
+        "规范化路径 | 科目语义 | 疑似现金流项目 | 固定质量 | 事实依据 | 适用NOTE | 解释状态 |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for item in valid:
         levels = split_account_levels(str(item["account"]))
         originals = item.get("original_paths", ()) or (item["account"],)
-        if item.get("item_id"):
-            item_display = str(item["item_id"])
-        elif item.get("candidate_item_ids"):
+        if item.get("candidate_item_ids"):
             item_display = "候选：" + "、".join(item["candidate_item_ids"])
         elif any(
             item.get(key)
             for key in (
-                "inflow_item_id",
-                "outflow_item_id",
                 "inflow_candidate_item_ids",
                 "outflow_candidate_item_ids",
             )
         ):
-            inflow = item.get("inflow_item_id") or "、".join(
-                item.get("inflow_candidate_item_ids", ())
-            )
-            outflow = item.get("outflow_item_id") or "、".join(
-                item.get("outflow_candidate_item_ids", ())
-            )
+            inflow = "、".join(item.get("inflow_candidate_item_ids", ()))
+            outflow = "、".join(item.get("outflow_candidate_item_ids", ()))
             item_display = f"流入：{inflow}；流出：{outflow}"
         else:
             item_display = "已识别但不指向特定项目"
@@ -1546,16 +1678,9 @@ def _write_dictionary_doc(run_dir: Path, valid: Sequence[dict[str, object]], com
             f"{' / '.join(levels[1:-1])} | {levels[-1] if levels else ''} | {item['account']} | "
             f"{item.get('semantic', '')} | "
             f"{item_display} | "
-            f"{item.get('confidence', '')} | {item.get('basis', '')} | "
-            f"{item.get('standard_basis', '')} | "
-            f"{item.get('note_id', '')} | 已确认 |"
+            f"{item.get('quality_score', 0)} | {item.get('basis', '')} | "
+            f"{item.get('note_id', '')} | {item.get('status', '')} |"
         )
-    low = [item for item in valid if item.get("confidence") == "low"]
-    if low:
-        lines.append("")
-        lines.append("## 待人工确认")
-        for item in low:
-            lines.append(f"- {item['account']}（{item.get('semantic', '')}）：{item.get('basis', '')}")
     if company_notes:
         # 复核修复：公司特殊规则分"已采用"与"冲突未采用（仅说明，不生效）"两节列示
         adopted = [note for note in company_notes if company_note_is_active(note)]
@@ -1570,14 +1695,16 @@ def _write_dictionary_doc(run_dir: Path, valid: Sequence[dict[str, object]], com
                         f"- {note.get('note_id', '')}：{note.get('内容', '')}（涉及科目或词："
                         f"{'、'.join(note.get('涉及科目或词', ()) or ())}；建议处理：{note.get('建议处理', '')}）"
                     )
-    (Path(run_dir) / "科目语义词典说明.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (Path(run_dir) / "科目语义词典说明.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8-sig"
+    )
 
 
-def _semantic_account_paths_after_component_build(
+def _semantic_components_after_component_build(
     state: Mapping[str, object],
     entries: Sequence[NormalizedEntry],
-) -> tuple[str, ...]:
-    """兼容独立扫描入口，但仍先按现金范围清理并构造业务组成。"""
+) -> tuple[CashflowComponent, ...]:
+    """独立扫描入口按正式现金范围和结构选择重建业务组成。"""
     scope = _scope_from_dict(state["cash_scope"])
     if find_cash_row_cleanup_requests(entries, scope):
         raise RuntimeError("现金分录仍无法可靠识别，请先执行分类并完成清洗门禁")
@@ -1611,16 +1738,85 @@ def _semantic_account_paths_after_component_build(
     )
     if build.structure_requests:
         raise RuntimeError("业务组成结构尚未确定，请先执行分类并完成结构确认")
+    return tuple(build.components)
+
+
+def _semantic_account_paths_after_component_build(
+    state: Mapping[str, object],
+    entries: Sequence[NormalizedEntry],
+) -> tuple[str, ...]:
+    components = _semantic_components_after_component_build(state, entries)
     return tuple(
         sorted(
             {
                 path
-                for component in build.components
+                for component in components
                 for path in component.counterpart_accounts
                 if path.strip()
             }
         )
     )
+
+
+def _account_dictionary_coverage(
+    components: Sequence[CashflowComponent],
+    results: Sequence[AccountPathSemanticResult],
+) -> dict[str, object]:
+    """覆盖统计只用于补规则，不参与分类、评分、重要性或门禁。"""
+    result_by_path = {item.account: item for item in results}
+    statuses = (
+        "固定规则完整解释",
+        "Agent补充",
+        "部分解释",
+        "冲突",
+        "未识别",
+    )
+    path_counts = {
+        status: sum(item.status == status for item in results) for status in statuses
+    }
+    rank = {status: index for index, status in enumerate(statuses)}
+    component_counts = {status: 0 for status in statuses}
+    component_amounts = {status: 0 for status in statuses}
+    path_usage: dict[str, list[int]] = {}
+    for component in components:
+        component_statuses = [
+            result_by_path[path].status
+            for path in component.counterpart_accounts
+            if path in result_by_path
+        ]
+        status = (
+            max(component_statuses, key=lambda value: rank.get(value, len(rank)))
+            if component_statuses
+            else "未识别"
+        )
+        component_counts[status] += 1
+        component_amounts[status] += abs(component.cash_delta_cent)
+        for path in dict.fromkeys(component.counterpart_accounts):
+            usage = path_usage.setdefault(path, [0, 0])
+            usage[0] += 1
+            usage[1] += abs(component.cash_delta_cent)
+    pending = [
+        {
+            "account": path,
+            "status": result_by_path[path].status,
+            "component_count": values[0],
+            "absolute_amount_cent": values[1],
+        }
+        for path, values in path_usage.items()
+        if path in result_by_path
+        and result_by_path[path].status not in {"固定规则完整解释", "Agent补充"}
+    ]
+    pending.sort(
+        key=lambda item: (-int(item["absolute_amount_cent"]), -int(item["component_count"]), str(item["account"]))
+    )
+    return {
+        "path_total": len(results),
+        "path_counts": path_counts,
+        "component_total": len(components),
+        "component_counts": component_counts,
+        "component_absolute_amount_cent": component_amounts,
+        "pending_paths": pending[:20],
+    }
 
 
 def scan_accounts(run_dir: Path) -> dict[str, object]:
@@ -1632,68 +1828,34 @@ def scan_accounts(run_dir: Path) -> dict[str, object]:
     if state.get("company_notes_raw") and not state.get("company_notes"):
         return {"status": "待确认公司特殊规则", "missing": 0}
     entries = _standardized_entries_from_state(state)
+    components = _semantic_components_after_component_build(state, entries)
     all_paths = tuple(
-        str(path)
-        for path in state.get("semantic_account_paths", ())
-        if str(path).strip()
-    ) or _semantic_account_paths_after_component_build(state, entries)
+        sorted(
+            {
+                path
+                for component in components
+                for path in component.counterpart_accounts
+                if path.strip()
+            }
+        )
+    )
     state["semantic_account_paths"] = list(all_paths)
-    # 仅为实际进入业务组成的路径保留客户原路径身份。
     effective_names: list[tuple[NormalizedEntry, str]] = []
     for entry in entries:
         if entry.counterpart_name in all_paths:
             effective_names.append((entry, entry.counterpart_name))
         if entry.account_name in all_paths:
             effective_names.append((entry, entry.account_name))
-    common_dictionary = load_common_dictionary(PROJECT_ROOT)
-    custom_known = {
-        item["account"]
-        for item in state.get("account_dictionary", {}).get("valid_results", ())
-    }
-    def has_decisive_common_semantic(account_path: str) -> bool:
-        hit = common_dictionary.lookup_path(account_path)
-        return bool(
-            hit
-            and (
-                hit.item_id
-                or hit.inflow_item_id
-                or hit.outflow_item_id
-                or hit.candidate_item_ids
-                or hit.inflow_candidate_item_ids
-                or hit.outflow_candidate_item_ids
-            )
-        )
-
-    unknown = [
-        path
-        for path in all_paths
-        if path not in custom_known
-        and not has_decisive_common_semantic(path)
-    ]
-    # 复核修复：只有"采用"状态的公司特殊规则才生效
+    rules = load_account_semantic_rules(PROJECT_ROOT)
+    analyses = tuple(analyze_account_path(path, rules) for path in all_paths)
+    valid: list[dict[str, object]] = []
+    tasks: list[dict[str, object]] = []
+    base_results: list[dict[str, object]] = []
     adopted_notes = [
         note for note in state.get("company_notes", ()) if company_note_is_active(note)
     ]
-    def note_applies_to_path(
-        note: Mapping[str, object], account_path: str
-    ) -> bool:
-        return company_note_applies(note, "", (account_path,))
-
-    # 防截断：通用词典已知的科目段，只要被"采用"规则涉及词命中，仍强制生成专属确认任务
-    forced = [
-        path
-        for path in all_paths
-        if path not in custom_known
-        and common_dictionary.lookup_path(path) is not None
-        and any(note_applies_to_path(note, path) for note in adopted_notes)
-    ]
-    unknown = sorted(set(unknown) | set(forced))
-    if not unknown:
-        state["account_dictionary_completed"] = True
-        _save_state(run_dir, state)
-        return {"status": "科目语义已齐备", "missing": 0}
-    tasks: list[dict[str, object]] = []
-    for account_path in unknown:
+    for result in analyses:
+        account_path = result.account
         levels = split_account_levels(account_path)
         original_paths = tuple(
             dict.fromkeys(
@@ -1706,56 +1868,63 @@ def scan_accounts(run_dir: Path) -> dict[str, object]:
                 if account_path == name
             )
         )
-        task: dict[str, object] = {
-            "task_id": stable_id("ACC", account_path),
-            "account": account_path,
+        metadata = {
             "original_path": account_path,
             "standard_level1": levels[0] if levels else "",
-            "account_levels": list(levels),
             "original_paths": list(original_paths),
             "customer_level1": (
                 split_account_levels(original_paths[0])[0]
                 if original_paths and split_account_levels(original_paths[0])
                 else (levels[0] if levels else "")
             ),
-            "instruction": (
-                "请判断该完整科目路径的一般业务语义和疑似现金流项目。"
-                "没有公司特殊规则只表示不增加企业例外，不能据此把通用业务语义留空。"
-                "若同一路径随现金方向对应不同项目，请分别填写inflow_item_id和outflow_item_id；"
-                "若单一方向仍有多个合理候选，分别填写inflow_candidate_item_ids或"
-                "outflow_candidate_item_ids并评为low；不得查看摘要、原项目或金额，也不得"
-                "为了填写item_id而强行挑选一个候选。凡填写任何候选项目，必须另填"
-                "standard_basis，逐项引用与该项目相符的现金流量表准则条款或应用指南。"
-            ),
+        }
+        record = {**_account_path_result_to_dict(result), **metadata}
+        base_results.append(record)
+        if not result.unresolved_slots:
+            valid.append(record)
+            continue
+        task = {
+            "task_id": stable_id("ACC", account_path),
+            **build_account_agent_task(result),
+            **metadata,
         }
         if adopted_notes:
-            # 设计 3.1.3：任务上下文必须带 NOTE 编号，答题方才能在结果里留痕
             relevant = [
                 f"{note.get('note_id', '')}：{note.get('内容', '')}"
                 for note in adopted_notes
-                if note_applies_to_path(note, account_path)
+                if company_note_applies(note, "", (account_path,))
             ]
-            if not relevant:
-                relevant = [
-                    f"{note.get('note_id', '')}：{note.get('内容', '')}"
-                    for note in adopted_notes
-                ]
-            task["company_notes"] = relevant
+            if relevant:
+                task["company_notes"] = relevant
         tasks.append(task)
     state["account_dictionary"] = {
+        "schema_version": "2.0.0",
         "tasks": tasks,
-        "valid_results": [],
+        "base_results": base_results,
+        "valid_results": valid,
         "missing_ids": [task["task_id"] for task in tasks],
+        "coverage": _account_dictionary_coverage(components, analyses),
     }
-    # 复核修复：生成了待确认任务就必须重新等待词典导入，不得沿用此前的"已齐备"标志
-    state["account_dictionary_completed"] = False
-    _write_dictionary_batches(run_dir, tasks)
-    state["stage"] = "waiting_dictionary"
+    state["account_dictionary_completed"] = not tasks
+    if tasks:
+        _write_dictionary_batches(run_dir, tasks)
+        state["stage"] = "waiting_dictionary"
+    else:
+        state["stage"] = "dictionary_completed"
+        _write_dictionary_doc(
+            run_dir,
+            valid,
+            state.get("company_notes", ()),
+            state["account_dictionary"]["coverage"],
+        )
     _save_state(run_dir, state)
-    return {"status": "待科目语义确认", "missing": len(tasks)}
+    return {
+        "status": "待科目语义确认" if tasks else "科目语义已齐备",
+        "missing": len(tasks),
+    }
 
 
-def import_dictionary_results(run_dir: Path, result_path: Path) -> dict[str, object]:
+def _import_dictionary_results_legacy(run_dir: Path, result_path: Path) -> dict[str, object]:
     """校验并导入完整路径科目语义结果；全部有效后标记齐备并生成人读说明文档。"""
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
@@ -1934,6 +2103,96 @@ def import_dictionary_results(run_dir: Path, result_path: Path) -> dict[str, obj
     state["account_dictionary_completed"] = True
     state["stage"] = "dictionary_completed"
     _write_dictionary_doc(run_dir, valid, state.get("company_notes", ()))
+    _save_state(run_dir, state)
+    return {"status": "科目语义已导入", "count": len(valid)}
+
+
+def import_dictionary_results(run_dir: Path, result_path: Path) -> dict[str, object]:
+    """导入受限节点概念；候选和质量始终由固定程序重新计算。"""
+    state = _load_state(run_dir)
+    _assert_inputs_unchanged(state)
+    pending = state.get("account_dictionary")
+    if not pending or pending.get("schema_version") != "2.0.0":
+        raise RuntimeError("旧版科目路径语义答案不兼容，请重新执行 scan-accounts")
+    tasks = tuple(pending.get("tasks", ()))
+    if not tasks:
+        raise RuntimeError("尚未生成科目路径待判断任务，请先执行 scan-accounts")
+    expected_by_id = {str(task["task_id"]): task for task in tasks}
+    base_by_account = {
+        str(item["account"]): item for item in pending.get("base_results", ())
+    }
+    rules = load_account_semantic_rules(PROJECT_ROOT)
+    valid = list(pending.get("valid_results", ()))
+    seen: set[str] = set()
+    missing: list[str] = []
+    allowed_fields = {"task_id", "account", "node_concepts", "relations"}
+    with Path(result_path).open("r", encoding="utf-8-sig") as source:
+        for raw in source:
+            if not raw.strip():
+                continue
+            record = json.loads(raw)
+            task_id = str(record.get("task_id", ""))
+            task = expected_by_id.get(task_id)
+            if task is None or task_id in seen:
+                if task_id:
+                    missing.append(task_id)
+                continue
+            if set(record).difference(allowed_fields):
+                forbidden = set(record).difference(allowed_fields)
+                if forbidden.intersection(
+                    {
+                        "item_id",
+                        "candidate_item_ids",
+                        "inflow_item_id",
+                        "outflow_item_id",
+                        "confidence",
+                        "quality",
+                        "score",
+                        "materiality",
+                        "action",
+                    }
+                ):
+                    raise ValueError("科目路径Agent不得返回项目、质量或分数")
+                missing.append(task_id)
+                continue
+            account = str(record.get("account", ""))
+            if account != str(task["account"]) or account not in base_by_account:
+                missing.append(task_id)
+                continue
+            base = _account_path_result_from_dict(base_by_account[account])
+            merged = merge_account_agent_concepts(base, record, rules)
+            metadata = {
+                key: value
+                for key, value in base_by_account[account].items()
+                if key
+                in {
+                    "original_path",
+                    "original_paths",
+                    "customer_level1",
+                    "standard_level1",
+                }
+            }
+            valid.append({**_account_path_result_to_dict(merged), **metadata})
+            seen.add(task_id)
+    missing.extend(task_id for task_id in expected_by_id if task_id not in seen)
+    if missing:
+        return {"status": "AI 未完成", "missing_ids": sorted(set(missing))}
+    entries = _standardized_entries_from_state(state)
+    components = _semantic_components_after_component_build(state, entries)
+    final_results = tuple(_account_path_result_from_dict(item) for item in valid)
+    coverage = _account_dictionary_coverage(components, final_results)
+    pending["valid_results"] = valid
+    pending["missing_ids"] = []
+    pending["coverage"] = coverage
+    state["account_dictionary"] = pending
+    state["account_dictionary_completed"] = True
+    state["stage"] = "dictionary_completed"
+    _write_dictionary_doc(
+        run_dir,
+        valid,
+        state.get("company_notes", ()),
+        coverage,
+    )
     _save_state(run_dir, state)
     return {"status": "科目语义已导入", "count": len(valid)}
 
@@ -3260,13 +3519,11 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         item.item_id for item in rules.statement_items if item.is_leaf
     )
 
-    def decision_statement_amount(
+    def original_statement_amount(
         decision: ClassificationDecision,
         component: CashflowComponent,
     ) -> int:
-        if not decision.resolved or decision.excluded:
-            return 0
-        item = rules.item_by_id.get(decision.system_item_id)
+        item = rules.item_by_id.get(decision.original_standard_item_id)
         if item is None:
             return 0
         return statement_amount_cent(
@@ -3287,21 +3544,36 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             raise RuntimeError("客户现有正表仍有无法映射的项目，请先确认")
 
     balances = state.get("cash_balances", {})
-    statement = aggregate_statement(
+    layers = build_statement_layers(
         components,
         decisions,
         rules,
+        existing=existing,
         opening_cent=balances.get("opening_cent"),
         fx_cent=balances.get("fx_cent"),
-        prior_values=None if existing is None else existing.prior_values,
+        additional_system_adjustments=internal_transfer_statement_adjustments(
+            entries,
+            tuple(
+                InternalTransferLeg(**item)
+                for item in state.get("internal_transfers", ())
+            ),
+            rules,
+        ),
     )
+    statement = layers.automatic_baseline
     statement_check = validate_statement(statement)
     if not statement_check.valid:
         raise RuntimeError("正表金额勾稽失败：" + "；".join(statement_check.errors))
     if existing is not None:
-        comparison = compare_statement(existing, statement)
+        comparison = compare_statement(
+            existing,
+            statement,
+            system_adjustments=layers.system_adjustments,
+            manual_adjustments=layers.manual_adjustments,
+            detail_reconstruction=layers.detail_reconstruction,
+        )
     reconciliation = reconcile_cash(
-        statement,
+        layers.final_statement,
         balances.get("opening_cent"),
         balances.get("closing_cent"),
         balances.get("fx_cent"),
@@ -3357,7 +3629,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 != (decision.system_item_id or decision.original_standard_item_id)
             ),
             reason=decision.reason,
-            system_statement_amount_cent=decision_statement_amount(
+            system_statement_amount_cent=original_statement_amount(
                 decision, component_by_id[decision.component_id]
             ),
             source_locations=tuple(
@@ -3371,6 +3643,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 abs(component_by_id[decision.component_id].cash_delta_cent)
                 >= _materiality_from_state(state).overall_cent
             ),
+            baseline_item_code=decision.original_standard_item_id,
         )
         for decision in decisions
         if (
@@ -3416,7 +3689,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                         != (decision.system_item_id or decision.original_standard_item_id)
                     ),
                     reason=str(payload["reason"]),
-                    system_statement_amount_cent=decision_statement_amount(
+                    system_statement_amount_cent=original_statement_amount(
                         decision, component
                     ),
                     source_locations=tuple(
@@ -3428,6 +3701,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     ),
                     group_impact_cent=int(payload["gross_cent"]),
                     mandatory=abs(component.cash_delta_cent) >= _materiality_from_state(state).overall_cent,
+                    baseline_item_code=decision.original_standard_item_id,
                 )
             )
     unresolved = tuple(unresolved_list)
@@ -3463,7 +3737,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 summary_pattern=_review_text_pattern(component.summary),
                 alternative_item_ids=(),
                 reason=decision.reason,
-                system_statement_amount_cent=decision_statement_amount(
+                system_statement_amount_cent=original_statement_amount(
                     decision, component
                 ),
                 source_locations=tuple(
@@ -3474,6 +3748,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     )
                 ),
                 mandatory=True,
+                baseline_item_code=decision.original_standard_item_id,
             )
         )
     unresolved = tuple(unresolved_list)
@@ -3794,6 +4069,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         unconfirmed_statement=statement_unconfirmed,
         dictionary_rows=dictionary_rows,
         consistency_rows=consistency_rows,
+        manual_adjustments=layers.manual_adjustments,
     )
     sequence = 1
     while True:

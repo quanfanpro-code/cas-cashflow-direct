@@ -310,7 +310,7 @@ def flow_direction_source(entry: NormalizedEntry) -> str:
     return "借贷差额"
 
 
-def _signed_flow(entry: NormalizedEntry) -> int:
+def entry_cash_delta_cent(entry: NormalizedEntry) -> int:
     if entry.flow_amount_cent:
         account_delta = entry.debit_cent - entry.credit_cent
         side_delta = (
@@ -323,6 +323,10 @@ def _signed_flow(entry: NormalizedEntry) -> int:
     else:
         side_delta = entry.debit_cent - entry.credit_cent
     return -side_delta if entry.retained_side == "counterpart" else side_delta
+
+
+# 保留项目内既有测试和调用入口；正式跨模块调用使用公开名称。
+_signed_flow = entry_cash_delta_cent
 
 
 def compute_rough_reconciliation(
@@ -344,7 +348,7 @@ def compute_rough_reconciliation(
     if not applicable_ids:
         return RoughReconciliation(False, "不适用", None, None, None, ())
     detail_sum = sum(
-        _signed_flow(entry)
+        entry_cash_delta_cent(entry)
         for entry in entries
         if entry.source.file_id in applicable_ids
     )
@@ -447,7 +451,7 @@ def _annotate_voucher_components(
 
 
 def _build_one_sided(entry: NormalizedEntry) -> CashflowComponent:
-    amount = _signed_flow(entry)
+    amount = entry_cash_delta_cent(entry)
     counterpart = (entry.account_name,) if entry.retained_side == "counterpart" and entry.account_name else ()
     usable_counterpart = entry.retained_side == "counterpart" and bool(entry.account_name)
     return _component(
@@ -472,7 +476,7 @@ def _match_internal_transfers(
     cash_entries: list[NormalizedEntry],
     external_amounts: Sequence[int] = (),
 ) -> tuple[dict[str, int], list[InternalTransferLeg]]:
-    remaining = {entry.entry_id: _signed_flow(entry) for entry in cash_entries}
+    remaining = {entry.entry_id: entry_cash_delta_cent(entry) for entry in cash_entries}
     for external in external_amounts:
         candidates = (
             [entry for entry in cash_entries if remaining[entry.entry_id] > 0]
@@ -524,7 +528,7 @@ def _minimum_amount_row_combinations(
         return ()
     states: dict[int, tuple[int, tuple[tuple[int, ...], ...]]] = {0: (0, ((),))}
     for index, row in enumerate(rows):
-        amount = _signed_flow(row)
+        amount = entry_cash_delta_cent(row)
         if not amount:
             continue
         updated = dict(states)
@@ -594,7 +598,7 @@ def _voucher_components(
             matched_ids == {entry.entry_id for entry in noncash}
             and all(matched for _, matched in matched_groups)
             and all(
-                sum(_signed_flow(entry) for entry in matched)
+                sum(entry_cash_delta_cent(entry) for entry in matched)
                 == cash_entry.debit_cent - cash_entry.credit_cent
                 for cash_entry, matched in matched_groups
             )
@@ -642,29 +646,29 @@ def _voucher_components(
             neighbor not in cash_entries
             and _looks_like_cash(neighbor.account_name)
             and neighbor.summary == entry.summary
-            and _signed_flow(neighbor) == _signed_flow(entry)
+            and entry_cash_delta_cent(neighbor) == entry_cash_delta_cent(entry)
             for neighbor in neighbors
         )
 
     labeled = [entry for entry in labeled if not belongs_to_excluded_cash(entry)]
     labeled_flow_rows = [entry for entry in labeled if entry.flow_amount_cent]
     cash_directions = {
-        1 if _signed_flow(entry) > 0 else -1
+        1 if entry_cash_delta_cent(entry) > 0 else -1
         for entry in cash_entries
-        if _signed_flow(entry)
+        if entry_cash_delta_cent(entry)
     }
     if len(cash_directions) > 1:
         supported_ids: set[str] = set()
         for direction in cash_directions:
             cash_direction_total = sum(
-                _signed_flow(entry)
+                entry_cash_delta_cent(entry)
                 for entry in cash_entries
-                if _signed_flow(entry) * direction > 0
+                if entry_cash_delta_cent(entry) * direction > 0
             )
             same_direction_labels = tuple(
                 entry
                 for entry in labeled_flow_rows
-                if _signed_flow(entry) * direction > 0
+                if entry_cash_delta_cent(entry) * direction > 0
             )
             supported_ids.update(
                 entry.entry_id
@@ -680,7 +684,7 @@ def _voucher_components(
             _component(
                 voucher_key,
                 sequence,
-                _signed_flow(entry),
+                entry_cash_delta_cent(entry),
                 entry.summary,
                 (entry.account_name,) if entry.account_name else (),
                 entry.original_flow_item,
@@ -758,7 +762,7 @@ def _voucher_components(
             _component(
                 voucher_key,
                 sequence,
-                _signed_flow(entry),
+                entry_cash_delta_cent(entry),
                 entry.summary,
                 (entry.account_name,) if entry.account_name else (),
                 entry.original_flow_item,
@@ -791,7 +795,7 @@ def _voucher_components(
 
     by_item: dict[str, list[NormalizedEntry]] = defaultdict(list)
     for entry in labeled:
-        direction = "in" if _signed_flow(entry) > 0 else "out"
+        direction = "in" if entry_cash_delta_cent(entry) > 0 else "out"
         by_item[f"{direction}\x1f{entry.original_flow_item}"].append(entry)
     principal_and_interest = (
         any(any(term in entry.account_name for term in ("借款", "债务")) for entry in noncash)
@@ -799,7 +803,7 @@ def _voucher_components(
     )
     if not by_item and principal_and_interest:
         for entry in noncash:
-            direction = "in" if _signed_flow(entry) > 0 else "out"
+            direction = "in" if entry_cash_delta_cent(entry) > 0 else "out"
             by_item[f"{direction}\x1f{entry.account_name}"].append(entry)
 
     if len(by_item) <= 1:
@@ -830,7 +834,7 @@ def _voucher_components(
     components: list[CashflowComponent] = []
     for sequence, item_entries in enumerate(by_item.values(), 1):
         item = item_entries[0].original_flow_item
-        amount = sum(_signed_flow(entry) for entry in item_entries)
+        amount = sum(entry_cash_delta_cent(entry) for entry in item_entries)
         item_accounts = tuple(dict.fromkeys(entry.account_name for entry in item_entries if entry.account_name))
         summary, summary_anomalies = _connected_summary(item_entries)
         components.append(
@@ -908,7 +912,7 @@ def _build_source_allocations(
                 and account_key_for_entry(entry, counterpart=True) in scope.included_keys
             )
         ]
-        remaining = {entry.entry_id: _signed_flow(entry) for entry in cash_entries}
+        remaining = {entry.entry_id: entry_cash_delta_cent(entry) for entry in cash_entries}
         for component in voucher_components:
             amount_left = component.cash_delta_cent
             for entry in cash_entries:
@@ -932,7 +936,7 @@ def _build_source_allocations(
                         entry_by_id[key]
                         for key in component.source_keys
                         if key in entry_by_id
-                        and _signed_flow(entry_by_id[key]) * amount_left > 0
+                        and entry_cash_delta_cent(entry_by_id[key]) * amount_left > 0
                     ),
                     None,
                 )
@@ -991,7 +995,7 @@ def build_cashflow_components(
             ]
             if explicit_internal:
                 excluded.extend(
-                    InternalTransferLeg(voucher_key, entry.entry_id, abs(_signed_flow(entry)))
+                    InternalTransferLeg(voucher_key, entry.entry_id, abs(entry_cash_delta_cent(entry)))
                     for entry in explicit_internal
                 )
                 cash_entries = [entry for entry in cash_entries if entry not in explicit_internal]
@@ -1018,7 +1022,7 @@ def build_cashflow_components(
                 cash_delta = (
                     sum(entry.debit_cent - entry.credit_cent for entry in cash_entries)
                     if len(voucher_entries) > 1 and imbalance == 0
-                    else sum(_signed_flow(entry) for entry in cash_entries)
+                    else sum(entry_cash_delta_cent(entry) for entry in cash_entries)
                 )
                 combinations = _minimum_amount_row_combinations(labeled, cash_delta)
                 if len(combinations) > 1:

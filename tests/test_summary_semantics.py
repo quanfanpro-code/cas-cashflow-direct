@@ -58,6 +58,50 @@ class SummarySemanticsTests(unittest.TestCase):
         self.assertEqual(("CFI-06",), asset.candidate_item_ids)
         self.assertEqual(45, asset.quality.value)
 
+    def test_wage_account_phrase_does_not_become_staff_compensation(self):
+        for summary in (
+            "付农民工资专用账户款",
+            "转农民工工资专户资金",
+            "支付工资保证金",
+        ):
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+                self.assertNotIn("CFO-05", result.candidate_item_ids)
+                self.assertLess(result.quality.value, 45)
+
+    def test_employee_advance_return_does_not_become_financing_borrowing(self):
+        for summary in (
+            "收到员工退回借款",
+            "收回职工借支",
+            "收到员工备用金退回",
+        ):
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+                self.assertNotIn("CFF-02", result.candidate_item_ids)
+                self.assertIn("CFO-03", result.candidate_item_ids)
+
+    def test_equipment_purchase_is_not_monopolized_by_goods_word(self):
+        result = analyze_summary("支付设备采购货款", self.rules)
+        self.assertNotEqual(("CFO-04",), result.candidate_item_ids)
+        self.assertIn("CFI-06", result.candidate_item_ids)
+
+    def test_individual_tax_needs_an_employee_service_object(self):
+        for summary in (
+            "缴纳分红个税",
+            "代缴股权转让个人所得税",
+            "缴纳个人所得税",
+        ):
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+                self.assertFalse(
+                    result.candidate_item_ids == ("CFO-05",)
+                    and result.quality is EvidenceQuality.STRONG
+                )
+
+        employee = analyze_summary("支付本公司员工本月工资薪金", self.rules)
+        self.assertEqual(("CFO-05",), employee.candidate_item_ids)
+        self.assertIs(EvidenceQuality.STRONG, employee.quality)
+
     def test_completed_refund_is_an_ordinary_semantic_relation(self):
         result = analyze_summary("收到员工退回备用金", self.rules)
         self.assertTrue(any(span.slot == "refund" for span in result.spans))

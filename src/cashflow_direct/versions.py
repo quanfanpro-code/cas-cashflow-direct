@@ -4,12 +4,12 @@ import hashlib
 from pathlib import Path
 
 
-SCHEMA_VERSION = "4.0"
-SCORING_VERSION = "2026-08-23-fixed-summary-semantics-v13"
+SCHEMA_VERSION = "4.1"
+SCORING_VERSION = "2026-08-24-summary-relations-v14"
 ACTION_MATRIX_VERSION = "2026-08-23-anomaly-clue-only-v14"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
-SUMMARY_SEMANTICS_VERSION = "2026-08-23-seven-dictionaries-v2"
+SUMMARY_SEMANTICS_VERSION = "2026-08-24-fixed-relations-v3"
 MATERIALITY_VERSION = "2026-08-23-single-item-only-v2"
 FORCED_CHECKS_VERSION = "2026-08-23-forced-checks-v1"
 

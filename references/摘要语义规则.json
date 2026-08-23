@@ -1,5 +1,5 @@
 ﻿{
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "scope": "一般企业现金流量表直接法摘要语义",
   "noise_patterns": [
     {"slot": "noise_date", "pattern": "(?:20\\d{2}[年./-])?\\d{1,2}[月./-]\\d{0,2}日?"},
@@ -105,7 +105,7 @@
     {"rule_id": "CFO-04-purchase-relation", "candidate_item_ids": ["CFO-04"], "all": {"cash_action": ["outflow"], "business_relation": ["purchase"]}, "without": {"refund": ["completed"]}},
     {"rule_id": "CFO-04-production-service", "candidate_item_ids": ["CFO-04"], "all": {"business_object": ["production_service", "utility_fund"]}},
     {"rule_id": "CFO-05-staff", "candidate_item_ids": ["CFO-05"], "all": {"cash_action": ["outflow"], "business_object": ["staff_compensation"]}},
-    {"rule_id": "CFO-05-staff-tax", "candidate_item_ids": ["CFO-05"], "all": {"business_object": ["staff_individual_tax"]}},
+    {"rule_id": "CFO-05-staff-tax", "candidate_item_ids": ["CFO-05"], "all": {"business_object": ["staff_individual_tax"], "counterparty_role": ["employee"]}},
     {"rule_id": "CFO-06-tax", "candidate_item_ids": ["CFO-06"], "all": {"cash_action": ["outflow"], "business_object": ["tax_payment"]}},
     {"rule_id": "CFO-06-return-tax-refund", "candidate_item_ids": ["CFO-06"], "all": {"cash_action": ["outflow"], "business_object": ["tax_refund"]}},
     {"rule_id": "CFO-07-other", "candidate_item_ids": ["CFO-07"], "all": {"cash_action": ["outflow"], "business_object": ["employee_advance", "operating_deposit", "travel_expense", "utilities", "operating_other"]}},
@@ -145,8 +145,10 @@
   ],
   "quality_rules": {
     "strong_values": {
-      "business_object": ["trade_goods", "service_revenue", "operating_professional_service", "production_service", "engineering_service", "financing_service", "acquisition_service", "staff_compensation", "staff_individual_tax", "asset_acquisition_tax", "penalty", "bank_deposit_interest", "sales_note_collection", "customer_advance", "utility_fund", "investment_principal", "investment_income", "long_asset", "subsidiary_business", "long_asset_disposal", "subsidiary_disposal", "subsidiary_acquisition", "capital_contribution", "borrowing", "financing_other", "debt_principal", "dividend_interest"],
-      "purpose": ["capital_use"]
+      "business_relation": ["sale", "purchase", "acquire", "dispose", "borrow", "repay"],
+      "counterparty_role": ["customer", "supplier", "employee", "shareholder", "bank"],
+      "purpose": ["capital_use", "operating_use"],
+      "attribute": ["principal", "interest", "net_amount", "decisive_object"]
     }
   }
 }

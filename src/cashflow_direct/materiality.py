@@ -76,6 +76,7 @@ def build_review_batches(
                 counterpart_group=item.counterpart_group,
                 source_locations=item.source_locations,
                 mandatory=True,
+                baseline_item_code=item.baseline_item_code,
             )
         )
 
@@ -103,6 +104,7 @@ def build_review_batches(
                 representative_summary=item.summary_pattern,
                 counterpart_group=item.counterpart_group,
                 source_locations=item.source_locations,
+                baseline_item_code=item.baseline_item_code,
             )
         )
     return tuple(batches)

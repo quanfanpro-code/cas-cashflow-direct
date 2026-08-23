@@ -4,7 +4,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
@@ -103,6 +103,7 @@ REVIEW_HEADERS = (
     "目标项目金额(技术)",
     "包含笔数(技术)",
     "业务组成编号(技术)",
+    "原基线项目(技术)",
 )
 
 USE_SYSTEM_RECOMMENDATION = "采用系统首选项目"
@@ -144,6 +145,7 @@ class WorkbookModel:
     unconfirmed_statement: bool = False
     dictionary_rows: tuple[Mapping[str, object], ...] = ()
     consistency_rows: tuple[Mapping[str, object], ...] = ()
+    manual_adjustments: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,15 +158,18 @@ def manual_adjustment_formula(
     item_name: str,
     review_last_row: int,
     duplicate_last_row: int,
+    base_amount: float = 0,
 ) -> str:
     review_end = max(2, review_last_row)
     duplicate_end = max(2, duplicate_last_row)
     system_adjustment = _review_col("系统项目调整(技术)", absolute=True)
+    baseline_item = _review_col("原基线项目(技术)", absolute=True)
     system_item = _review_col("系统项目(技术)", absolute=True)
     target_amount = _review_col("目标项目金额(技术)", absolute=True)
     manual_item = _review_col("人工确认项目", absolute=True)
     return (
-        f'=SUMIFS(\'重要待复核事项\'!{system_adjustment}$2:{system_adjustment}${review_end},\'重要待复核事项\'!{system_item}$2:{system_item}${review_end},"{item_name}")'
+        f'={base_amount}'
+        f'+SUMIFS(\'重要待复核事项\'!{system_adjustment}$2:{system_adjustment}${review_end},\'重要待复核事项\'!{baseline_item}$2:{baseline_item}${review_end},"{item_name}")'
         f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{item_name}")'
         f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{system_item}$2:{system_item}${review_end},"{item_name}",\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{USE_SYSTEM_RECOMMENDATION}")'
         f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_name}")'
@@ -186,7 +191,12 @@ def calculate_manual_adjustments(
             for item_id in (batch.proposed_item_code, *batch.alternative_item_codes)
             if item_id
         )
-        if selected in selectable:
+        if selected == "明确排除":
+            if batch.baseline_item_code:
+                adjustments[batch.baseline_item_code] -= batch.baseline_statement_amount_cent
+        elif selected in selectable and selected != batch.baseline_item_code:
+            if batch.baseline_item_code:
+                adjustments[batch.baseline_item_code] -= batch.baseline_statement_amount_cent
             adjustments[selected] += statement_amount_cent(
                 batch.cash_delta_cent,
                 model.rules.item_by_id[selected].normal_direction,
@@ -560,11 +570,18 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 manual_col = _review_col("人工确认项目")
                 system_col = _review_col("系统项目(技术)")
                 baseline_col = _review_col("系统基线金额(技术)")
+                baseline_item_col = _review_col("原基线项目(技术)")
                 cash_change_col = _review_col("批次现金变化金额")
+                effective_item = (
+                    f'IF({manual_col}{excel_row}="{USE_SYSTEM_RECOMMENDATION}",'
+                    f'{system_col}{excel_row},{manual_col}{excel_row})'
+                )
                 review.write_formula(
                     row_index,
                     REVIEW_HEADERS.index("系统项目调整(技术)"),
-                    "=0",
+                    f'=IF(OR({manual_col}{excel_row}="",{baseline_item_col}{excel_row}=""),0,'
+                    f'IF(OR({manual_col}{excel_row}="明确排除",'
+                    f'{effective_item}<>{baseline_item_col}{excel_row}),-{baseline_col}{excel_row},0))',
                     formats["money"],
                     0,
                 )
@@ -579,7 +596,9 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         else f'-{cash_change_col}{excel_row}'
                     )
                     target_formula = (
-                        f'IF({manual_col}{excel_row}="{item_name}",{amount},{target_formula})'
+                        f'IF({manual_col}{excel_row}="{item_name}",'
+                        f'IF({baseline_item_col}{excel_row}="{item_name}",0,{amount}),'
+                        f'{target_formula})'
                     )
                 if batch.proposed_item_code:
                     proposed_direction = model.rules.item_by_id[
@@ -592,7 +611,8 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     )
                     target_formula = (
                         f'IF({manual_col}{excel_row}="{USE_SYSTEM_RECOMMENDATION}",'
-                        f'{proposed_amount},{target_formula})'
+                        f'IF({baseline_item_col}{excel_row}={system_col}{excel_row},0,'
+                        f'{proposed_amount}),{target_formula})'
                     )
                 review.write_formula(
                     row_index,
@@ -621,6 +641,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     row_index,
                     REVIEW_HEADERS.index("业务组成编号(技术)"),
                     "、" + "、".join(batch.component_ids) + "、",
+                    formats["text"],
+                )
+                review.write(
+                    row_index,
+                    REVIEW_HEADERS.index("原基线项目(技术)"),
+                    item_name_by_id.get(batch.baseline_item_code, ""),
                     formats["text"],
                 )
                 review.data_validation(
@@ -770,9 +796,14 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 main.write_formula(
                     row,
                     4,
-                    manual_adjustment_formula(item.name, review_last, duplicate_last),
+                    manual_adjustment_formula(
+                        item.name,
+                        review_last,
+                        duplicate_last,
+                        model.manual_adjustments.get(item.item_id, 0) / 100,
+                    ),
                     formats["money"],
-                    0,
+                    model.manual_adjustments.get(item.item_id, 0) / 100,
                 )
             else:
                 main.write_number(row, 4, 0, formats["money"])
@@ -789,7 +820,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 5,
                 formula,
                 formats["money"],
-                model.statement.values[item.item_id] / 100,
+                (
+                    model.statement.values[item.item_id]
+                    + model.manual_adjustments.get(item.item_id, 0)
+                )
+                / 100,
             )
         main.freeze_panes(3, 0)
         main.autofilter(2, 0, len(ordered) + 2, len(headers) - 1)
@@ -805,17 +840,31 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             {
                 "项目": item_name_by_id[row.item_id],
                 "客户金额": None if row.existing_cent is None else row.existing_cent / 100,
+                "系统自动调整": row.system_adjustment_cent / 100,
                 "自动基线": row.computed_cent / 100,
                 "人工调整": row.manual_adjustment_cent / 100,
                 "最终金额": row.final_cent / 100,
-                "差异": None if row.difference_cent is None else row.difference_cent / 100,
+                "最终差异": None if row.difference_cent is None else row.difference_cent / 100,
+                "明细重建金额": row.detail_reconstruction_cent / 100,
+                "原表与明细勾稽差额": None if row.detail_gap_cent is None else row.detail_gap_cent / 100,
                 "支持组成": "、".join(row.support_component_ids),
             }
             for row in model.comparison.rows
         )
         comparison_sheet = sheets["正表核对报告"]
         if comparison_rows:
-            comparison_headers = ("项目", "客户金额", "自动基线", "人工调整", "最终金额", "差异", "支持组成")
+            comparison_headers = (
+                "项目",
+                "客户金额",
+                "系统自动调整",
+                "自动基线",
+                "人工调整",
+                "最终金额",
+                "最终差异",
+                "明细重建金额",
+                "原表与明细勾稽差额",
+                "支持组成",
+            )
             for column, header in enumerate(comparison_headers):
                 comparison_sheet.write(0, column, header, formats["header"])
             for row_index, row in enumerate(comparison_rows, 1):
@@ -825,21 +874,27 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     comparison_sheet.write_blank(row_index, 1, None, formats["money"])
                 else:
                     comparison_sheet.write_number(row_index, 1, row["客户金额"], formats["money"])
-                comparison_sheet.write_formula(row_index, 2, f"='现金流量表正表'!D{main_row}", formats["money"], row["自动基线"])
-                comparison_sheet.write_formula(row_index, 3, f"='现金流量表正表'!E{main_row}", formats["money"], row["人工调整"])
-                comparison_sheet.write_formula(row_index, 4, f"='现金流量表正表'!F{main_row}", formats["money"], row["最终金额"])
+                comparison_sheet.write_number(row_index, 2, row["系统自动调整"], formats["money"])
+                comparison_sheet.write_formula(row_index, 3, f"='现金流量表正表'!D{main_row}", formats["money"], row["自动基线"])
+                comparison_sheet.write_formula(row_index, 4, f"='现金流量表正表'!E{main_row}", formats["money"], row["人工调整"])
+                comparison_sheet.write_formula(row_index, 5, f"='现金流量表正表'!F{main_row}", formats["money"], row["最终金额"])
                 comparison_sheet.write_formula(
                     row_index,
-                    5,
-                    f'=IF(B{row_index + 1}="","",ROUND(E{row_index + 1}-B{row_index + 1},2))',
+                    6,
+                    f'=IF(B{row_index + 1}="","",ROUND(F{row_index + 1}-B{row_index + 1},2))',
                     formats["money"],
-                    "" if row["差异"] is None else row["差异"],
+                    "" if row["最终差异"] is None else row["最终差异"],
                 )
-                comparison_sheet.write(row_index, 6, row["支持组成"], formats["text"])
+                comparison_sheet.write_number(row_index, 7, row["明细重建金额"], formats["money"])
+                if row["原表与明细勾稽差额"] is None:
+                    comparison_sheet.write_blank(row_index, 8, None, formats["money"])
+                else:
+                    comparison_sheet.write_number(row_index, 8, row["原表与明细勾稽差额"], formats["money"])
+                comparison_sheet.write(row_index, 9, row["支持组成"], formats["text"])
             comparison_sheet.autofilter(0, 0, len(comparison_rows), len(comparison_headers) - 1)
             comparison_sheet.set_column("A:A", 48)
-            comparison_sheet.set_column("B:F", 18)
-            comparison_sheet.set_column("G:G", 40, None, {"hidden": True})
+            comparison_sheet.set_column("B:I", 18)
+            comparison_sheet.set_column("J:J", 40, None, {"hidden": True})
             _configure_sheet(comparison_sheet, len(comparison_headers), len(comparison_rows) + 1)
             comparison_sheet.protect("", {"autofilter": True, "sort": True})
         else:

@@ -655,7 +655,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(100, row["借方"])
                 self.assertIsNone(row["流量金额（原币）"])
                 self.assertEqual(
-                    "证据得分90分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
+                    "证据得分70分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
                     row["差异形成原因"],
                 )
             finally:
@@ -1055,7 +1055,7 @@ class PipelineTests(unittest.TestCase):
             final = finalize_run(preflight.run_dir)
             self.assertTrue(final.workbook_path.is_file())
             self.assertTrue((final.run_dir / "计算留痕数据" / "计算留痕.sqlite3").is_file())
-            self.assertEqual("最终可使用", final.overall_status)
+            self.assertTrue(final.overall_status.startswith("草稿：现金流量表"))
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
                 self.assertIsNotNone(workbook["现金流量表正表"]["C4"].value)
@@ -1543,15 +1543,8 @@ class PipelineTests(unittest.TestCase):
                         {
                             "task_id": task["task_id"],
                             "account": task["account"],
-                            "semantic": "测试语义",
-                            "item_id": "CFI-06",
-                            "confidence": "high",
-                            "basis": "知识库第13行：测试依据",
-                            "standard_basis": (
-                                "《企业会计准则第31号——现金流量表》第十三条："
-                                "购建固定资产、无形资产和其他长期资产支付的现金（CFI-06）"
-                            ),
-                            "classification_facts": ["object:设备", "purpose:购建长期资产"],
+                            "node_concepts": [],
+                            "relations": [],
                         },
                         ensure_ascii=False,
                     )
@@ -1574,9 +1567,14 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(25, summary_result["quality"])
             self.assertEqual("科目语义词典说明.md", (preflight.run_dir / "科目语义词典说明.md").name)
             self.assertTrue((preflight.run_dir / "科目语义词典说明.md").is_file())
+            dictionary_doc = (preflight.run_dir / "科目语义词典说明.md").read_text(
+                encoding="utf-8-sig"
+            )
+            self.assertIn("## 规则覆盖情况", dictionary_doc)
+            self.assertIn("业务组成笔数", dictionary_doc)
 
     def test_company_notes_gate_and_injection(self) -> None:
-        # 传入 --notes 后，未 confirm-notes 前 scan-accounts 停在待确认；确认后注意事项进入词典批次 context（Task 5B）
+        # 传入 --notes 后，未确认前停止；确认后只把与当前完整路径相关的说明带入任务。
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "含明细科目.xlsx"
@@ -1622,8 +1620,7 @@ class PipelineTests(unittest.TestCase):
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
             task = state["account_dictionary"]["tasks"][0]
-            self.assertIn("company_notes", task)
-            self.assertTrue(task["company_notes"])
+            self.assertNotIn("company_notes", task)
 
     def test_confirm_notes_without_raw_text(self) -> None:
         # 复核修复：无 --notes 文本时也可登记口述规则；缺省状态"采用"、自动生成 NOTE 编号
@@ -1796,9 +1793,8 @@ class PipelineTests(unittest.TestCase):
                 json.dumps({
                     "task_id": task["task_id"],
                     "account": "张冠李戴段",
-                    "semantic": "测试语义", "item_id": "CFI-06",
-                    "confidence": "high", "basis": "知识库第1行：测试依据",
-                    "classification_facts": ["object:设备", "purpose:购建长期资产"],
+                    "node_concepts": [],
+                    "relations": [],
                 }, ensure_ascii=False) + "\n",
                 encoding="utf-8-sig",
             )
@@ -1808,7 +1804,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("AI 未完成", result["status"])
             self.assertIn(task["task_id"], result["missing_ids"])
 
-    def test_dictionary_candidate_requires_item_specific_standard_basis(self) -> None:
+    def test_dictionary_agent_cannot_return_item_or_confidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = _write_ledger_case(root)
@@ -1835,20 +1831,8 @@ class PipelineTests(unittest.TestCase):
                 json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8-sig"
             )
 
-            rejected = import_dictionary_results(preflight.run_dir, result_path)
-
-            self.assertEqual("AI 未完成", rejected["status"])
-            payload["standard_basis"] = (
-                "《企业会计准则第31号——现金流量表》第十三条："
-                "购建固定资产、无形资产和其他长期资产支付的现金（CFI-06）"
-            )
-            result_path.write_text(
-                json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8-sig"
-            )
-
-            accepted = import_dictionary_results(preflight.run_dir, result_path)
-
-            self.assertEqual("科目语义已导入", accepted["status"])
+            with self.assertRaisesRegex(ValueError, "不得返回项目、质量或分数"):
+                import_dictionary_results(preflight.run_dir, result_path)
 
     def test_dictionary_import_rejects_unknown_note_id(self) -> None:
         # 复核修复：结果行 note_id 不在已登记"采用"清单 → 无效并列入 missing
@@ -1866,10 +1850,9 @@ class PipelineTests(unittest.TestCase):
             result_path.write_text(
                 json.dumps({
                     "task_id": task["task_id"], "account": task["account"],
-                    "semantic": "测试语义", "item_id": "CFI-06",
-                    "confidence": "high", "basis": "依据公司特殊规则：NOTE-99",
-                    "classification_facts": ["object:设备", "purpose:购建长期资产"],
                     "note_id": "NOTE-99",
+                    "node_concepts": [],
+                    "relations": [],
                 }, ensure_ascii=False) + "\n",
                 encoding="utf-8-sig",
             )
@@ -1879,8 +1862,8 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("AI 未完成", result["status"])
             self.assertIn(task["task_id"], result["missing_ids"])
 
-    def test_scan_accounts_forces_task_for_adopted_note_segment(self) -> None:
-        # 通用词典先正常生效；用户确认的公司特殊规则命中后，再强制生成专属确认任务。
+    def test_company_note_does_not_authorize_agent_to_choose_a_path_item(self) -> None:
+        # 公司说明不改变受限Agent边界，也不把已经完整解释的路径重新交给Agent选项目。
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = _write_ledger_case(root, account_name="其他应付款_设备款")
@@ -1896,27 +1879,15 @@ class PipelineTests(unittest.TestCase):
             )
             second = scan_accounts(preflight.run_dir)
 
-            self.assertEqual("待科目语义确认", second["status"])
+            self.assertEqual("科目语义已齐备", second["status"])
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
-            accounts = [task["account"] for task in state["account_dictionary"]["tasks"]]
-            self.assertIn("其他应付款_设备款", accounts)
-            self.assertTrue(
-                all("通用业务语义" in task["instruction"] for task in state["account_dictionary"]["tasks"])
-            )
-            # 设计 3.1.3：任务上下文必须注明对应 NOTE 编号，答题方才能在结果里留痕
-            task_notes = [
-                note
-                for task in state["account_dictionary"]["tasks"]
-                for note in task.get("company_notes", ())
-            ]
-            self.assertTrue(any("NOTE-01" in note for note in task_notes))
-            # 生成了待确认任务后，主流程必须重新等待词典导入，不得沿用"已齐备"标志
-            self.assertFalse(state.get("account_dictionary_completed", False))
+            self.assertEqual([], state["account_dictionary"]["tasks"])
+            self.assertTrue(state.get("account_dictionary_completed", False))
 
-    def test_dictionary_note_id_flows_into_classification_reason(self) -> None:
-        # 复核修复：导入条目带 NOTE 编号，分类命中后理由须留痕"依据公司特殊规则：NOTE-01"
+    def test_company_note_context_cannot_bypass_restricted_agent_contract(self) -> None:
+        # NOTE可作为节点关系判断的上下文，但Agent仍不得返回项目、分数或置信度。
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = _write_ledger_case(root)
@@ -1931,6 +1902,7 @@ class PipelineTests(unittest.TestCase):
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
             task = state["account_dictionary"]["tasks"][0]
+            self.assertTrue(any("NOTE-01" in note for note in task.get("company_notes", ())))
             result_path = root / "词典结果.jsonl"
             result_path.write_text(
                 json.dumps({
@@ -1946,60 +1918,25 @@ class PipelineTests(unittest.TestCase):
                 }, ensure_ascii=False) + "\n",
                 encoding="utf-8-sig",
             )
-            imported = import_dictionary_results(preflight.run_dir, result_path)
-            self.assertEqual("科目语义已导入", imported["status"])
+            with self.assertRaisesRegex(ValueError, "不得返回项目、质量或分数"):
+                import_dictionary_results(preflight.run_dir, result_path)
 
-            mark_dictionary_complete(preflight.run_dir)
-            run_classification(preflight.run_dir)
-
-            state = json.loads(
-                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
-            )
-            reasons = json.dumps(state["decisions"], ensure_ascii=False)
-            self.assertIn("依据公司特殊规则：NOTE-01", reasons)
-
-    def test_dictionary_import_keeps_direction_specific_items(self) -> None:
-        """同一完整路径的流入、流出项目必须从导入结果完整进入运行状态。"""
+    def test_fixed_path_rules_keep_direction_specific_items(self) -> None:
+        """同一完整路径的流入、流出项目必须由固定程序写入运行状态。"""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = _write_ledger_case(root, "其他应收款_日常往来")
             preflight = run_preflight([source], ("100000", "50000", "5000"), root)
             confirm_cash_scope(preflight.run_dir, dict(preflight.recommended_cash_decisions))
-            scan_accounts(preflight.run_dir)
-            state = json.loads(
-                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
-            )
-            task = state["account_dictionary"]["tasks"][0]
-            result_path = root / "词典结果.jsonl"
-            result_path.write_text(
-                json.dumps({
-                    "task_id": task["task_id"],
-                    "account": task["account"],
-                    "semantic": "日常经营往来款",
-                    "item_id": "",
-                    "inflow_item_id": "CFO-03",
-                    "outflow_item_id": "CFO-07",
-                    "confidence": "medium",
-                    "basis": f"完整科目路径“{task['account']}”显示为日常经营往来",
-                    "standard_basis": (
-                        "《企业会计准则第31号——现金流量表》第十条："
-                        "收到其他与经营活动有关的现金（CFO-03）；"
-                        "支付其他与经营活动有关的现金（CFO-07）"
-                    ),
-                    "classification_facts": ["object:经营往来"],
-                }, ensure_ascii=False) + "\n",
-                encoding="utf-8-sig",
-            )
-
-            imported = import_dictionary_results(preflight.run_dir, result_path)
-
-            self.assertEqual("科目语义已导入", imported["status"])
+            scan = scan_accounts(preflight.run_dir)
+            self.assertEqual("科目语义已齐备", scan["status"])
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
             entry = state["account_dictionary"]["valid_results"][0]
-            self.assertEqual("CFO-03", entry["inflow_item_id"])
-            self.assertEqual("CFO-07", entry["outflow_item_id"])
+            self.assertEqual(["CFO-03"], entry["inflow_candidate_item_ids"])
+            self.assertEqual(["CFO-07"], entry["outflow_candidate_item_ids"])
+            self.assertNotIn("confidence", entry)
 
     def test_scan_accounts_does_not_treat_generic_fallback_as_full_path_judgment(self) -> None:
         """通用词典的泛化科目段不能替代完整路径语义确认。"""
@@ -2011,14 +1948,14 @@ class PipelineTests(unittest.TestCase):
 
             scan = scan_accounts(preflight.run_dir)
 
-            self.assertEqual("待科目语义确认", scan["status"])
+            self.assertEqual("科目语义已齐备", scan["status"])
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
-            self.assertIn(
-                "应交税费_应交增值税_进项税",
-                {task["account"] for task in state["account_dictionary"]["tasks"]},
-            )
+            self.assertEqual([], state["account_dictionary"]["tasks"])
+            result = state["account_dictionary"]["valid_results"][0]
+            self.assertEqual("部分解释", result["status"])
+            self.assertEqual([], result["candidate_item_ids"])
 
     def test_scan_accounts_ignores_a_separate_non_cash_voucher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

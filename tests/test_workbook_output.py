@@ -592,13 +592,19 @@ class WorkbookOutputTests(unittest.TestCase):
                 workbook.close()
 
     def test_review_reclassification_and_duplicate_exclusion_adjust_once(self) -> None:
-        model = workbook_model(review_batches=1, duplicate_groups=1)
+        base = workbook_model(review_batches=1, duplicate_groups=1)
+        model = replace(
+            base,
+            review_batches=(
+                replace(base.review_batches[0], baseline_item_code="CFO-07"),
+            ),
+        )
         adjustments = calculate_manual_adjustments(
             model,
             review_decisions={"REV-1": "CFI-09"},
             duplicate_decisions={"DUP-1": "exclude"},
         )
-        self.assertNotIn("CFO-07", adjustments)
+        self.assertEqual(-10_000, adjustments["CFO-07"])
         self.assertEqual(10_000, adjustments["CFI-09"])
         self.assertEqual(-20_000, adjustments["CFO-03"])
         formula = manual_adjustment_formula("支付其他与经营活动有关的现金", 2, 2)
@@ -613,7 +619,7 @@ class WorkbookOutputTests(unittest.TestCase):
             review_decisions={"REV-1": USE_SYSTEM_RECOMMENDATION},
             duplicate_decisions={},
         )
-        self.assertEqual(10_000, recommended["CFO-07"])
+        self.assertNotIn("CFO-07", recommended)
 
     def test_pending_duplicate_group_links_to_the_eventual_manual_item(self) -> None:
         base = workbook_model(review_batches=1, duplicate_groups=1)
@@ -709,6 +715,7 @@ class WorkbookOutputTests(unittest.TestCase):
             baseline_statement_amount_cent=100_000,
             cash_delta_cent=-100_000,
             mandatory=True,
+            baseline_item_code="CFO-06",
         )
         model = replace(
             workbook_model(0, 0),
@@ -777,7 +784,9 @@ class WorkbookOutputTests(unittest.TestCase):
                     f"${helper_letter}$1:${helper_letter}${len(expected_options)}",
                     validation,
                 )
-                self.assertEqual("=0", review.cell(2, adjustment_column).value)
+                adjustment_formula = review.cell(2, adjustment_column).value
+                self.assertIn(USE_SYSTEM_RECOMMENDATION, adjustment_formula)
+                self.assertIn(get_column_letter(headers.index("原基线项目(技术)") + 1), adjustment_formula)
                 self.assertIn(f"{manual_letter}2", status_formula)
                 # 设计第五节：强制批次行必须有区域下拉——自检正路通过、被篡改为内联列表则报错
                 ok = validate_output_workbook(path, model)
@@ -906,7 +915,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertIn("现金流量表正表", cash_sheet.cell(net_row, 3).value)
                 self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))
                 self.assertIn("ROUND", cash_sheet.cell(difference_row, 3).value)
-                self.assertIn("ROUND", workbook["正表核对报告"]["F2"].value)
+                self.assertIn("ROUND", workbook["正表核对报告"]["G2"].value)
                 self.assertIn("现金范围与现金流量表与货币资金变动的勾稽核对", workbook["使用说明与状态"]["B3"].value)
                 self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
             finally:
@@ -1064,9 +1073,23 @@ class WorkbookOutputTests(unittest.TestCase):
             workbook = load_workbook(path, data_only=False)
             try:
                 sheet = workbook["正表核对报告"]
-                self.assertEqual("项目", sheet["A1"].value)
+                self.assertEqual(
+                    (
+                        "项目",
+                        "客户金额",
+                        "系统自动调整",
+                        "自动基线",
+                        "人工调整",
+                        "最终金额",
+                        "最终差异",
+                        "明细重建金额",
+                        "原表与明细勾稽差额",
+                        "支持组成",
+                    ),
+                    tuple(cell.value for cell in sheet[1]),
+                )
                 self.assertEqual(model.rules.statement_items[0].name, sheet["A2"].value)
-                self.assertTrue(sheet.column_dimensions["G"].hidden)
+                self.assertTrue(sheet.column_dimensions["J"].hidden)
             finally:
                 workbook.close()
 

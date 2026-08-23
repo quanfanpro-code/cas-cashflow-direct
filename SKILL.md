@@ -67,13 +67,13 @@ description: Use when 需要编制、校验或复核一般企业直接法现金�
 
 路径原文本身可以作为路径来源依据，理由应明确引用完整路径；外部准则、知识库或NOTE只在实际使用时引用，不能用空泛准则文字替代本行事实。
 
-结果示例：
+受限结果示例：
 
 ```json
-{"task_id":"ACC_…","account":"管理费用_差旅费","semantic":"日常经营管理差旅支出","item_id":"CFO-07","confidence":"high","basis":"完整路径‘管理费用_差旅费’显示为日常经营管理支出"}
+{"task_id":"ACC_…","account":"管理费用_差旅费","node_concepts":[{"level_index":1,"node_text":"差旅费","source_text":"差旅费","concept":"日常经营费用"}],"relations":[{"parent_level_index":0,"child_level_index":1,"relation":"费用性质"}]}
 ```
 
-`item_id` 只有在完整路径确实不能缩小到单一候选时才可为空；必须写清仍存在哪些合理解释，不能用“无公司特殊规则”代替判断。
+科目路径Agent不得返回`item_id`、候选、质量、分数、置信度、重要性或动作。节点概念必须回指原节点中的准确文字，父子关系只能使用任务允许的受控类型；导入后由固定程序重新形成候选和0、10、25、45分。没有可靠补充时提交空`node_concepts`和空`relations`，保留部分解释或未识别，不得用“无公司特殊规则”代替判断。
 
 ## 摘要语义阶段
 

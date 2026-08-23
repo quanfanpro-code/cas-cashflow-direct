@@ -164,24 +164,25 @@ class AggregateEvidenceTests(unittest.TestCase):
 
 
 class DictionaryScoreTests(unittest.TestCase):
-    def _dictionary(self, layer: str, confidence: str) -> AccountDictionary:
+    def _dictionary(self, layer: str, quality_score: int) -> AccountDictionary:
         return AccountDictionary(
             (
                 AccountSemanticEntry(
-                    account="工资",
+                    account="应付职工薪酬_工资",
                     semantic="职工薪酬",
                     item_id="CFO-05",
                     basis="应用指南第三十二章'支付给职工以及为职工支付的现金'",
-                    confidence=confidence,
+                    confidence="",
                     layer=layer,
                     note_id="NOTE-01" if layer == "custom" else "",
+                    quality_score=quality_score,
                 ),
             )
         )
 
     def test_custom_high_scores_45_and_carries_note_id(self) -> None:
         scores = score_dictionary_hits(
-            make_component(summary="转账"), self._dictionary("custom", "high")
+            make_component(summary="转账"), self._dictionary("custom", 45)
         )
         self.assertEqual(1, len(scores))
         self.assertEqual(45, scores[0].account_part)
@@ -189,13 +190,13 @@ class DictionaryScoreTests(unittest.TestCase):
 
     def test_custom_medium_scores_25(self) -> None:
         scores = score_dictionary_hits(
-            make_component(summary="转账"), self._dictionary("custom", "medium")
+            make_component(summary="转账"), self._dictionary("custom", 25)
         )
         self.assertEqual(25, scores[0].account_part)
 
     def test_common_high_scores_45(self) -> None:
         scores = score_dictionary_hits(
-            make_component(summary="转账"), self._dictionary("common", "high")
+            make_component(summary="转账"), self._dictionary("common", 45)
         )
         self.assertEqual(45, scores[0].account_part)
         self.assertEqual("", scores[0].note_id)

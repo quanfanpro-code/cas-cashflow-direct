@@ -330,6 +330,7 @@ def test_unrelated_non_vat_accounts_cannot_inherit_one_anothers_candidate() -> N
             "high",
             "runtime",
             classification_facts=("object:employee_welfare",),
+            quality_score=45,
         ),
         AccountSemanticEntry(
             "其他应付款_其他外部往来款",
@@ -339,6 +340,7 @@ def test_unrelated_non_vat_accounts_cannot_inherit_one_anothers_candidate() -> N
             "high",
             "runtime",
             classification_facts=("object:other_payable",),
+            quality_score=45,
         ),
     ))
 
@@ -350,7 +352,8 @@ def test_unrelated_non_vat_accounts_cannot_inherit_one_anothers_candidate() -> N
     )
 
     assert decision.business_conflict is True
-    assert "多个非增值税业务" in decision.reason
+    assert decision.matched_rule_id == "AMBIGUOUS-SOURCE-CANDIDATES"
+    assert set(decision.candidate_item_ids) == {"CFO-05", "CFO-07"}
 
 
 def test_formal_semantics_suppress_legacy_keywords_without_custom_path_entries() -> None:
@@ -638,9 +641,11 @@ def test_summary_and_path_conflict_have_no_usable_score() -> None:
 
     decision = classify_component(component, load_rule_pack(ROOT))
 
-    assert decision.source_conflict is True
-    assert decision.evidence_score is None
-    assert set(decision.candidate_item_ids) == {"CFO-05", "CFI-06"}
+    assert decision.source_conflict is False
+    assert decision.business_conflict is True
+    assert decision.system_item_id == "CFO-05"
+    assert decision.evidence_score == 35
+    assert decision.account_path_candidate_item_ids == ("CFO-05", "CFI-06")
     assert decision.resolved is False
 
 

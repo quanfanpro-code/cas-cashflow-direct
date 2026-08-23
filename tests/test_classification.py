@@ -189,7 +189,8 @@ class ClassificationTests(unittest.TestCase):
 
         self.assertEqual("", decision.system_item_id)
         self.assertEqual("AMBIGUOUS-SOURCE-CANDIDATES", decision.matched_rule_id)
-        self.assertEqual(10, decision.evidence_score)
+        # 摘要和完整路径各自都只能形成同一组弱候选，分别保留10分。
+        self.assertEqual(20, decision.evidence_score)
         self.assertEqual(("CFI-06", "CFI-07"), decision.candidate_item_ids)
         self.assertFalse(decision.resolved)
 
@@ -399,15 +400,15 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(0, decision.evidence_score)
 
     def test_pay_huokuan_summary_is_medium_purchase_evidence(self) -> None:
-        # 摘要强45分与完整路径中25分相互印证，合计70分。
+        # “支付+货款”只有动作和通用对象，缺少用途或交易属性，摘要最高25分。
         decision = classify_component(
             cashflow_component("支付货款", -100, ("应付账款_财务",)),
             load_rule_pack(ROOT),
         )
 
         self.assertEqual("CFO-04", decision.system_item_id)
-        self.assertEqual("medium", decision.evidence_level)
-        self.assertEqual(45, decision.evidence_score)
+        self.assertEqual("low", decision.evidence_level)
+        self.assertEqual(25, decision.evidence_score)
 
     def test_input_vat_does_not_turn_a_purchase_payment_into_tax_payment(self) -> None:
         decision = classify_component(
@@ -469,48 +470,41 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(50, refund.evidence_score)
         self.assertEqual("medium", refund.evidence_level)
 
-    def test_withheld_individual_income_tax_belongs_to_staff_payments(self) -> None:
-        # 应用指南三(一)5：代扣代缴的个人所得税款应在"支付给职工以及为职工支付的现金"
-        # 反映，不属于"支付的各项税费"
+    def test_withheld_individual_income_tax_needs_employee_service_object(self) -> None:
+        # “代扣个税”本身没有说明服务对象，不能先验假定为本企业职工薪酬。
         decision = classify_component(
             cashflow_component("代扣个人所得税", -100, ("应交税费_应交个人所得税",)),
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertEqual(25, decision.evidence_score)
-        self.assertEqual("low", decision.evidence_level)
+        self.assertNotIn("CFO-05", decision.candidate_item_ids)
+        self.assertEqual("", decision.system_item_id)
 
-    def test_plain_individual_income_tax_payment_also_goes_to_staff_payments(self) -> None:
-        # 复核修复：缴纳个人所得税同样随职工薪酬归 CFO-05（企业缴个税本质是代扣款的缴纳动作），
-        # 个税对方科目已被 CFO-06-TAX/SOLE 的排除词拦截，不再落入"支付的各项税费"
+    def test_plain_individual_income_tax_payment_does_not_invent_staff_service(self) -> None:
         decision = classify_component(
             cashflow_component("缴纳个人所得税", -100, ("应交税费_应交个人所得税",)),
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertNotIn("CFO-05", decision.candidate_item_ids)
+        self.assertEqual("", decision.system_item_id)
 
-    def test_short_individual_tax_word_and_common_detail_path_go_to_staff_payments(self) -> None:
+    def test_short_individual_tax_word_does_not_invent_staff_service(self) -> None:
         decision = classify_component(
             cashflow_component("支付个税", -100, ("应交税费_个人所得税",)),
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
-        self.assertFalse(decision.source_conflict)
+        self.assertNotIn("CFO-05", decision.candidate_item_ids)
+        self.assertEqual("", decision.system_item_id)
 
-    def test_dividend_individual_tax_is_staff_payment_not_dividend_distribution(self) -> None:
+    def test_dividend_individual_tax_is_not_staff_payment_without_service_object(self) -> None:
         decision = classify_component(
             cashflow_component("支付分红个税", -100, ("应交税费_个人所得税",)),
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-05", decision.system_item_id)
-        self.assertTrue(decision.matched_rule_id.startswith("SUMMARY-SEMANTICS-"))
+        self.assertNotIn("CFO-05", decision.candidate_item_ids)
 
     def test_enterprise_income_tax_still_uses_tax_payment_rule(self) -> None:
         # 回归保护：企业所得税仍命中 CFO-06 税费摘要词
@@ -543,8 +537,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-01", decision.system_item_id)
-        self.assertEqual(45, decision.evidence_score)
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(25, decision.evidence_score)
+        self.assertEqual("low", decision.evidence_level)
 
     def test_wealth_management_redemption_principal_is_investment_recovery(self) -> None:
         # 应用指南三(二)1：理财/结构性存款赎回本金入"收回投资收到的现金"，
@@ -555,8 +549,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFI-01", decision.system_item_id)
-        self.assertEqual(45, decision.evidence_score)
-        self.assertEqual("medium", decision.evidence_level)
+        self.assertEqual(90, decision.evidence_score)
+        self.assertEqual("high", decision.evidence_level)
 
     def test_structured_deposit_interest_stays_investment_income(self) -> None:
         # 回归保护：结构性存款利息仍归 CFI-02，赎回排除词不能误伤收益场景
@@ -588,8 +582,8 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFF-06", decision.system_item_id)
-        # 重构后口径：单摘要词45分=中（项目归属未变）
-        self.assertEqual("medium", decision.evidence_level)
+        # 动作加业务对象本身不重复充当决定性属性。
+        self.assertEqual("low", decision.evidence_level)
 
     def test_installment_payment_for_asset_is_other_financing_outflow(self) -> None:
         # 应用指南：分期付款方式购建固定资产各期支付的现金计入筹资活动
@@ -621,7 +615,7 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual("CFI-06", decision.system_item_id)
         self.assertEqual(("CFI-06",), decision.candidate_item_ids)
         self.assertFalse(decision.source_conflict)
-        self.assertEqual(45, decision.evidence_score)
+        self.assertEqual(25, decision.evidence_score)
 
     def test_vehicle_purchase_tax_follows_asset_acquisition(self) -> None:
         # 车辆购置税为购置车辆的直接相关税费，随资产购建归 CFI-06
@@ -654,7 +648,7 @@ class ClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("CFO-02", decision.system_item_id)
-        # 重构后口径：单摘要词50分=中
+        self.assertEqual(25, decision.evidence_score)
         self.assertEqual("low", decision.evidence_level)
 
 
@@ -725,16 +719,15 @@ def test_explicit_vat_payment_is_tax_payment():
     assert decision.summary_quality == 25
 
 
-def test_staff_tax_for_construction_is_a_two_source_conflict():
-    """摘要指向职工、完整路径指向资本化时，不形成可用总分。"""
+def test_individual_tax_without_service_object_does_not_conflict_with_construction_path():
+    """个税服务对象不明时，不虚构职工候选与资本化路径制造冲突。"""
     decision = classify_component(
         cashflow_component("代扣个税", -50000, ("在建工程_资本化",)),
         load_rule_pack(ROOT),
     )
-    assert set(decision.candidate_item_ids) == {"CFO-05", "CFI-06"}
-    assert decision.source_conflict is True
-    assert decision.evidence_score is None
-    assert decision.resolved is False
+    assert set(decision.candidate_item_ids) == {"CFI-06"}
+    assert decision.source_conflict is False
+    assert decision.account_path_quality == 25
 
 
 def test_construction_wages_are_a_two_source_conflict():
@@ -764,7 +757,7 @@ def test_unknown_transfer_does_not_use_a_direction_fallback():
 def test_dictionary_hit_reason_includes_note_id():
     """复核修复：经确认的公司特殊规则命中时，理由必须留 NOTE 编号痕迹。"""
     dictionary = AccountDictionary((
-        AccountSemanticEntry("回购义务", "筹资", "CFF-06", "依据", "high", "custom", "NOTE-01"),
+        AccountSemanticEntry("其他应付款_回购义务", "筹资", "CFF-06", "依据", "high", "custom", "NOTE-01"),
     ))
     decision = classify_component(
         cashflow_component("支付款项", -100, ("其他应付款_回购义务",)),
