@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from cashflow_direct.classification import load_rule_pack
 from cashflow_direct.pipeline import (
@@ -387,7 +388,10 @@ def test_real_files_complete_the_generic_pipeline() -> None:
     try:
         review = workbook["重要待复核事项"]
         review_headers = [cell.value for cell in review[1]]
-        assert review.max_row > 1
+        review_data_end_row = len(state["review_batches"]) + 1
+        review_data_rows = range(2, review_data_end_row + 1)
+        assert review_data_end_row > 1
+        assert review.max_row >= review_data_end_row
         for header in (
             "日期",
             "本行摘要",
@@ -408,24 +412,38 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         included_count_column = review_headers.index("包含笔数(技术)") + 1
         assert sum(
             int(review.cell(row, included_count_column).value or 0)
-            for row in range(2, review.max_row + 1)
+            for row in review_data_rows
         ) == len(unresolved)
+        debit_column = review_headers.index("借方") + 1
+        credit_column = review_headers.index("贷方") + 1
         amount_column = review_headers.index("单笔金额") + 1
         allocated_column = review_headers.index("本行分配现金变化") + 1
         option_column = review_headers.index("人工可选标准项目") + 1
         assert all(
             review.cell(row, amount_column).data_type == "n"
-            and review.cell(row, amount_column).number_format
-            == review.cell(row, allocated_column).number_format
-            for row in range(2, review.max_row + 1)
+            and {
+                review.cell(row, column).number_format
+                for column in (debit_column, credit_column, allocated_column)
+                if review.cell(row, column).data_type == "n"
+            }
+            == {review.cell(row, amount_column).number_format}
+            for row in review_data_rows
         )
         assert all(
             USE_SYSTEM_RECOMMENDATION
             not in str(review.cell(row, option_column).value or "")
-            for row in range(2, review.max_row + 1)
+            for row in review_data_rows
         )
-        for validation in review.data_validations.dataValidation:
-            helper_range = str(validation.formula1).split("!")[-1].replace("'", "")
+        validations = review.data_validations.dataValidation
+        choice_column = get_column_letter(review_headers.index("人工确认项目") + 1)
+        for row in review_data_rows:
+            matching = [
+                validation
+                for validation in validations
+                if f"{choice_column}{row}" in validation.sqref
+            ]
+            assert len(matching) == 1
+            helper_range = str(matching[0].formula1).split("!")[-1].replace("'", "")
             first_cell = helper_range.split(":", 1)[0].replace("$", "")
             assert review[first_cell].value == USE_SYSTEM_RECOMMENDATION
 
