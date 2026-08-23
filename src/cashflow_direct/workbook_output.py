@@ -469,11 +469,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     if item_id
                 )
                 selectable_names = tuple(item_name_by_id[item_id] for item_id in selectable_ids)
-                recommendation_option = (
-                    (USE_SYSTEM_RECOMMENDATION,)
-                    if batch.proposed_item_code
-                    else ()
-                )
+                recommendation_option = (USE_SYSTEM_RECOMMENDATION,)
                 options = (*recommendation_option, *selectable_names, "明确排除")
                 if options in helper_ranges:
                     continue
@@ -496,11 +492,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     if item_id
                 )
                 selectable_names = tuple(item_name_by_id[item_id] for item_id in selectable_ids)
-                recommendation_option = (
-                    (USE_SYSTEM_RECOMMENDATION,)
-                    if batch.proposed_item_code
-                    else ()
-                )
+                recommendation_option = (USE_SYSTEM_RECOMMENDATION,)
                 list_range, choice_range = helper_ranges[
                     (*recommendation_option, *selectable_names, "明确排除")
                 ]
@@ -534,7 +526,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "两个来源是否独立": review_fact(batch, "两个来源是否独立"),
                     "证据质量说明": review_fact(batch, "证据质量说明"),
                     "证据得分": review_fact(batch, "证据得分"),
-                    "单笔金额": review_fact(batch, "单笔金额"),
+                    "单笔金额": abs(batch.cash_delta_cent) / 100,
                     "同类累计金额": review_fact(batch, "同类累计金额"),
                     "有效重要性层级": review_fact(batch, "有效重要性层级"),
                     "单笔重要性层级": review_fact(batch, "单笔重要性层级"),
@@ -553,7 +545,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "同类分组": batch.counterpart_group or "无单独分组",
                     "同类批次原因": batch.reason,
                     "人工可选标准项目": "、".join(
-                        (*recommendation_option, *selectable_names, "明确排除")
+                        (*selectable_names, "明确排除")
                     ),
                 }
                 for header, value in facts.items():
@@ -659,7 +651,10 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 review.write_formula(
                     row_index,
                     REVIEW_HEADERS.index("人工处理状态"),
-                    f'=IF({manual_col}{excel_row}="","等待人工处理","人工处理完成")',
+                    f'=IF({manual_col}{excel_row}="","等待人工处理",'
+                    f'IF(AND({manual_col}{excel_row}="{USE_SYSTEM_RECOMMENDATION}",'
+                    f'{system_col}{excel_row}="尚未形成系统候选"),'
+                    '"系统没有首选项目，请改选","人工处理完成"))',
                     formats["pending"],
                     "等待人工处理",
                 )
@@ -743,12 +738,33 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         if model.duplicate_groups:
             for row_index, group in enumerate(model.duplicate_groups, 1):
                 duplicate.write(row_index, 0, group.group_id, formats["text"])
-                duplicate.write(
-                    row_index,
-                    1,
-                    item_name_by_id[group.item_id],
-                    formats["text"],
-                )
+                if group.item_id:
+                    duplicate.write(
+                        row_index,
+                        1,
+                        item_name_by_id[group.item_id],
+                        formats["text"],
+                    )
+                else:
+                    manual_column = xl_col_to_name(
+                        REVIEW_HEADERS.index("人工确认项目") + 1
+                    )
+                    component_column = xl_col_to_name(
+                        REVIEW_HEADERS.index("业务组成编号(技术)") + 1
+                    )
+                    duplicate.write_formula(
+                        row_index,
+                        1,
+                        "=IFERROR(INDEX('重要待复核事项'!"
+                        f"${manual_column}$2:${manual_column}${max(2, len(model.review_batches) + 1)},"
+                        "MATCH(\"*"
+                        f"{group.component_ids[0]}"
+                        "*\",'重要待复核事项'!"
+                        f"${component_column}$2:${component_column}${max(2, len(model.review_batches) + 1)},0)),"
+                        '"待人工决定")',
+                        formats["text"],
+                        "待人工决定",
+                    )
                 duplicate.write_blank(row_index, 2, None, formats["input"])
                 duplicate.write_number(row_index, 3, group.worst_case_impact_cent / 100, formats["money"])
                 duplicate.write_number(

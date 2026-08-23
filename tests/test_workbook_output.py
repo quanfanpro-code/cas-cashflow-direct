@@ -144,7 +144,10 @@ class WorkbookOutputTests(unittest.TestCase):
                 ).value
                 self.assertIn("人工确认项目", review_headers)
                 for optional in ("人工依据", "处理人", "处理时间", "明确排除原因"):
-                    self.assertNotIn(get_column_letter(review_headers.index(optional) + 1), status_formula)
+                    self.assertNotIn(
+                        f"{get_column_letter(review_headers.index(optional) + 1)}2",
+                        status_formula,
+                    )
                 self.assertEqual("2026-01-01", workbook["原表与系统决定差异"]["A2"].value)
                 trace = workbook["全量分类留痕"]
                 trace_headers = [cell.value for cell in trace[1]]
@@ -655,6 +658,37 @@ class WorkbookOutputTests(unittest.TestCase):
         )
         self.assertEqual(10_000, recommended["CFO-07"])
 
+    def test_pending_duplicate_group_links_to_the_eventual_manual_item(self) -> None:
+        base = workbook_model(review_batches=1, duplicate_groups=1)
+        pending_group = replace(
+            base.duplicate_groups[0],
+            item_id="",
+            blocks_manual_completion=True,
+        )
+        pending_review = replace(
+            base.review_batches[0],
+            component_ids=pending_group.component_ids,
+            proposed_item_code="",
+            alternative_item_codes=("CFO-03", "CFI-09"),
+        )
+        model = replace(
+            base,
+            review_batches=(pending_review,),
+            duplicate_groups=(pending_group,),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "待决定项目的疑似重复事项.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                duplicate_item = workbook["疑似重复事项"]["B2"].value
+                self.assertIsInstance(duplicate_item, str)
+                self.assertTrue(duplicate_item.startswith("="))
+                self.assertIn("重要待复核事项", duplicate_item)
+            finally:
+                workbook.close()
+
     def test_invalid_pasted_review_text_is_neutral_and_status_only_reads_decision_cell(self) -> None:
         model = workbook_model(review_batches=1, duplicate_groups=0)
         self.assertEqual(
@@ -719,7 +753,18 @@ class WorkbookOutputTests(unittest.TestCase):
             cash_delta_cent=-100_000,
             mandatory=True,
         )
-        model = replace(workbook_model(0, 0), review_batches=(batch,))
+        model = replace(
+            workbook_model(0, 0),
+            review_batches=(batch,),
+            trace_rows=(
+                {
+                    "业务组成编号(技术)": "C-BIG",
+                    "贷方": 1_000.0,
+                    "本行分配现金变化": -1_000.0,
+                    "单笔金额": "1000.0",
+                },
+            ),
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "强制复核.xlsx"
             build_output_workbook(model, path)
@@ -728,6 +773,10 @@ class WorkbookOutputTests(unittest.TestCase):
                 review = workbook["重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 manual_column = headers.index("人工确认项目") + 1
+                option_column = headers.index("人工可选标准项目") + 1
+                amount_column = headers.index("单笔金额") + 1
+                credit_column = headers.index("贷方") + 1
+                allocated_column = headers.index("本行分配现金变化") + 1
                 status_column = headers.index("人工处理状态") + 1
                 adjustment_column = headers.index("系统项目调整(技术)") + 1
                 helper_column = len(REVIEW_HEADERS) + 2
@@ -748,6 +797,19 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertEqual(
                     expected_options,
                     written,
+                )
+                visible_options = review.cell(2, option_column).value
+                self.assertNotIn(USE_SYSTEM_RECOMMENDATION, visible_options)
+                self.assertIn("支付的各项税费", visible_options)
+                self.assertEqual(1_000.0, review.cell(2, amount_column).value)
+                self.assertEqual("n", review.cell(2, amount_column).data_type)
+                self.assertEqual(
+                    review.cell(2, credit_column).number_format,
+                    review.cell(2, amount_column).number_format,
+                )
+                self.assertEqual(
+                    review.cell(2, allocated_column).number_format,
+                    review.cell(2, amount_column).number_format,
                 )
                 self.assertTrue(_column_is_hidden(review, helper_column))
                 validation = review.data_validations.dataValidation[0].formula1
@@ -770,6 +832,35 @@ class WorkbookOutputTests(unittest.TestCase):
             check = validate_output_workbook(path, model)
             self.assertFalse(check.valid)
             self.assertTrue(any("区域" in error for error in check.errors))
+
+    def test_manual_batch_without_system_choice_keeps_control_option_but_blocks_completion(self) -> None:
+        base = workbook_model(1, 0)
+        pending = replace(
+            base.review_batches[0],
+            proposed_item_code="",
+            alternative_item_codes=("CFO-03", "CFI-09"),
+        )
+        model = replace(base, review_batches=(pending,))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "无系统候选下拉.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                review = workbook["重要待复核事项"]
+                headers = [cell.value for cell in review[1]]
+                option_column = headers.index("人工可选标准项目") + 1
+                status_column = headers.index("人工处理状态") + 1
+                validation = review.data_validations.dataValidation[0]
+                helper_range = str(validation.formula1).split("!")[-1].replace("'", "")
+                first_cell = helper_range.split(":", 1)[0].replace("$", "")
+                self.assertEqual(USE_SYSTEM_RECOMMENDATION, review[first_cell].value)
+                self.assertNotIn(
+                    USE_SYSTEM_RECOMMENDATION,
+                    str(review.cell(2, option_column).value),
+                )
+                self.assertIn("系统没有首选项目，请改选", review.cell(2, status_column).value)
+            finally:
+                workbook.close()
 
     def test_zero_review_batches_show_clear_note_and_statement_still_builds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

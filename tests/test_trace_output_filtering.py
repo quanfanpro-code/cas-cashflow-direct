@@ -103,7 +103,7 @@ def _materiality(component_id: str) -> tuple[dict[str, object], ...]:
             "record_id": component_id,
             "single_amount_cent": 10_000,
             "same_class_total_cent": 10_000,
-            "effective_level": "M1",
+            "single_level": "M1",
         },
     )
 

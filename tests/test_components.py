@@ -141,6 +141,65 @@ class ComponentTests(unittest.TestCase):
             sum(item.allocated_cent for item in result.source_allocations),
         )
 
+    def test_two_cash_rows_in_one_voucher_keep_separate_component_identity(self) -> None:
+        entries = (
+            _component_entry(
+                200,
+                "V-TWO-CASH-ROWS",
+                "1002 银行存款_基本户",
+                credit_cent=6_000,
+                retained_side="cash",
+                summary="支付材料款",
+            ),
+            _component_entry(
+                201,
+                "V-TWO-CASH-ROWS",
+                "1002 银行存款_一般户",
+                credit_cent=4_000,
+                retained_side="cash",
+                summary="支付设备款",
+            ),
+            _component_entry(
+                202,
+                "V-TWO-CASH-ROWS",
+                "原材料_甲材料",
+                debit_cent=6_000,
+                retained_side="counterpart",
+                summary="支付材料款",
+            ),
+            _component_entry(
+                203,
+                "V-TWO-CASH-ROWS",
+                "固定资产_生产设备",
+                debit_cent=4_000,
+                retained_side="counterpart",
+                summary="支付设备款",
+            ),
+        )
+        scope = confirm_cash_scope(discover_cash_scope(entries), {"1002": "include"})
+
+        result = build_cashflow_components(entries, scope)
+
+        self.assertEqual(2, len(result.components))
+        self.assertEqual(
+            {
+                (-6_000, "支付材料款", ("原材料_甲材料",)),
+                (-4_000, "支付设备款", ("固定资产_生产设备",)),
+            },
+            {
+                (item.cash_delta_cent, item.summary, item.counterpart_accounts)
+                for item in result.components
+            },
+        )
+        cash_entry_ids = {"E200", "E201"}
+        self.assertEqual(
+            [1, 1],
+            sorted(
+                len(cash_entry_ids & set(item.source_keys))
+                for item in result.components
+            ),
+        )
+
     def test_single_labeled_business_does_not_absorb_unrelated_voucher_rows(self) -> None:
         entries = (
             _component_entry(
@@ -456,7 +515,7 @@ class ComponentTests(unittest.TestCase):
                 80,
                 "V-ILLEGAL",
                 "应付账款_甲",
-                credit_cent=10_000,
+                debit_cent=10_000,
                 item="购买商品、接受劳务支付的现金",
                 flow_amount_cent=10_000,
                 retained_side="counterpart",
@@ -624,24 +683,44 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(12_000, result.components[0].cash_delta_cent)
         self.assertEqual(("应收款项",), result.components[0].counterpart_accounts)
 
-    def test_standard_flow_item_is_accepted_as_cash_row_evidence(self) -> None:
+    def test_standard_flow_item_cannot_replace_a_confirmed_cash_leg(self) -> None:
         entries = component_entries("summary_only_counterpart_direction")
         scope = _confirmed_scope("summary_only_counterpart_direction")
         result = build_cashflow_components(entries, scope)
         self.assertFalse(result.components)
-        self.assertEqual(0, len(find_cash_row_cleanup_requests(entries, scope)))
+        self.assertEqual(1, len(find_cash_row_cleanup_requests(entries, scope)))
 
-    def test_flow_amount_has_priority_and_split_label_is_used_once(self) -> None:
+    def test_confirmed_cash_leg_has_priority_and_split_label_is_used_once(self) -> None:
         flow = build_cashflow_components(
             component_entries("flow_amount_differs"), _confirmed_scope("flow_amount_differs")
         )
         split = build_cashflow_components(
             component_entries("split_label_duplication"), _confirmed_scope("split_label_duplication")
         )
-        self.assertEqual(18_000, flow.components[0].cash_delta_cent)
+        self.assertEqual(20_000, flow.components[0].cash_delta_cent)
         self.assertEqual(1, len(split.components))
         self.assertEqual(25_000, split.components[0].cash_delta_cent)
         self.assertEqual(len(split.components[0].source_keys), len(set(split.components[0].source_keys)))
+
+    def test_mixed_cash_directions_do_not_double_allocate_a_conflicting_flow_label(self) -> None:
+        entries = (
+            _component_entry(201, "V-MIXED-CASH", "研发支出_差旅费", debit_cent=415_100, flow_amount_cent=20_500, item="收到其他与经营活动有关的现金", retained_side="counterpart", summary="支付报销款"),
+            _component_entry(202, "V-MIXED-CASH", "管理费用_差旅费", debit_cent=467_890, flow_amount_cent=2_031_600, item="支付其他与经营活动有关的现金", retained_side="counterpart", summary="支付报销款"),
+            _component_entry(203, "V-MIXED-CASH", "1002 银行存款", credit_cent=2_031_600, retained_side="cash", summary="支付报销款"),
+            _component_entry(204, "V-MIXED-CASH", "1002 银行存款", debit_cent=20_500, retained_side="cash", summary="收到退款"),
+        )
+        scope = confirm_cash_scope(discover_cash_scope(entries), {"1002": "include"})
+
+        result = build_cashflow_components(entries, scope)
+
+        self.assertEqual([-2_031_600, 20_500], sorted(item.cash_delta_cent for item in result.components))
+        allocated_by_component: dict[str, int] = defaultdict(int)
+        for allocation in result.source_allocations:
+            allocated_by_component[allocation.component_id] += allocation.allocated_cent
+        self.assertEqual(
+            {item.component_id: item.cash_delta_cent for item in result.components},
+            dict(allocated_by_component),
+        )
 
     def test_unbalanced_voucher_keeps_determinable_cash_and_marks_anomaly(self) -> None:
         result = build_cashflow_components(
@@ -650,24 +729,22 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(30_000, result.components[0].cash_delta_cent)
         self.assertIn("voucher_unbalanced", result.components[0].anomalies)
 
-    def test_counterpart_side_flow_detail_uses_item_direction(self) -> None:
-        # 清平式：对方科目侧 + 借贷列 + 流量金额 + 标准项目名 → 方向听项目名
+    def test_counterpart_side_direction_uses_account_side_not_original_item(self) -> None:
+        # 原项目故意与借贷事实相反，方向仍必须由实际账户侧确定。
         entries = (
-            _component_entry(1, "V1", "销售费用_业务招待费", debit_cent=600_00, item="支付其他与经营活动有关的现金", flow_amount_cent=600_00, retained_side="counterpart"),
-            _component_entry(2, "V2", "合同负债_业务", credit_cent=700000_00, item="销售商品、提供劳务收到的现金", flow_amount_cent=700000_00, retained_side="counterpart"),
+            _component_entry(1, "V1", "销售费用_业务招待费", debit_cent=600_00, item="销售商品、提供劳务收到的现金", flow_amount_cent=600_00, retained_side="counterpart"),
+            _component_entry(2, "V2", "合同负债_业务", credit_cent=700000_00, item="购买商品、接受劳务支付的现金", flow_amount_cent=700000_00, retained_side="counterpart"),
         )
         self.assertEqual(-600_00, _signed_flow(entries[0]))
         self.assertEqual(700000_00, _signed_flow(entries[1]))
 
-    def test_red_reversal_sign_is_preserved(self) -> None:
-        # 负流量+流入项目 → 负（退款冲减流入）；负流量+流出项目 → 正（购买退款冲减流出）
+    def test_red_reversal_sign_follows_account_side_not_original_item(self) -> None:
         refund_in = _component_entry(3, "V3", "其他应收款_其他", debit_cent=-180_00, item="收到其他与经营活动有关的现金", flow_amount_cent=-180_00, retained_side="counterpart")
-        refund_out = _component_entry(4, "V4", "应付账款_财务", credit_cent=29000_00, item="支付其他与经营活动有关的现金", flow_amount_cent=-29000_00, retained_side="counterpart")
-        self.assertEqual(-180_00, _signed_flow(refund_in))
-        self.assertEqual(29000_00, _signed_flow(refund_out))
+        refund_out = _component_entry(4, "V4", "应付账款_财务", credit_cent=-29000_00, item="支付其他与经营活动有关的现金", flow_amount_cent=-29000_00, retained_side="counterpart")
+        self.assertEqual(180_00, _signed_flow(refund_in))
+        self.assertEqual(-29000_00, _signed_flow(refund_out))
 
-    def test_unknown_item_name_falls_back_to_legacy(self) -> None:
-        # 非标项目名（项目甲）不进新分支，行为与改动前一致
+    def test_unknown_item_name_cannot_override_account_side(self) -> None:
         entry = _component_entry(5, "V5", "应收款项", credit_cent=12000_00, item="项目甲", flow_amount_cent=12000_00, retained_side="counterpart")
         self.assertEqual(12000_00, _signed_flow(entry))
 
@@ -676,8 +753,8 @@ class ComponentTests(unittest.TestCase):
         outflow = _component_entry(11, "V11", "银行存款", credit_cent=100_00, item="购买商品支付的现金", flow_amount_cent=100_00, retained_side="cash")
         debit_credit = _component_entry(12, "V12", "银行存款", debit_cent=100_00, flow_amount_cent=100_00, retained_side="cash")
         balance = _component_entry(13, "V13", "银行存款", debit_cent=100_00, retained_side="cash")
-        self.assertEqual("现流项目名(流入)", flow_direction_source(inflow))
-        self.assertEqual("现流项目名(流出)", flow_direction_source(outflow))
+        self.assertEqual("借贷列+流量金额", flow_direction_source(inflow))
+        self.assertEqual("借贷列+流量金额", flow_direction_source(outflow))
         self.assertEqual("借贷列+流量金额", flow_direction_source(debit_credit))
         self.assertEqual("借贷差额", flow_direction_source(balance))
 
@@ -931,7 +1008,7 @@ class ComponentTests(unittest.TestCase):
         rules = load_rule_pack(Path(__file__).resolve().parents[1])
         self.assertFalse(classify_component(result.components[0], rules).excluded)
 
-    def test_note_only_voucher_with_standard_flow_label_avoids_cleanup(self) -> None:
+    def test_note_only_voucher_with_standard_flow_label_requests_cleanup(self) -> None:
         entries = (
             _component_entry(
                 1, "V4", "1121 应收票据_银行承兑汇票",
@@ -944,10 +1021,10 @@ class ComponentTests(unittest.TestCase):
         scope = confirm_cash_scope(proposal, {})
         requests = find_cash_row_cleanup_requests(entries, scope)
         result = build_cashflow_components(entries, scope)
-        self.assertEqual(0, len(requests))
+        self.assertEqual(1, len(requests))
         self.assertFalse(result.components)
 
-    def test_single_sided_file_profile_uses_standard_flow_rows(self) -> None:
+    def test_single_sided_file_profile_cannot_use_standard_flow_rows_as_cash(self) -> None:
         entries = (
             _component_entry(
                 1, "V31", "2202 应付账款", debit_cent=58_972_968_30,
@@ -961,15 +1038,13 @@ class ComponentTests(unittest.TestCase):
             ),
         )
         scope = confirm_cash_scope(discover_cash_scope(entries), {})
-        suppressed = build_cashflow_components(
+        result = build_cashflow_components(
             entries, scope, single_sided_file_ids=frozenset({"FSYN"})
         )
-        self.assertEqual(2, len(suppressed.components))
-        self.assertEqual(0, len(find_cash_row_cleanup_requests(entries, scope)))
-        legacy = build_cashflow_components(entries, scope)
-        self.assertFalse(legacy.components)
+        self.assertFalse(result.components)
+        self.assertEqual(1, len(find_cash_row_cleanup_requests(entries, scope)))
 
-    def test_red_flow_amount_with_standard_item_is_retained(self) -> None:
+    def test_red_flow_amount_with_standard_item_still_requires_a_cash_leg(self) -> None:
         entries = (
             _component_entry(
                 1, "V41", "2202 应付账款", debit_cent=58_972_968_30,
@@ -986,9 +1061,9 @@ class ComponentTests(unittest.TestCase):
             entries, confirm_cash_scope(discover_cash_scope(entries), {}),
             single_sided_file_ids=frozenset({"FSYN"}),
         )
-        self.assertEqual(2, len(result.components))
+        self.assertFalse(result.components)
         self.assertEqual(
-            0,
+            1,
             len(
                 find_cash_row_cleanup_requests(
                     entries, confirm_cash_scope(discover_cash_scope(entries), {})

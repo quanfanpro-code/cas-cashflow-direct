@@ -52,7 +52,7 @@ def _task(task_id: str) -> AITask:
     return AITask(
         task_id=task_id,
         component_id="CMP-1",
-        context="摘要原文：销售回款；完整对方科目路径：合同负债；现金方向：inflow；候选项目：CFO-01、CFO-03",
+        context="摘要原文：销售回款；完整对方科目路径：合同负债",
         original_item="",
         system_item_id="CFO-01",
         rule_evidence="系统候选仅供复核",

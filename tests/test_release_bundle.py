@@ -9,12 +9,19 @@ import unittest
 from pathlib import Path
 
 from scripts.build_release import build_release
+from cashflow_direct.versions import current_versions
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseBundleTests(unittest.TestCase):
+    def test_version_bundle_covers_accumulation_and_forced_checks(self) -> None:
+        versions = current_versions(ROOT)
+
+        self.assertTrue(versions["materiality_and_accumulation"])
+        self.assertTrue(versions["forced_checks"])
+
     def test_release_contains_only_runtime_whitelist_and_runs_independently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             release = build_release(ROOT, Path(tmp) / "cas-cashflow-direct")

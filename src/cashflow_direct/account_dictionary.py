@@ -122,6 +122,10 @@ class SummarySemanticEntry:
     confidence: str
     classification_facts: tuple[str, ...]
     candidate_item_ids: tuple[str, ...] = ()
+    negation: tuple[str, ...] = ()
+    uncertainty: tuple[str, ...] = ()
+    conditionality: tuple[str, ...] = ()
+    source_spans: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

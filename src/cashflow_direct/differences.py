@@ -70,6 +70,8 @@ def _independent_sources(
 
 
 def _score_description(decision: ClassificationDecision) -> str:
+    if decision.matched_rule_id == "INTERNAL-TRANSFER":
+        return "不适用：内部划转在现金范围阶段判定，不进入现金流项目分类评分。"
     summary = _QUALITY_TEXT.get(decision.summary_quality, "质量未记录")
     account = _QUALITY_TEXT.get(decision.account_path_quality, "质量未记录")
     if decision.source_conflict or decision.evidence_score is None:
@@ -94,7 +96,10 @@ def _difference_reason(
     multiple: bool,
 ) -> str:
     if decision.matched_rule_id == "INTERNAL-TRANSFER":
-        return "识别为现金及现金等价物内部划转，按现金范围规则自动排除。"
+        return (
+            "两个已确认纳入现金范围的账户在同一凭证内方向相反且金额相等，"
+            "按现金范围规则自动排除为内部划转。"
+        )
     score = (
         "证据不存在可用合计分"
         if decision.evidence_score is None
@@ -115,6 +120,25 @@ def _difference_reason(
     return reason
 
 
+def _internal_transfer_evidence(
+    entry: NormalizedEntry,
+    transfer_entries: Sequence[NormalizedEntry],
+) -> tuple[str, str]:
+    paired = tuple(
+        item
+        for item in transfer_entries
+        if item.voucher_key == entry.voucher_key
+    )
+    accounts = "、".join(dict.fromkeys(item.account_name for item in paired))
+    locations = "、".join(
+        dict.fromkeys(item.source.cell_range for item in paired)
+    )
+    return (
+        f"现金范围确认：{accounts or entry.account_name}均已确认纳入",
+        f"同凭证方向相反且金额相等：{locations or entry.source.cell_range}",
+    )
+
+
 def build_original_auto_differences(
     entries: Sequence[NormalizedEntry],
     components: Sequence[CashflowComponent],
@@ -124,6 +148,11 @@ def build_original_auto_differences(
     file_name_by_id: Mapping[str, str],
 ) -> tuple[dict[str, object], ...]:
     entry_by_id = {entry.entry_id: entry for entry in entries}
+    internal_transfer_entries = tuple(
+        entry_by_id[entry_id]
+        for entry_id in internal_transfer_entry_ids
+        if entry_id in entry_by_id
+    )
     decision_by_component = {item.component_id: item for item in decisions}
     candidates: dict[
         str,
@@ -196,6 +225,11 @@ def build_original_auto_differences(
                 voucher_key=entry_by_id[entry_id].voucher_key,
                 summary=entry_by_id[entry_id].summary,
                 cash_delta_cent=0,
+                source_keys=tuple(
+                    item.entry_id
+                    for item in internal_transfer_entries
+                    if item.voucher_key == entry_by_id[entry_id].voucher_key
+                ),
             )
             candidates[entry_id].append(("", "不进入正表", decision, component))
 
@@ -214,11 +248,12 @@ def build_original_auto_differences(
                 if standardized is None
                 else standardized.name
             )
-            source1, source2 = _independent_sources(entry, component, decision)
-            reason = _difference_reason(
-                decision,
-                multiple=multiple,
-            )
+            if decision.matched_rule_id == "INTERNAL-TRANSFER":
+                source1, source2 = _internal_transfer_evidence(
+                    entry, internal_transfer_entries
+                )
+            else:
+                source1, source2 = _independent_sources(entry, component, decision)
             row = {
                 "日期": entry.voucher_date,
                 "凭证字": entry.voucher_word,
@@ -232,7 +267,7 @@ def build_original_auto_differences(
                 "对方科目": entry.counterpart_name,
                 "原项目标准化结果": standardized_name,
                 "审定现流表项目": final_name,
-                "差异形成原因": reason,
+                "差异形成原因": _difference_reason(decision, multiple=multiple),
                 "打分逻辑描述及打分结果": _score_description(decision),
                 "独立来源1": source1,
                 "独立来源2": source2,

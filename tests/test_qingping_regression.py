@@ -5,20 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
-from cashflow_direct.classification import load_rule_pack, standardize_flow_item
+from cashflow_direct.classification import load_rule_pack
 from cashflow_direct.pipeline import (
     confirm_cash_scope,
-    confirm_manual_decisions,
-    finalize_run,
     run_classification,
     run_preflight,
 )
-from tests.fixture_factory import mark_dictionary_complete
 
 
-def _write_qingping_style_fixture(path: Path) -> None:
+def _write_single_sided_detail_fixture(path: Path) -> None:
     rules = load_rule_pack(Path(__file__).resolve().parents[1])
     workbook = Workbook()
     detail = workbook.active
@@ -45,12 +42,12 @@ def _write_qingping_style_fixture(path: Path) -> None:
     workbook.save(path)
 
 
-class QingpingRegressionTests(unittest.TestCase):
-    def test_qingping_style_single_sided_detail_reconciles_to_zero(self) -> None:
+class SingleSidedDetailRegressionTests(unittest.TestCase):
+    def test_single_sided_detail_without_confirmed_cash_proxy_requests_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "清平式单边明细.xlsx"
-            _write_qingping_style_fixture(source)
+            source = root / "单边现流明细.xlsx"
+            _write_single_sided_detail_fixture(source)
             preflight = run_preflight(
                 [source],
                 ("100000", "50000", "5000"),
@@ -58,56 +55,14 @@ class QingpingRegressionTests(unittest.TestCase):
                 statement_path=source,
             )
             confirm_cash_scope(preflight.run_dir, {})
-            # 本用例不涉及词典机制，直接标记齐备（门禁通行）
-            mark_dictionary_complete(preflight.run_dir)
             classified = run_classification(preflight.run_dir)
-            # 重构后口径：本夹具组成均达整体重要性，跳过逐笔 AI（大额强制人工复核兜底）
-            self.assertEqual(0, classified.ai_tasks_missing)
             state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
             state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-            self.assertEqual("相符", state["rough_reconciliation"]["status"])
-            self.assertEqual(-10_926_170_61, state["rough_reconciliation"]["detail_sum_cent"])
-            item_by_name = {
-                item.name: item.item_id
-                for item in load_rule_pack(Path(__file__).resolve().parents[1]).statement_items
-                if item.is_leaf
-            }
-            component_by_id = {
-                item["component_id"]: item for item in state["components"]
-            }
-            confirm_manual_decisions(
-                preflight.run_dir,
-                [
-                    {
-                        "component_id": decision["component_id"],
-                        "item_id": item_by_name[
-                            component_by_id[decision["component_id"]]["original_item_text"]
-                        ],
-                        "basis": "构造回归用例：人工复核后沿用来源文件中的原项目",
-                        "operator": "测试复核人",
-                    }
-                    for decision in state["decisions"]
-                    if not decision["resolved"] and not decision["excluded"]
-                ],
-            )
-            final = finalize_run(preflight.run_dir)
-            self.assertNotIn("草稿", final.overall_status)
-            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-            self.assertEqual(0, state["reconciliation"]["difference_cent"])
-            self.assertEqual("现金流量表与货币资金变动的勾稽核对：相符", state["reconciliation"]["status"])
-            workbook = load_workbook(final.workbook_path, data_only=False)
-            try:
-                self.assertIn("现金范围与现金流量表与货币资金变动的勾稽核对", workbook.sheetnames)
-                hits = [
-                    f"{sheet.title}!{cell.coordinate}"
-                    for sheet in workbook.worksheets
-                    for row in sheet.iter_rows()
-                    for cell in row
-                    if isinstance(cell.value, str) and "现金调节" in cell.value
-                ]
-                self.assertEqual([], hits)
-            finally:
-                workbook.close()
+            self.assertEqual("待用户清洗现金分录", classified.status)
+            self.assertEqual(0, classified.component_count)
+            self.assertEqual("waiting_cash_row_cleanup", state["stage"])
+            self.assertTrue(state["cash_row_cleanup_requests"])
+            self.assertTrue((preflight.run_dir / "现金分录清洗请求.md").is_file())
 
 
 if __name__ == "__main__":

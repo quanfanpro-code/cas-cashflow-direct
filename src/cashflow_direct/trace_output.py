@@ -496,8 +496,8 @@ def build_trace_rows(
                 "有效重要性层级": _unique_text(
                     (
                         _MATERIALITY_TEXT.get(
-                            str(assessment.get("effective_level", "")),
-                            str(assessment.get("effective_level", "")),
+                            str(assessment.get("single_level", "")),
+                            str(assessment.get("single_level", "")),
                         ),
                     )
                     if assessment

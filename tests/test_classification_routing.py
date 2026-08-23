@@ -489,6 +489,40 @@ def test_different_business_objects_and_purposes_are_not_combined() -> None:
     assert {item.decision_action for item in result.decisions} == {"automatic_keep"}
 
 
+def test_same_purpose_with_different_business_objects_is_not_combined() -> None:
+    components = tuple(
+        cashflow_component(
+            "支付日常维护款",
+            -60,
+            ("管理费用_日常维护",),
+            original_item_text="支付其他与经营活动有关的现金",
+            component_id=component_id,
+        )
+        for component_id in ("OFFICE", "EQUIPMENT")
+    )
+    decisions = (
+        _decision(
+            "OFFICE",
+            score=45,
+            candidate="CFO-07",
+            business_object="办公场所",
+            purpose="日常维护",
+        ),
+        _decision(
+            "EQUIPMENT",
+            score=45,
+            candidate="CFO-07",
+            business_object="生产设备",
+            purpose="日常维护",
+        ),
+    )
+
+    result = route_classification_decisions(components, decisions, THRESHOLDS)
+
+    assert len({item.materiality_group_id for item in result.decisions}) == 2
+    assert {item.cumulative_materiality_level for item in result.decisions} == {"M0"}
+
+
 def test_source_conflict_keeps_valid_original_while_illegal_input_is_isolated() -> None:
     conflict = cashflow_component(
         "发放工资",
@@ -685,6 +719,49 @@ def test_two_applicable_company_rules_with_different_outcomes_go_to_human() -> N
 
     assert result.decisions[0].decision_action == "human_decision"
     assert result.decisions[0].company_rule_conflict is True
+    assert result.ai_tasks == ()
+
+
+@pytest.mark.parametrize(
+    "note",
+    (
+        {
+            "note_id": "NOTE-EXPIRED",
+            "内容": "设备押金按投资活动",
+            "涉及科目或词": ["设备押金"],
+            "建议处理": "CFI-06",
+            "状态": "已停用",
+        },
+        {
+            "note_id": "NOTE-OUT-OF-SCOPE",
+            "内容": "设备押金按投资活动",
+            "涉及科目或词": ["设备押金"],
+            "适用标准一级科目": ["长期股权投资"],
+            "建议处理": "CFI-06",
+            "状态": "采用",
+        },
+    ),
+)
+def test_expired_or_out_of_scope_company_rule_requires_human_decision(note) -> None:
+    component = cashflow_component(
+        "支付设备押金",
+        -50,
+        ("其他应付款_设备押金",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id="NOTE-INVALID-SCOPE",
+    )
+    decision = _decision(
+        "NOTE-INVALID-SCOPE",
+        score=70,
+        state="agrees",
+        candidate="CFO-07",
+    )
+
+    result = route_classification_decisions(
+        (component,), (decision,), THRESHOLDS, company_notes=(note,)
+    )
+
+    assert result.decisions[0].decision_action == "human_decision"
     assert result.ai_tasks == ()
 
 

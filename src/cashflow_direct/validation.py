@@ -68,6 +68,8 @@ def validate_classification(
     }
     for item in decisions:
         if item.excluded:
+            if not item.reason.strip():
+                errors.append(f"排除业务缺少排除原因：{item.component_id}")
             continue
         if item.resolved and not item.system_item_id:
             errors.append(f"已决定业务缺少正表项目：{item.component_id}")
@@ -107,8 +109,13 @@ def validate_final_readiness(
         if illegal_markers.intersection(item.anomalies)
         and not (
             (decision := decision_by_id.get(item.component_id))
-            and decision.resolved
-            and decision.decision_source == "manual"
+            and (
+                decision.decision_action == "isolate_invalid_input"
+                or (
+                    decision.resolved
+                    and decision.decision_source == "manual"
+                )
+            )
         )
     ]
     if illegal_components:

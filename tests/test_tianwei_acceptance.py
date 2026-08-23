@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from cashflow_direct.account_mapping import extract_original_level1
 from cashflow_direct.classification import load_rule_pack
 from cashflow_direct.pipeline import (
     confirm_account_mapping,
@@ -27,14 +26,37 @@ from cashflow_direct.pipeline import (
     supplement_cash_balances,
 )
 from cashflow_direct.statement import ExistingStatementResult, detect_statement_sheets
+from cashflow_direct.workbook_output import USE_SYSTEM_RECOMMENDATION
 
 
 ALLOWED_SCORES = {0, 10, 20, 25, 35, 45, 50, 55, 70, 90, None}
-TIANWEI_LEVEL1_MAPPINGS = {
-    "所得税": "所得税费用",
-    "研发费用": "研发支出",
-    "质量成本": "制造费用",
-}
+
+
+def _real_materiality() -> tuple[Decimal, Decimal, Decimal]:
+    raw = os.environ.get("CAS_CASHFLOW_REAL_MATERIALITY")
+    if not raw:
+        pytest.skip("未设置真实验收重要性参数")
+    values = tuple(Decimal(value.strip()) for value in raw.split(","))
+    assert len(values) == 3, "真实验收重要性参数应依次提供整体、实际执行和明显微小金额"
+    return values
+
+
+def _real_fx_amount() -> Decimal:
+    raw = os.environ.get("CAS_CASHFLOW_REAL_FX")
+    if raw is None:
+        pytest.skip("未设置经用户确认的真实汇率变动金额")
+    return Decimal(raw)
+
+
+def _real_level1_mappings() -> dict[str, str]:
+    raw_path = os.environ.get("CAS_CASHFLOW_REAL_ACCOUNT_MAPPINGS")
+    if not raw_path:
+        pytest.skip("未设置经用户确认的真实一级科目映射文件")
+    path = Path(raw_path)
+    assert path.is_file()
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    assert isinstance(payload, dict) and payload
+    return {str(key): str(value) for key, value in payload.items()}
 
 
 def _sha256(path: Path) -> str:
@@ -81,18 +103,19 @@ def _complete_mapping(run_dir: Path) -> None:
     raise AssertionError("字段映射未能在有限轮次内完成")
 
 
-def _confirm_tianwei_level1_accounts(run_dir: Path) -> set[str]:
+def _confirm_real_level1_accounts(run_dir: Path) -> set[str]:
     state = _state(run_dir)
     pending = {
         str(item["original_level1"])
         for item in state.get("account_mapping_records", ())
         if item.get("status") != "confirmed"
     }
-    assert pending <= set(TIANWEI_LEVEL1_MAPPINGS)
     if pending:
+        mappings = _real_level1_mappings()
+        assert pending <= set(mappings), "映射文件必须覆盖本次全部待确认一级科目"
         confirm_account_mapping(
             run_dir,
-            {name: TIANWEI_LEVEL1_MAPPINGS[name] for name in pending},
+            {name: mappings[name] for name in pending},
         )
     confirmed = _state(run_dir)
     assert not confirmed.get("account_mapping_questions")
@@ -147,6 +170,11 @@ def _complete_summary_dictionary(run_dir: Path, result_path: Path) -> None:
     selected = tuple(record for record in records if record.get("task_id") in expected)
     assert {record["task_id"] for record in selected} == set(expected)
     assert all(record["summary"] == expected[record["task_id"]] for record in selected)
+    assert any(
+        (record.get("item_id") or record.get("candidate_item_ids"))
+        and record.get("classification_facts")
+        for record in selected
+    ), "摘要语义结果全部为空候选或空分类事实，属于占位结果，不能用于真实验收"
     matched_path = run_dir / "摘要语义判断结果_匹配当前输入.jsonl"
     matched_path.write_text(
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in selected),
@@ -156,55 +184,22 @@ def _complete_summary_dictionary(run_dir: Path, result_path: Path) -> None:
     assert imported["status"] == "摘要语义已导入"
 
 
-def _cash_choices(state: dict[str, object]) -> dict[str, str]:
-    standard_by_original = {
-        str(item["original_level1"]): str(item["standard_level1"])
-        for item in state["account_mapping_records"]
-        if item["status"] == "confirmed"
+def _real_cash_scope_decisions(state: dict[str, object]) -> dict[str, str]:
+    raw_path = os.environ.get("CAS_CASHFLOW_REAL_CASH_SCOPE_DECISIONS")
+    if not raw_path:
+        pytest.skip("未设置经用户逐项确认的真实现金范围决定文件")
+    path = Path(raw_path)
+    assert path.is_file()
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    assert isinstance(payload, dict)
+    decisions = {str(key): str(value) for key, value in payload.items()}
+    expected_keys = {
+        str(item["account_key"])
+        for item in state["cash_scope_proposal"]["candidates"]
     }
-    choices = {}
-    for item in state["cash_scope_proposal"]["candidates"]:
-        account_key = str(item["account_key"])
-        account_names = tuple(str(name) for name in item["account_names"])
-        standard_level1 = {
-            standard_by_original.get(extract_original_level1(name), "")
-            for name in account_names
-        }
-        include = bool(standard_level1 & {"库存现金", "银行存款"}) and not any(
-            "保证金" in name for name in account_names
-        )
-        choices[account_key] = "include" if include else "exclude"
-    return choices
-
-
-def test_tianwei_cash_choices_use_inherited_level1_and_original_account_detail() -> None:
-    state = {
-        "account_mapping_records": [
-            {
-                "original_level1": "客户银行款",
-                "standard_level1": "银行存款",
-                "status": "confirmed",
-            },
-            {
-                "original_level1": "客户其他货币",
-                "standard_level1": "其他货币资金",
-                "status": "confirmed",
-            },
-        ],
-        "cash_scope_proposal": {
-            "candidates": [
-                {"account_key": "1002.01", "account_names": ["客户银行款_一般户"]},
-                {"account_key": "1002.02", "account_names": ["客户银行款_保证金户"]},
-                {"account_key": "1012.01", "account_names": ["客户其他货币_存出投资款"]},
-            ]
-        },
-    }
-
-    assert _cash_choices(state) == {
-        "1002.01": "include",
-        "1002.02": "exclude",
-        "1012.01": "exclude",
-    }
+    assert set(decisions) == expected_keys, "现金范围决定必须逐项覆盖本次全部候选账户"
+    assert set(decisions.values()) <= {"include", "exclude"}
+    return decisions
 
 
 def _component_signatures(state: dict[str, object]) -> Counter[tuple[object, ...]]:
@@ -222,29 +217,29 @@ def _component_signatures(state: dict[str, object]) -> Counter[tuple[object, ...
 
 
 def test_real_files_complete_the_generic_pipeline() -> None:
-    raw_directory = os.environ.get("CAS_CASHFLOW_TIANWEI_DIR")
+    raw_directory = os.environ.get("CAS_CASHFLOW_REAL_DIR")
     if not raw_directory:
         pytest.skip("未设置真实验收目录")
-    ai_results_value = os.environ.get("CAS_CASHFLOW_TIANWEI_AI_RESULTS")
+    ai_results_value = os.environ.get("CAS_CASHFLOW_REAL_AI_RESULTS")
     if not ai_results_value:
-        pytest.skip("未设置已经独立完成的结构化AI复核结果")
+        pytest.skip("未设置结构化AI复核结果或技术失败注入文件")
     ai_results_paths = tuple(Path(value) for value in ai_results_value.split(os.pathsep))
     assert all(path.is_file() for path in ai_results_paths)
     dictionary_results_value = os.environ.get(
-        "CAS_CASHFLOW_TIANWEI_DICTIONARY_RESULTS"
+        "CAS_CASHFLOW_REAL_DICTIONARY_RESULTS"
     )
     if not dictionary_results_value:
         pytest.skip("未设置已经完成的科目语义判断结果")
     dictionary_results_path = Path(dictionary_results_value)
     assert dictionary_results_path.is_file()
-    summary_results_value = os.environ.get("CAS_CASHFLOW_TIANWEI_SUMMARY_RESULTS")
+    summary_results_value = os.environ.get("CAS_CASHFLOW_REAL_SUMMARY_RESULTS")
     if not summary_results_value:
         pytest.skip("未设置已经完成的摘要语义判断结果")
     summary_results_path = Path(summary_results_value)
     assert summary_results_path.is_file()
     case_dir = Path(raw_directory)
-    detail_value = os.environ.get("CAS_CASHFLOW_TIANWEI_DETAIL")
-    statement_value = os.environ.get("CAS_CASHFLOW_TIANWEI_STATEMENT")
+    detail_value = os.environ.get("CAS_CASHFLOW_REAL_DETAIL")
+    statement_value = os.environ.get("CAS_CASHFLOW_REAL_STATEMENT")
     if detail_value and statement_value:
         inputs = (Path(detail_value), Path(statement_value))
         assert all(path.is_file() for path in inputs)
@@ -257,30 +252,36 @@ def test_real_files_complete_the_generic_pipeline() -> None:
     statement_path = _statement_file(inputs, rules)
     output_parent = Path(
         os.environ.get(
-            "CAS_CASHFLOW_TIANWEI_OUTPUT",
+            "CAS_CASHFLOW_REAL_OUTPUT",
             str(case_dir.parent / "真实验收输出"),
         )
     )
+    materiality = _real_materiality()
     preflight = run_preflight(
         inputs,
-        (Decimal("2200000"), Decimal("1100000"), Decimal("55000")),
+        materiality,
         output_parent,
         statement_path,
     )
     run_dir = preflight.run_dir
+    confirmed_mappings = _real_level1_mappings()
+    fx_amount = _real_fx_amount()
     (run_dir / "用户确认参数.md").write_text(
-        "# 天微第五阶段真实测试参数\n\n"
-        "1. 财务报表整体重要性：2,200,000元。\n"
-        "2. 实际执行的重要性：1,100,000元。\n"
-        "3. 明显微小错报临界值：55,000元。\n"
+        "# 真实验收参数\n\n"
+        f"1. 财务报表整体重要性：{materiality[0]}元。\n"
+        f"2. 实际执行的重要性：{materiality[1]}元。\n"
+        f"3. 明显微小错报临界值：{materiality[2]}元。\n"
         "4. 现金及现金等价物期初、期末余额取客户现有现金流量表正表。\n"
-        "5. 银行存款中的保证金账户不属于现金及现金等价物。\n"
-        "6. 其他货币资金不属于现金及现金等价物。\n"
+        "5. 现金范围由用户逐项确认文件提供，不由测试自动推断。\n"
+        "6. 每个候选账户必须有纳入或不纳入决定。\n"
         "7. 没有公司特殊规则。\n"
-        "8. 没有汇率变动引起的现金流量变动，汇率影响按0元处理。\n"
-        "9. 一级科目映射：所得税→所得税费用。\n"
-        "10. 一级科目映射：研发费用→研发支出。\n"
-        "11. 一级科目映射：质量成本→制造费用。\n",
+        f"8. 经用户确认的汇率变动金额：{fx_amount}元。\n"
+        + "".join(
+            f"{index}. 一级科目映射：{original}→{standard}。\n"
+            for index, (original, standard) in enumerate(
+                sorted(confirmed_mappings.items()), 9
+            )
+        ),
         encoding="utf-8-sig",
     )
     _complete_mapping(run_dir)
@@ -291,18 +292,12 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         for item in state["account_mapping_records"]
         if item["status"] != "confirmed"
     }
-    expected_pending = {"质量成本", "研发费用"}
-    if any(
-        re.split(r"[_/\\>|：:]", str(item["account_name"]), maxsplit=1)[0]
-        == "所得税"
-        for item in state["entries"]
-    ):
-        expected_pending.add("所得税")
-    assert set(pending_level1) == expected_pending
-    assert "研发支出" in pending_level1["研发费用"]
-    if "所得税" in pending_level1:
-        assert "所得税费用" in pending_level1["所得税"]
-    assert _confirm_tianwei_level1_accounts(run_dir) == set(pending_level1)
+    assert set(pending_level1) <= set(confirmed_mappings)
+    assert all(
+        confirmed_mappings[original] in candidates
+        for original, candidates in pending_level1.items()
+    )
+    assert _confirm_real_level1_accounts(run_dir) == set(pending_level1)
     state = _state(run_dir)
     assert len(state["entries"]) > 0
     mapped_roles = state["mappings"][0]["roles"]
@@ -313,9 +308,7 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         if item["account_name"]
     ), "真实明细存在分层科目时必须保留完整路径"
 
-    cash_choices = _cash_choices(state)
-    assert "include" in cash_choices.values()
-    assert "exclude" in cash_choices.values()
+    cash_choices = _real_cash_scope_decisions(state)
     confirm_cash_scope(run_dir, cash_choices)
     _complete_dictionary(run_dir, dictionary_results_path)
 
@@ -332,8 +325,8 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         run_dir,
         Decimal(opening) / 100,
         Decimal(closing) / 100,
-        Decimal("0"),
-        "用户确认：期初期末取客户现有正表，无汇率引起的现金流变动",
+        fx_amount,
+        "用户确认：期初期末取客户现有正表，汇率影响取外部确认参数",
     )
 
     first_classification = run_classification(run_dir)
@@ -365,6 +358,12 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         for item in state["decisions"]
         if item["evidence_score"] in {70, 90}
     )
+    if len(state["summary_dictionary"]["tasks"]) >= 100:
+        assert any(
+            item["evidence_score"] in {70, 90}
+            for item in state["decisions"]
+            if not item["excluded"]
+        ), "大样本真实验收没有任何70分或90分决定，应先复核摘要语义结果，不能继续出具通过结论"
 
     for ai_results_path in ai_results_paths:
         imported = import_ai_results(run_dir, ai_results_path)
@@ -379,6 +378,10 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         item for item in state["decisions"] if not item["resolved"] and not item["excluded"]
     )
     assert unresolved, "真实验收不得用自动化夹具冒充人工决定"
+    assert all(
+        str(item.get("proposed_item_code") or "").strip()
+        for item in state["review_batches"]
+    ), "每项人工事项都必须形成可供采用的系统首选项目"
 
     workbook = load_workbook(final.workbook_path, data_only=False, read_only=False)
     try:
@@ -407,6 +410,45 @@ def test_real_files_complete_the_generic_pipeline() -> None:
             int(review.cell(row, included_count_column).value or 0)
             for row in range(2, review.max_row + 1)
         ) == len(unresolved)
+        amount_column = review_headers.index("单笔金额") + 1
+        allocated_column = review_headers.index("本行分配现金变化") + 1
+        option_column = review_headers.index("人工可选标准项目") + 1
+        assert all(
+            review.cell(row, amount_column).data_type == "n"
+            and review.cell(row, amount_column).number_format
+            == review.cell(row, allocated_column).number_format
+            for row in range(2, review.max_row + 1)
+        )
+        assert all(
+            USE_SYSTEM_RECOMMENDATION
+            not in str(review.cell(row, option_column).value or "")
+            for row in range(2, review.max_row + 1)
+        )
+        for validation in review.data_validations.dataValidation:
+            helper_range = str(validation.formula1).split("!")[-1].replace("'", "")
+            first_cell = helper_range.split(":", 1)[0].replace("$", "")
+            assert review[first_cell].value == USE_SYSTEM_RECOMMENDATION
+
+        differences = workbook["原表与系统决定差异"]
+        difference_headers = [cell.value for cell in differences[1]]
+        result_column = difference_headers.index("审定现流表项目") + 1
+        score_column = difference_headers.index("打分逻辑描述及打分结果") + 1
+        assert all(
+            not str(differences.cell(row, result_column).value or "").startswith("等待人工复核")
+            for row in range(2, differences.max_row + 1)
+        ), "待人工事项不是系统已决定差异，不得进入差异明细"
+        assert all(
+            "合计0分" not in str(differences.cell(row, score_column).value or "")
+            for row in range(2, differences.max_row + 1)
+            if differences.cell(row, result_column).value == "不进入正表"
+        ), "内部划转不得显示为按0分修改项目"
+        if state["internal_transfers"]:
+            assert any(
+                differences.cell(row, result_column).value == "不进入正表"
+                and "不适用：内部划转"
+                in str(differences.cell(row, score_column).value or "")
+                for row in range(2, differences.max_row + 1)
+            ), "存在内部划转时，差异明细必须明确说明分类评分不适用"
 
         trace = workbook["全量分类留痕"]
         trace_headers = [cell.value for cell in trace[1]]
@@ -417,12 +459,11 @@ def test_real_files_complete_the_generic_pipeline() -> None:
             item["component_id"]: str(item.get("original_item_text") or "")
             for item in state["components"]
         }
-        assert all(original_by_component.values())
         for row in range(2, trace.max_row + 1):
             component_id = str(trace.cell(row, component_column).value)
             expected_original = original_by_component[component_id]
             actual_original = str(trace.cell(row, original_column).value or "")
-            assert actual_original == expected_original
+            assert actual_original == (expected_original or "原项目为空")
 
         ai_sheet = workbook["AI复核记录"]
         ai_headers = [cell.value for cell in ai_sheet[1]]
@@ -433,27 +474,45 @@ def test_real_files_complete_the_generic_pipeline() -> None:
             "reviewed_at",
             "prior_result_difference",
         )
-        for header in required_ai_headers:
-            assert header in ai_headers
-        ai_indexes = {header: ai_headers.index(header) + 1 for header in required_ai_headers}
-        component_index = ai_headers.index("component_id") + 1
-        reviewers_by_component: dict[str, dict[str, str]] = {}
-        for row in range(2, ai_sheet.max_row + 1):
-            assert all(
-                str(ai_sheet.cell(row, ai_indexes[header]).value or "").strip()
-                for header in required_ai_headers
-            )
-            component_id = str(ai_sheet.cell(row, component_index).value)
-            review_round = str(ai_sheet.cell(row, ai_indexes["review_round"]).value)
-            if review_round in {"A", "B"}:
-                reviewers_by_component.setdefault(component_id, {})[review_round] = str(
-                    ai_sheet.cell(row, ai_indexes["reviewer_id"]).value
+        if set(required_ai_headers) <= set(ai_headers):
+            ai_indexes = {header: ai_headers.index(header) + 1 for header in required_ai_headers}
+            component_index = ai_headers.index("component_id") + 1
+            reviewers_by_component: dict[str, dict[str, str]] = {}
+            for row in range(2, ai_sheet.max_row + 1):
+                assert all(
+                    str(ai_sheet.cell(row, ai_indexes[header]).value or "").strip()
+                    for header in required_ai_headers
                 )
-        assert all(
-            rounds.get("A") != rounds.get("B")
-            for rounds in reviewers_by_component.values()
-            if {"A", "B"} <= set(rounds)
-        )
+                component_id = str(ai_sheet.cell(row, component_index).value)
+                review_round = str(ai_sheet.cell(row, ai_indexes["review_round"]).value)
+                if review_round in {"A", "B"}:
+                    reviewers_by_component.setdefault(component_id, {})[review_round] = str(
+                        ai_sheet.cell(row, ai_indexes["reviewer_id"]).value
+                    )
+            assert all(
+                rounds.get("A") != rounds.get("B")
+                for rounds in reviewers_by_component.values()
+                if {"A", "B"} <= set(rounds)
+            )
+        else:
+            assert {"阶段", "task_id", "attempt", "status"} <= set(ai_headers)
+            task_index = ai_headers.index("task_id") + 1
+            attempt_index = ai_headers.index("attempt") + 1
+            status_index = ai_headers.index("status") + 1
+            attempts_by_task: dict[str, set[int]] = {}
+            final_status_by_task: dict[str, str] = {}
+            for row in range(2, ai_sheet.max_row + 1):
+                task_id = str(ai_sheet.cell(row, task_index).value or "")
+                attempt = int(ai_sheet.cell(row, attempt_index).value or 0)
+                status = str(ai_sheet.cell(row, status_index).value or "")
+                assert task_id and attempt in {1, 2, 3}
+                attempts_by_task.setdefault(task_id, set()).add(attempt)
+                if attempt == 3:
+                    final_status_by_task[task_id] = status
+            assert attempts_by_task
+            assert all(attempts == {1, 2, 3} for attempts in attempts_by_task.values())
+            assert set(final_status_by_task) == set(attempts_by_task)
+            assert set(final_status_by_task.values()) == {"无有效结果"}
 
         cash_scope = workbook["现金范围与现金流量表与货币资金变动的勾稽核对"]
         scope_rows = tuple(
@@ -461,8 +520,11 @@ def test_real_files_complete_the_generic_pipeline() -> None:
             for row in range(2, cash_scope.max_row + 1)
             if cash_scope.cell(row, 1).value
         )
-        assert any(decision == "纳入" for _, decision in scope_rows)
-        assert any(decision == "不纳入" for _, decision in scope_rows)
+        expected_scope_labels = {
+            "纳入" if decision == "include" else "不纳入"
+            for decision in cash_choices.values()
+        }
+        assert expected_scope_labels <= {decision for _, decision in scope_rows}
     finally:
         workbook.close()
 
@@ -497,16 +559,16 @@ def test_real_files_complete_the_generic_pipeline() -> None:
     )
 
 
-def test_manual_filtered_detail_has_only_the_confirmed_missing_bank_row() -> None:
-    original_value = os.environ.get("CAS_CASHFLOW_TIANWEI_DETAIL")
-    filtered_value = os.environ.get("CAS_CASHFLOW_TIANWEI_DETAIL_FILTERED")
-    statement_value = os.environ.get("CAS_CASHFLOW_TIANWEI_STATEMENT")
-    dictionary_value = os.environ.get("CAS_CASHFLOW_TIANWEI_DICTIONARY_RESULTS")
-    summary_value = os.environ.get("CAS_CASHFLOW_TIANWEI_SUMMARY_RESULTS")
+def test_manual_filtered_detail_has_only_the_user_confirmed_omissions() -> None:
+    original_value = os.environ.get("CAS_CASHFLOW_REAL_DETAIL")
+    filtered_value = os.environ.get("CAS_CASHFLOW_REAL_DETAIL_FILTERED")
+    statement_value = os.environ.get("CAS_CASHFLOW_REAL_STATEMENT")
+    dictionary_value = os.environ.get("CAS_CASHFLOW_REAL_DICTIONARY_RESULTS")
+    summary_value = os.environ.get("CAS_CASHFLOW_REAL_SUMMARY_RESULTS")
     expected_omissions_value = os.environ.get(
-        "CAS_CASHFLOW_TIANWEI_FILTERED_EXPECTED_OMISSIONS"
+        "CAS_CASHFLOW_REAL_FILTERED_EXPECTED_OMISSIONS"
     )
-    output_value = os.environ.get("CAS_CASHFLOW_TIANWEI_OUTPUT")
+    output_value = os.environ.get("CAS_CASHFLOW_REAL_OUTPUT")
     if not all(
         (
             original_value,
@@ -552,23 +614,22 @@ def test_manual_filtered_detail_has_only_the_confirmed_missing_bank_row() -> Non
     def classified_state(detail_path: Path) -> dict[str, object]:
         preflight = run_preflight(
             (detail_path, statement_path),
-            (Decimal("2200000"), Decimal("1100000"), Decimal("55000")),
+            _real_materiality(),
             Path(output_value),
             statement_path,
         )
         _complete_mapping(preflight.run_dir)
-        _confirm_tianwei_level1_accounts(preflight.run_dir)
+        _confirm_real_level1_accounts(preflight.run_dir)
         current = _state(preflight.run_dir)
-        choices = _cash_choices(current)
-        assert "include" in choices.values() and "exclude" in choices.values()
+        choices = _real_cash_scope_decisions(current)
         confirm_cash_scope(preflight.run_dir, choices)
         _complete_dictionary(preflight.run_dir, dictionary_path)
         supplement_cash_balances(
             preflight.run_dir,
             Decimal(existing.values["CASH-OPENING"]) / 100,
             Decimal(existing.values["CASH-CLOSING"]) / 100,
-            Decimal("0"),
-            "用户确认：期初期末取客户现有正表，无汇率引起的现金流变动",
+            _real_fx_amount(),
+            "用户确认：期初期末取客户现有正表，汇率影响取外部确认参数",
         )
         first_classification = run_classification(preflight.run_dir)
         assert first_classification.status == "待摘要语义确认"

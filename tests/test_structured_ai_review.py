@@ -424,7 +424,7 @@ def test_two_source_disagreement_is_preserved_for_system_routing() -> None:
     assert review.recalculate_ai_evidence(result).score is None
 
 
-def test_ai_task_contains_only_original_business_sources_and_existing_candidates() -> None:
+def test_ordinary_ai_task_contains_only_the_two_original_business_sources() -> None:
     review = _review()
     component = CashflowComponent(
         component_id="CMP-2",
@@ -468,14 +468,13 @@ def test_ai_task_contains_only_original_business_sources_and_existing_candidates
     assert "摘要原文：销售商品收到货款" in task.context
     assert "完整对方科目路径：2202_合同负债_销售" in task.context
     assert "现金方向" not in task.context
-    assert "候选项目：CFO-01、CFO-03" in task.context
-    assert "NOTE-01" in task.context
+    assert "候选项目" not in task.context
+    assert "NOTE-01" not in task.context
     assert "NOTE-02" not in task.context
     assert "客户原项目名称" not in task.context
     assert "123456" not in task.context
     assert "系统内部判断理由" not in task.context
     assert task.original_item == ""
-    assert task.candidate_item_ids == ("CFO-01", "CFO-03")
 
 
 def test_direction_control_fact_is_exposed_only_for_direction_forced_check() -> None:
@@ -633,7 +632,7 @@ def test_round_c_cannot_reuse_a_reviewer_imported_in_an_earlier_batch() -> None:
     assert "AI-C" in merged.invalid_ids
 
 
-def test_company_note_with_full_path_scope_does_not_leak_to_same_leaf_under_another_parent() -> None:
+def test_company_note_is_not_exposed_as_ordinary_ai_business_evidence() -> None:
     review = _review()
     decision = ClassificationDecision(
         component_id="CMP-SCOPE",
@@ -664,7 +663,7 @@ def test_company_note_with_full_path_scope_does_not_leak_to_same_leaf_under_anot
         counterpart_accounts=("合同履约成本_差旅费",),
     )
 
-    assert "NOTE-01" in review.build_ai_task(matching, decision, (note,)).context
+    assert "NOTE-01" not in review.build_ai_task(matching, decision, (note,)).context
     assert "NOTE-01" not in review.build_ai_task(
         other_parent, replace(decision, component_id="CMP-OTHER"), (note,)
     ).context

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import tempfile
@@ -14,14 +13,11 @@ import cashflow_direct.pipeline as pipeline_module
 from cashflow_direct.component_structure_ai import build_structure_ai_tasks
 from cashflow_direct.versions import current_versions
 from cashflow_direct.pipeline import (
-    confirm_account_mapping,
     confirm_cash_scope,
-    confirm_manual_decisions,
     finalize_run,
     import_ai_results,
     run_classification,
     run_preflight,
-    supplement_cash_balances,
 )
 
 
@@ -223,6 +219,11 @@ def test_overall_material_reversal_confirmation_creates_a_scoped_company_note(
     assert note["建议处理"] == "CFI-06"
     assert note["适用完整路径"] == ["应付账款_应付设备款_往来款"]
     assert note["适用摘要词"] == ["退回设备尾款"]
+    assert note["适用公司"]
+    assert note["适用期间"]
+    assert note["影响业务组成数量"] == 1
+    assert note["影响金额分"] == 2_200_000_00
+    assert note["后续期间影响"]
     assert "reversal_confirmation_requests" not in state
     assert saved_states
 from cashflow_direct.models import ClassificationDecision
@@ -419,56 +420,7 @@ def _write_illegal_summary_case(root: Path) -> Path:
     return path
 
 
-def _write_manual_consistency_case(root: Path) -> Path:
-    path = root / "构造人工决定后一致性复核.xlsx"
-    workbook = Workbook()
-    detail = workbook.active
-    detail.title = "序时账"
-    detail.append(
-        ["日期", "凭证号", "摘要", "科目", "借方", "贷方", "流量金额", "现流项目"]
-    )
-    detail.append(
-        [
-            "2026-01-01",
-            "记-1",
-            "同一批待确认事项",
-            "1002 银行存款",
-            None,
-            300,
-            None,
-            None,
-        ]
-    )
-    detail.append(
-        [
-            "2026-01-01",
-            "记-1",
-            "同一批待确认事项",
-            "待确认科目_同一对象",
-            100,
-            None,
-            100,
-            "客户原项目甲",
-        ]
-    )
-    detail.append(
-        [
-            "2026-01-01",
-            "记-1",
-            "同一批待确认事项",
-            "待确认科目_同一对象",
-            200,
-            None,
-            200,
-            "客户原项目乙",
-        ]
-    )
-    workbook.save(path)
-    workbook.close()
-    return path
-
-
-def test_run_classification_persists_the_single_decision_route() -> None:
+def test_run_classification_persists_the_automatic_fill_route() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         preflight = run_preflight(
@@ -483,17 +435,17 @@ def test_run_classification_persists_the_single_decision_route() -> None:
 
         state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
         state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        assert result.status == "waiting_ai"
-        assert len(state["ai_tasks"]) == 2
+        assert result.status == "consistency_completed"
+        assert state["ai_tasks"] == []
         assert state["materiality_assessments"]
         assert state["source_allocations"]
         assert {
             decision["decision_action"] for decision in state["decisions"]
-        } == {"ai_review"}
+        } == {"automatic_fill"}
         assert {
             decision["materiality_level"] for decision in state["decisions"]
         } == {"M0"}
-        assert all(not decision["resolved"] for decision in state["decisions"])
+        assert all(decision["resolved"] for decision in state["decisions"])
         connection = sqlite3.connect(
             preflight.run_dir / "计算留痕数据" / "计算留痕.sqlite3"
         )
@@ -640,6 +592,36 @@ def test_three_invalid_ai_submissions_clear_the_queue_and_use_the_cell_failure_e
         assert state["decisions"][0]["resolved"] is True
 
 
+def test_three_missing_ai_submissions_also_clear_the_queue_and_reach_a_terminal_exit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preflight = run_preflight(
+            [_write_ai_routed_case(root)],
+            ("100000", "50000", "5000"),
+            output_parent=root,
+        )
+        confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+        mark_dictionary_complete(preflight.run_dir)
+        classified = run_classification(preflight.run_dir)
+        assert classified.status == "waiting_ai"
+        state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
+        task_id = json.loads(state_path.read_text(encoding="utf-8-sig"))["ai_tasks"][0][
+            "task_id"
+        ]
+
+        for attempt in range(1, 4):
+            missing_path = root / f"漏答AI结果_{attempt}.jsonl"
+            missing_path.write_text("", encoding="utf-8-sig")
+            result = import_ai_results(preflight.run_dir, missing_path)
+
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        assert result.missing_count == 0
+        assert state["classification_summary"]["ai_tasks_missing"] == 0
+        assert state["ai_terminal_failure_ids"] == [task_id]
+        assert state["ai_task_attempts"] == {task_id: 3}
+        assert state["ai_technical_failure_log"][-1]["status"] == "无有效结果"
+
+
 def test_pipeline_restores_valid_original_when_ai_does_not_prove_change() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -734,7 +716,7 @@ def test_old_or_changed_scoring_version_cannot_continue_in_the_same_run() -> Non
             )
 
 
-def test_illegal_blank_summary_is_retained_isolated_and_waits_for_user_correction() -> None:
+def test_illegal_blank_summary_enters_the_same_workbook_for_user_decision() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         preflight = run_preflight(
@@ -766,118 +748,16 @@ def test_illegal_blank_summary_is_retained_isolated_and_waits_for_user_correctio
 
         final = finalize_run(preflight.run_dir)
         assert final.workbook_path.is_file()
-        assert final.overall_status == "诊断材料，不可作为最终表"
+        assert final.overall_status == "待完成人工确认"
         state = json.loads(
             (
                 preflight.run_dir / "计算留痕数据" / "运行状态.json"
             ).read_text(encoding="utf-8-sig")
         )
-        assert any("非法输入" in error for error in state["final_readiness"]["errors"])
-
-
-def test_manual_decision_resolves_illegal_input_without_changing_its_score(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recalculated_paths: list[Path] = []
-
-    def record_excel_recalculation(path: Path) -> None:
-        recalculated_paths.append(path)
-
-    monkeypatch.setattr(
-        pipeline_module,
-        "recalculate_workbook_with_excel",
-        record_excel_recalculation,
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        preflight = run_preflight(
-            [_write_illegal_summary_case(root)],
-            ("50", "25", "5"),
-            output_parent=root,
-        )
-        confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
-        mark_dictionary_complete(preflight.run_dir)
-        run_classification(preflight.run_dir)
-        state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        component_id = state["decisions"][0]["component_id"]
-
-        confirmed = confirm_manual_decisions(
-            preflight.run_dir,
-            (
-                {
-                    "component_id": component_id,
-                    "item_id": "CFO-01",
-                    "basis": "根据补充取得的销售合同和收款记录判断",
-                    "operator": "测试复核人",
-                },
-            ),
-        )
-
-        assert confirmed.status == "人工决定已记录"
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        decision = state["decisions"][0]
-        assert decision["resolved"] is True
-        assert decision["decision_source"] == "manual"
-        assert decision["evidence_score"] == 0
-        assert decision["decision_action"] == "manual_decision"
-        assert "summary_empty" in state["components"][0]["anomalies"]
-        final = finalize_run(preflight.run_dir)
-        assert final.overall_status == "最终可使用"
-        assert len(recalculated_paths) == 1
-        assert recalculated_paths[0].name.endswith("_生成中.xlsx")
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        assert state["excel_recalculation"]["status"] == "completed"
-        assert state["excel_recalculation"]["workbook_sha256"] == hashlib.sha256(
-            final.workbook_path.read_bytes()
-        ).hexdigest()
-
-
-def test_manual_completion_must_reenter_the_consistency_gate() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        preflight = run_preflight(
-            [_write_manual_consistency_case(root)],
-            ("100000", "50000", "5000"),
-            output_parent=root,
-        )
-        confirm_account_mapping(preflight.run_dir, {"待确认科目": "管理费用"})
-        state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
-        mapped_state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        confirm_cash_scope(
-            preflight.run_dir, mapped_state["recommended_cash_decisions"]
-        )
-        supplement_cash_balances(
-            preflight.run_dir, "300", "0", "0", "构造测试现金余额"
-        )
-        mark_dictionary_complete(preflight.run_dir)
-        run_classification(preflight.run_dir)
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        pending = [
-            item for item in state["decisions"] if not item["resolved"] and not item["excluded"]
+        assert state["review_batches"]
+        assert state["components"][0]["component_id"] in state["review_batches"][0][
+            "component_ids"
         ]
-        assert len(pending) == 2
-
-        confirm_manual_decisions(
-            preflight.run_dir,
-            (
-                {
-                    "component_id": pending[0]["component_id"],
-                    "item_id": "CFO-07",
-                    "basis": "构造测试的第一项人工判断",
-                    "operator": "测试复核人",
-                },
-                {
-                    "component_id": pending[1]["component_id"],
-                    "item_id": "CFI-06",
-                    "basis": "构造测试的第二项人工判断",
-                    "operator": "测试复核人",
-                },
-            ),
+        assert not any(
+            "非法输入" in error for error in state["final_readiness"]["errors"]
         )
-
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        assert state["stage"] == "waiting_human"
-        assert len(state["consistency_groups"]) == 1
-        assert len(state["consistency_resolution"]["unresolved"]) == 1
-        assert all(not item["resolved"] for item in state["decisions"])

@@ -59,8 +59,10 @@ class ClassificationRule:
     account_exclude_terms: tuple[str, ...]
     evidence_level: str
     sole_account_terms: tuple[str, ...] = ()
+    candidate_item_ids: tuple[str, ...] = ()
     # 为 True 时规则必须命中对方科目才参与打分（用于按服务对象分流的职工类规则）
     require_account: bool = False
+    require_detail_path: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +115,9 @@ def load_rule_pack(root: Path) -> RulePack:
             account_exclude_terms=tuple(rule.get("account_exclude_terms", ())),
             evidence_level=rule["evidence_level"],
             sole_account_terms=tuple(rule.get("sole_account_terms", ())),
+            candidate_item_ids=tuple(rule.get("candidate_item_ids", ())),
             require_account=bool(rule.get("require_account", False)),
+            require_detail_path=bool(rule.get("require_detail_path", False)),
         )
         for rule in rule_payload["rules"]
     )
@@ -154,6 +158,15 @@ def _rule_matches(rule: ClassificationRule, component: CashflowComponent) -> boo
     if any(term in component.summary for term in rule.exclude_terms):
         return False
     if any(term in account_text for term in rule.account_exclude_terms):
+        return False
+    if (
+        rule.require_detail_path
+        and len(component.counterpart_accounts) == 1
+        and not any(
+            len(split_account_levels(account)) > 1
+            for account in component.counterpart_accounts
+        )
+    ):
         return False
     if rule.sole_account_terms:
         counterpart = component.counterpart_accounts
@@ -731,7 +744,25 @@ def route_classification_decisions(
             or str(note.get("内容", "")).strip()
             for note in applicable_company_notes
         }
-        company_rule_conflict = len(company_rule_outcomes) > 1
+        invalid_company_rule = any(
+            not company_note_applies(
+                note, component.summary, component.counterpart_accounts
+            )
+            and company_note_applies(
+                {
+                    **note,
+                    "状态": "采用",
+                    "适用完整路径": (),
+                    "适用标准一级科目": (),
+                    "适用中间层级": (),
+                    "适用末级明细": (),
+                },
+                component.summary,
+                component.counterpart_accounts,
+            )
+            for note in company_notes
+        )
+        company_rule_conflict = len(company_rule_outcomes) > 1 or invalid_company_rule
         net_item_facts_missing = bool(
             decision.system_item_id in {"CFI-03", "CFI-04", "CFI-08"}
             and not any(
@@ -762,11 +793,7 @@ def route_classification_decisions(
             and assessment.single_level is not MaterialityLevel.M3
             and assessment.cumulative_level is MaterialityLevel.M3
         )
-        routing_level = (
-            assessment.single_level
-            if needs_group_confirmation
-            else assessment.effective_level
-        )
+        routing_level = assessment.single_level
         route = route_decision(
             score=decision.evidence_score,
             original_state=original_state,

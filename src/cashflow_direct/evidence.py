@@ -157,9 +157,6 @@ def score_rule(
     account_context = "|".join(
         sorted(_semantic_text(account) for account in component.counterpart_accounts)
     )
-    account_facts = (
-        (business_fact, f"account_context:{account_context}") if account_part else ()
-    )
     summary_text = _semantic_text(component.summary)
     path_leaf_texts = {
         _semantic_text(segment)
@@ -181,6 +178,11 @@ def score_rule(
         if summary_adds_context
         else ((business_fact,) if summary_part else ())
     )
+    account_facts = (
+        (business_fact, f"account_context:{account_context}")
+        if account_part and (not summary_part or summary_adds_context)
+        else ((business_fact,) if account_part else ())
+    )
     return RuleScore(
         rule_id=rule.rule_id,
         item_id=rule.item_id,
@@ -193,6 +195,7 @@ def score_rule(
         summary_hits=summary_hits,
         account_hits=(*account_detail_hits, *account_level1_hits),
         channels=channels,
+        candidate_item_ids=rule.candidate_item_ids,
         summary_facts=summary_facts,
         account_facts=account_facts,
     )

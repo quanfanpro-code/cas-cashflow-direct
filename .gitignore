@@ -16,3 +16,21 @@ docs/reviews/
 docs/superpowers/
 scripts/export_misclass_*.py
 docs/
+
+# 本轮需求优先工作流正式文档（仅精确放行，不放行其他客户或过程资料）
+!docs/
+docs/*
+!docs/requirements/
+docs/requirements/*
+!docs/requirements/2026-08-23-cas-cashflow-direct全面复核问题修复-requirement.md
+!docs/reviews/
+docs/reviews/*
+!docs/reviews/2026-08-23-cas-cashflow-direct复核问题实施追踪.md
+!docs/reviews/2026-08-23-cas-cashflow-direct评分与入口登记.md
+!docs/reviews/2026-08-23-cas-cashflow-direct全面复核问题闭环.md
+!docs/reviews/2026-08-23-cas-cashflow-direct待删除移动清单.md
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+docs/superpowers/plans/*
+!docs/superpowers/plans/2026-08-23-cas-cashflow-direct全面复核问题修复实施计划.md

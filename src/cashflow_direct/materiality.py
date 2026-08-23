@@ -36,7 +36,6 @@ class MaterialityAssessment:
     same_class_total_cent: int
     single_level: MaterialityLevel
     cumulative_level: MaterialityLevel
-    effective_level: MaterialityLevel
     group_key: tuple[str, ...]
     group_id: str
     grouping_status: str
@@ -51,15 +50,11 @@ def _same_class_key(record: MaterialityRecord) -> tuple[str, ...]:
             record.standard_level1_account,
             record.business_object,
         )
-    # 候选项目已经表达现金流业务类别。业务对象不能直接使用AI生成的整句
-    # 语义描述，否则“销售回款”和“销售商品形成的收款”等同义措辞会把
-    # 同一类业务拆散。优先使用稳定的明细用途；用途缺失时按更宽口径累计。
-    canonical_business_object = record.purpose or "未细分业务对象"
     return (
         record.cash_direction,
         record.candidate_item_id,
         record.standard_level1_account,
-        canonical_business_object,
+        record.business_object,
         record.purpose,
     )
 
@@ -92,7 +87,6 @@ def assess_materiality_records(
             same_class_total_cent=totals[key],
             single_level=single_level,
             cumulative_level=cumulative_level,
-            effective_level=single_level,
             group_key=key,
             group_id=stable_id("MATGRP", grouping_status, *key),
             grouping_status=grouping_status,

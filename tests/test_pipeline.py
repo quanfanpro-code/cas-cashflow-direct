@@ -259,7 +259,7 @@ def _complete_all_pending_ai(run_dir: Path, root: Path) -> None:
 
 
 class PipelineTests(unittest.TestCase):
-    def test_flow_detail_mixed_with_excluded_account_rows_keeps_only_valid_flow_rows(self) -> None:
+    def test_flow_detail_without_confirmed_cash_leg_requests_row_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "现流明细加排除账户完整分录.xlsx"
@@ -320,10 +320,13 @@ class PipelineTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(2, result.component_count)
-            self.assertEqual([state["files"][0]["file_id"]], state["single_sided_file_ids"])
+            self.assertEqual("待用户清洗现金分录", result.status)
+            self.assertEqual(0, result.component_count)
+            self.assertEqual("waiting_cash_row_cleanup", state["stage"])
+            self.assertTrue(state["cash_row_cleanup_requests"])
+            self.assertTrue((preflight.run_dir / "现金分录清洗请求.md").is_file())
 
-    def test_standard_original_flow_item_avoids_cash_row_cleanup(self) -> None:
+    def test_standard_original_flow_item_cannot_bypass_cash_row_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "现金分录不明确.xlsx"
@@ -373,15 +376,15 @@ class PipelineTests(unittest.TestCase):
 
             result = run_classification(preflight.run_dir)
 
-            self.assertEqual("待科目语义确认", result.status)
+            self.assertEqual("待用户清洗现金分录", result.status)
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
                     encoding="utf-8-sig"
                 )
             )
-            self.assertEqual("waiting_dictionary", state["stage"])
-            self.assertNotIn("cash_row_cleanup_requests", state)
-            self.assertFalse((preflight.run_dir / "现金分录清洗请求.md").exists())
+            self.assertEqual("waiting_cash_row_cleanup", state["stage"])
+            self.assertTrue(state["cash_row_cleanup_requests"])
+            self.assertTrue((preflight.run_dir / "现金分录清洗请求.md").is_file())
 
     def test_cash_scope_sheet_lists_confirmed_included_and_excluded_accounts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -603,7 +606,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(100, row["借方"])
                 self.assertIsNone(row["流量金额（原币）"])
                 self.assertEqual(
-                    "证据得分90分；金额档位为低于明显微小错报临界值；规定的AI复核已完成，符合AI确认后修改条件。",
+                    "证据得分70分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
                     row["差异形成原因"],
                 )
             finally:
@@ -999,19 +1002,7 @@ class PipelineTests(unittest.TestCase):
             confirm_cash_scope(preflight.run_dir, state["recommended_cash_decisions"])
             mark_dictionary_complete(preflight.run_dir)
             classified = run_classification(preflight.run_dir)
-            self.assertEqual(2, classified.ai_tasks_missing)
-            state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
-            tasks = json.loads(state_path.read_text(encoding="utf-8-sig"))["ai_tasks"]
-            result_path = root / "完整流程AI结果.jsonl"
-            result_path.write_text(
-                "".join(
-                    json.dumps(_structured_ai_payload(task), ensure_ascii=False) + "\n"
-                    for task in tasks
-                ),
-                encoding="utf-8-sig",
-            )
-            imported = import_ai_results(preflight.run_dir, result_path)
-            self.assertEqual("AI 已完成", imported.status)
+            self.assertEqual(0, classified.ai_tasks_missing)
             final = finalize_run(preflight.run_dir)
             self.assertTrue(final.workbook_path.is_file())
             self.assertTrue((final.run_dir / "计算留痕数据" / "计算留痕.sqlite3").is_file())
@@ -1275,11 +1266,12 @@ class PipelineTests(unittest.TestCase):
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
                 ai_sheet = workbook["AI复核记录"]
-                self.assertEqual(4, ai_sheet.max_row)
+                self.assertEqual(5, ai_sheet.max_row)
                 ai_headers = [cell.value for cell in ai_sheet[1]]
                 stage_column = ai_headers.index("阶段") + 1
                 self.assertCountEqual(
                     [
+                        "分类AI技术失败",
                         "分类AI技术失败",
                         "分类AI有效结果",
                         "分类AI有效结果",
@@ -1398,10 +1390,10 @@ class PipelineTests(unittest.TestCase):
             supplement_cash_balances(preflight.run_dir, "1000", "1060", "0", "客户盖章现金余额表")
             mark_dictionary_complete(preflight.run_dir)
             classified = run_classification(preflight.run_dir)
-            self.assertEqual(2, classified.ai_tasks_missing)
-            self.assertEqual("waiting_ai", classified.status)
+            self.assertEqual(0, classified.ai_tasks_missing)
+            self.assertEqual("consistency_completed", classified.status)
 
-    def test_rough_reconciliation_runs_before_and_is_recorded(self) -> None:
+    def test_rough_reconciliation_is_only_diagnostic_before_cash_row_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "单边明细.xlsx"
@@ -1421,10 +1413,13 @@ class PipelineTests(unittest.TestCase):
                 preflight.run_dir, preflight.recommended_cash_decisions
             )
             mark_dictionary_complete(preflight.run_dir)
-            run_classification(preflight.run_dir)
+            classified = run_classification(preflight.run_dir)
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(encoding="utf-8-sig")
             )
+            self.assertEqual("待用户清洗现金分录", classified.status)
+            self.assertEqual(0, classified.component_count)
+            self.assertEqual("waiting_cash_row_cleanup", state["stage"])
             rough = state["rough_reconciliation"]
             self.assertTrue(rough["applicable"])
             self.assertEqual("相符", rough["status"])
@@ -1546,6 +1541,10 @@ class PipelineTests(unittest.TestCase):
                                 "购建固定资产、无形资产和其他长期资产支付的现金（CFI-06）"
                             ),
                             "classification_facts": ["object:设备", "purpose:购建长期资产"],
+                            "negation": [],
+                            "uncertainty": [],
+                            "conditionality": [],
+                            "source_spans": [task["summary"]],
                         },
                         ensure_ascii=False,
                     ) + "\n"
@@ -1555,6 +1554,16 @@ class PipelineTests(unittest.TestCase):
             )
             summary_import = import_summary_results(preflight.run_dir, summary_path)
             self.assertEqual("摘要语义已导入", summary_import["status"])
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            summary_result = state["summary_dictionary"]["valid_results"][0]
+            self.assertEqual([], summary_result["negation"])
+            self.assertEqual([], summary_result["uncertainty"])
+            self.assertEqual([], summary_result["conditionality"])
+            self.assertTrue(summary_result["source_spans"])
             third = run_classification(preflight.run_dir)
             self.assertNotEqual("待摘要语义确认", third.status)
 
@@ -1759,7 +1768,7 @@ class PipelineTests(unittest.TestCase):
                 reason="测试", evidence_level="medium",
             )
             ai_task = build_ai_task(component, decision, state["company_notes"])
-            self.assertIn("采用规则甲", ai_task.context)
+            self.assertNotIn("采用规则甲", ai_task.context)
             self.assertNotIn("冲突规则乙", ai_task.context)
 
     def test_dictionary_import_rejects_misaligned_account(self) -> None:

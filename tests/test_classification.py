@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+import pytest
+
 from cashflow_direct.account_dictionary import (
     AccountDictionary,
     AccountSemanticEntry,
@@ -413,15 +415,17 @@ class ClassificationTests(unittest.TestCase):
                 self.assertEqual(expected, decision.system_item_id)
 
     def test_accounts_payable_alone_is_only_low_purchase_evidence(self) -> None:
-        # 仅一级“应付账款”属于中质量路径来源25分；摘要无有效业务事实。
+        # 仅一级“应付账款”是宽泛往来性质，不能唯一指向采购付款。
         decision = classify_component(
-            cashflow_component("支付款项", -100, ("应付账款_财务",)),
+            cashflow_component("普通业务", -100, ("应付账款",)),
             load_rule_pack(ROOT),
         )
 
-        self.assertEqual("CFO-04", decision.system_item_id)
+        self.assertEqual("", decision.system_item_id)
+        self.assertEqual("ambiguous", decision.candidate_status)
+        self.assertGreater(len(decision.candidate_item_ids), 1)
         self.assertEqual("low", decision.evidence_level)
-        self.assertEqual(25, decision.evidence_score)
+        self.assertEqual(10, decision.evidence_score)
 
     def test_pay_huokuan_summary_is_medium_purchase_evidence(self) -> None:
         # 摘要强45分与完整路径中25分相互印证，合计70分。
@@ -701,7 +705,7 @@ def test_complete_path_dictionary_recognizes_equipment_payable():
 
 
 def test_fee_type_split_categories():
-    """Task 10 费用类保守分级拆分：明确复合词自动归位，裸服务费回落经营。"""
+    """明确业务属性的复合词才允许形成唯一费用类候选。"""
     from cashflow_direct.classification import classify_component, load_rule_pack
 
     rules = load_rule_pack(ROOT)
@@ -711,14 +715,26 @@ def test_fee_type_split_categories():
         ("工程监理费", ("在建工程",), "CFI-06"),
         ("融资顾问费", ("财务费用",), "CFF-06"),
         ("并购咨询费", ("管理费用",), "CFI-07"),
-        ("支付咨询费", ("管理费用",), "CFO-07"),  # 裸词回落经营性兜底
-        ("支付服务费", ("管理费用",), "CFO-07"),
     )
     for summary, counterparts, expected in cases:
         decision = classify_component(
             cashflow_component(summary, -100, counterparts), rules
         )
         assert decision.system_item_id == expected, f"{summary} -> {decision.system_item_id}"
+
+
+@pytest.mark.parametrize("summary", ("支付咨询费", "支付服务费"))
+def test_plain_consulting_or_service_fee_stays_ambiguous(summary: str):
+    """用途不明的裸费用词不能机械回落到经营活动。"""
+    decision = classify_component(
+        cashflow_component(summary, -100, ("普通往来科目",)),
+        load_rule_pack(ROOT),
+    )
+
+    assert decision.system_item_id == ""
+    assert decision.candidate_status == "ambiguous"
+    assert len(decision.candidate_item_ids) > 1
+    assert decision.evidence_score == 10
 
 
 def test_plain_vat_in_purchase_summary_is_not_tax_payment():

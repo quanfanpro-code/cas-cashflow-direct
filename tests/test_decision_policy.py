@@ -149,6 +149,38 @@ def test_summary_adds_path_external_fact_even_when_path_adds_no_second_unique_fa
     assert result.score == 70
 
 
+def test_path_adds_summary_external_fact_even_when_summary_adds_no_second_unique_fact() -> None:
+    """独立性判断对两个来源对称，路径新增分类事实也应形成第二来源。"""
+    policy = _policy()
+    summary = _source(
+        "summary",
+        "CFI-06",
+        45,
+        "business:equipment_purchase",
+    )
+    path = _source(
+        "account_path",
+        "CFI-06",
+        25,
+        "business:equipment_purchase",
+        "purpose:elevator_installation",
+    )
+
+    result = policy.combine_source_assessments(summary, path)
+
+    assert result.sources_independent is True
+    assert result.independent_source_count == 2
+    assert result.score == 70
+
+
+@pytest.mark.parametrize("score", (70, 90))
+def test_high_score_requires_two_independent_sources(score: int) -> None:
+    policy = _policy()
+
+    with pytest.raises(ValueError, match="两个独立来源"):
+        policy.EvidenceAssessment("CFO-01", score, 1, False, False)
+
+
 def test_generic_cash_direction_does_not_create_an_independent_source() -> None:
     policy = _policy()
     summary = _source("summary", "CFO-01", 10, "cash_direction:outflow")
@@ -260,16 +292,10 @@ def test_reaching_a_materiality_threshold_moves_to_the_higher_level(
     assert policy.materiality_level(amount, thresholds).value == expected
 
 
-def test_effective_materiality_uses_single_amount_only_for_item_routing() -> None:
+def test_obsolete_effective_materiality_entry_is_removed() -> None:
     policy = _policy()
-    thresholds = MaterialityAmounts(
-        overall_cent=10000,
-        performance_cent=1000,
-        trivial_cent=100,
-    )
 
-    assert policy.effective_materiality(80, 1200, thresholds).value == "M0"
-    assert policy.effective_materiality(-1200, 80, thresholds).value == "M2"
+    assert not hasattr(policy, "effective_materiality")
 
 
 @pytest.mark.parametrize(
@@ -325,8 +351,8 @@ def test_original_item_agreement_uses_the_first_approved_action_table(
             for score in (0, 10, 20, 25, 35, 45, 50)
         ],
         (55, ("ai_review", "ai_review", "double_ai_review", "human_decision"), (55, 55, 55, 55)),
-        (70, ("ai_review", "ai_review", "ai_review", "human_decision"), (70, 70, 70, 70)),
-        (90, ("ai_review", "ai_review", "ai_review", "ai_review"), (90, 90, 90, 90)),
+        (70, ("automatic_fill", "ai_review", "ai_review", "human_decision"), (None, 70, 70, None)),
+        (90, ("automatic_fill", "ai_review", "ai_review", "ai_review"), (None, 90, 90, 90)),
     ],
 )
 @pytest.mark.parametrize(
@@ -368,8 +394,7 @@ def test_conflicting_original_item_uses_change_instead_of_fill() -> None:
 
 @pytest.mark.parametrize(
     ("score", "level"),
-    [(score, level) for score in (0, 10, 20, 25, 35, 45, 50, 55) for level in ("M0", "M1")]
-    + [(55, "M2")],
+    [(score, level) for score in (0, 10, 20, 25, 35, 45, 50, 55) for level in ("M0", "M1")],
 )
 def test_valid_original_is_kept_when_change_burden_is_not_met(
     score: int,
@@ -416,7 +441,7 @@ def test_valid_original_at_performance_materiality_gets_one_ai_retention_check(
     assert route.action.value == "ai_review"
 
 
-def test_valid_original_score_55_at_performance_materiality_keeps_without_ai() -> None:
+def test_valid_original_score_55_conflict_at_performance_materiality_requires_ai() -> None:
     policy = _policy()
 
     route = policy.route_normal_decision(
@@ -425,39 +450,8 @@ def test_valid_original_score_55_at_performance_materiality_keeps_without_ai() -
         policy.MaterialityLevel.M2,
     )
 
-    assert route.action.value == "automatic_keep"
-
-
-@pytest.mark.parametrize(
-    ("score", "expected_actions"),
-    [
-        (score, ("ai_review", "double_ai_review", "double_ai_review", "human_decision"))
-        for score in (0, 10, 20, 25, 35, 45, 50)
-    ]
-    + [
-        (55, ("ai_review", "ai_review", "double_ai_review", "human_decision")),
-        (70, ("ai_review", "ai_review", "ai_review", "human_decision")),
-        (90, ("ai_review", "ai_review", "ai_review", "ai_review")),
-    ],
-)
-@pytest.mark.parametrize("state", ["blank", "unstandardizable"])
-def test_missing_valid_original_uses_the_approved_ai_first_matrix(
-    score: int,
-    expected_actions: tuple[str, ...],
-    state: str,
-) -> None:
-    policy = _policy()
-
-    actions = tuple(
-        policy.route_normal_decision(
-            score,
-            policy.OriginalItemState(state),
-            policy.MaterialityLevel(level),
-        ).action.value
-        for level in ("M0", "M1", "M2", "M3")
-    )
-
-    assert actions == expected_actions
+    assert route.action.value == "ai_review"
+    assert route.required_post_review_score == 70
 
 
 def test_source_conflict_at_performance_materiality_starts_ai_for_valid_original() -> None:

@@ -4,11 +4,13 @@ import hashlib
 from pathlib import Path
 
 
-SCHEMA_VERSION = "3.6"
-SCORING_VERSION = "2026-08-22-two-source-independence-v11"
-ACTION_MATRIX_VERSION = "2026-08-22-ai-first-two-baseline-matrix-v12"
+SCHEMA_VERSION = "3.7"
+SCORING_VERSION = "2026-08-23-two-source-independence-v12"
+ACTION_MATRIX_VERSION = "2026-08-23-authoritative-matrix-v13"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
+MATERIALITY_AND_ACCUMULATION_VERSION = "2026-08-23-single-item-plus-reliable-group-v1"
+FORCED_CHECKS_VERSION = "2026-08-23-forced-checks-v1"
 
 
 def _combined_sha256(paths: tuple[Path, ...]) -> str:
@@ -28,6 +30,8 @@ def current_versions(project_root: Path) -> dict[str, str]:
         "action_matrix": ACTION_MATRIX_VERSION,
         "account_mapping": ACCOUNT_MAPPING_VERSION,
         "company_notes": COMPANY_NOTES_VERSION,
+        "materiality_and_accumulation": MATERIALITY_AND_ACCUMULATION_VERSION,
+        "forced_checks": FORCED_CHECKS_VERSION,
         "rule_pack": _combined_sha256(
             (
                 references / "一般企业正表项目.json",

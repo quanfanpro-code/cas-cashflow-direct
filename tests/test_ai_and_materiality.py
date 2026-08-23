@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -65,13 +66,28 @@ def test_ai_batch_size_outside_supported_range_is_rejected() -> None:
         chunk_ai_tasks((_task(1),), size=26)
 
 
-def test_ai_task_jsonl_is_bom_encoded_and_complete() -> None:
+def test_ordinary_ai_task_jsonl_is_bom_encoded_and_exposes_only_allowed_input() -> None:
     tasks = tuple(_task(index) for index in range(3))
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "AI任务.jsonl"
         write_ai_tasks_jsonl(path, tasks)
         assert path.read_bytes().startswith(bytes.fromhex("EFBBBF"))
-        assert len(path.read_text(encoding="utf-8-sig").splitlines()) == 3
+        rows = tuple(
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8-sig").splitlines()
+        )
+        assert len(rows) == 3
+        forbidden_fields = {
+            "original_item",
+            "system_item_id",
+            "rule_evidence",
+            "candidate_item_ids",
+            "summary_candidate_item_ids",
+            "account_path_candidate_item_ids",
+        }
+        assert all(not (forbidden_fields & set(row)) for row in rows)
+        assert all("摘要原文" in row["context"] for row in rows)
+        assert all("完整对方科目路径" in row["context"] for row in rows)
 
 
 def test_sensitive_numbers_are_redacted_before_ai_request() -> None:

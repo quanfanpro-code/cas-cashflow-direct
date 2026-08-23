@@ -193,19 +193,8 @@ def build_ai_task(
     context = redact_text(
         f"摘要原文：{component.summary}；"
         f"完整对方科目路径：{'、'.join(component.counterpart_accounts)}；"
-        f"{direction_context}候选项目：{'、'.join(candidates)}"
-    )
-    relevant = []
-    for note in company_notes:
-        if not company_note_applies(
-            note, component.summary, component.counterpart_accounts
-        ):
-            continue
-        relevant.append(
-            f"{note.get('note_id', '')}：{note.get('内容', '')}"
-        )
-    if relevant:
-        context += "；适用公司规则：" + "；".join(relevant)
+        f"{direction_context}"
+    ).rstrip("；")
     return AITask(
         task_id=stable_id("AI", component.component_id, decision.system_item_id),
         component_id=component.component_id,
@@ -1384,4 +1373,14 @@ def write_ai_tasks_jsonl(path: Path, tasks: Sequence[AITask]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8-sig", newline="\n") as output:
         for task in tasks:
-            output.write(json.dumps(asdict(task), ensure_ascii=False, separators=(",", ":")) + "\n")
+            payload = asdict(task)
+            for field in (
+                "original_item",
+                "system_item_id",
+                "rule_evidence",
+                "candidate_item_ids",
+                "summary_candidate_item_ids",
+                "account_path_candidate_item_ids",
+            ):
+                payload.pop(field, None)
+            output.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")

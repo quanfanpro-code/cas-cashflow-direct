@@ -94,6 +94,12 @@ class EvidenceAssessment:
     conflict_item_ids: tuple[str, ...] = ()
     candidate_item_ids: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if self.score in {70, 90} and not (
+            self.independent_source_count == 2 and self.sources_independent
+        ):
+            raise ValueError("70分或90分必须来自两个独立来源")
+
 
 @dataclass(frozen=True, slots=True)
 class DecisionRoute:
@@ -145,13 +151,13 @@ _OTHER_ACTIONS.update(
             DecisionAction.HUMAN_DECISION,
         ),
         70: (
-            DecisionAction.AI_REVIEW,
+            DecisionAction.AUTOMATIC_FILL,
             DecisionAction.AI_REVIEW,
             DecisionAction.AI_REVIEW,
             DecisionAction.HUMAN_DECISION,
         ),
         90: (
-            DecisionAction.AI_REVIEW,
+            DecisionAction.AUTOMATIC_FILL,
             DecisionAction.AI_REVIEW,
             DecisionAction.AI_REVIEW,
             DecisionAction.AI_REVIEW,
@@ -172,6 +178,12 @@ _VALID_ORIGINAL_CHANGE_ACTIONS = {
     )
     for score in {0, 10, 20, 25, 35, 45, 50, 55}
 }
+_VALID_ORIGINAL_CHANGE_ACTIONS[55] = (
+    DecisionAction.AUTOMATIC_KEEP,
+    DecisionAction.AUTOMATIC_KEEP,
+    DecisionAction.AI_REVIEW,
+    DecisionAction.HUMAN_DECISION,
+)
 _VALID_ORIGINAL_CHANGE_ACTIONS.update(
     {
         score: (
@@ -218,7 +230,11 @@ def _are_independent(
 ) -> bool:
     summary_facts = _specific_facts(summary)
     path_facts = _specific_facts(account_path)
-    return bool(summary_facts - path_facts)
+    return bool(
+        summary_facts
+        and path_facts
+        and ((summary_facts - path_facts) or (path_facts - summary_facts))
+    )
 
 
 def combine_source_assessments(
@@ -303,14 +319,6 @@ def materiality_level(amount_cent: int, thresholds) -> MaterialityLevel:
     return MaterialityLevel.M0
 
 
-def effective_materiality(
-    single_amount_cent: int,
-    same_class_total_cent: int,
-    thresholds,
-) -> MaterialityLevel:
-    return materiality_level(single_amount_cent, thresholds)
-
-
 def _allowed_operations(score: int) -> frozenset[DecisionOperation]:
     if score in {45, 50, 55}:
         return frozenset({DecisionOperation.KEEP})
@@ -361,10 +369,16 @@ def route_normal_decision(
             else "blank_55_single"
         )
         required_score = 55
-    elif score == 70:
+    elif score == 70 and action in {
+        DecisionAction.AI_REVIEW,
+        DecisionAction.DOUBLE_AI_REVIEW,
+    }:
         review_policy = "blank_70_single"
         required_score = 70
-    elif score == 90:
+    elif score == 90 and action in {
+        DecisionAction.AI_REVIEW,
+        DecisionAction.DOUBLE_AI_REVIEW,
+    }:
         review_policy = "blank_90_single"
         required_score = 90
     allowed_operations = _allowed_operations(score)

@@ -53,7 +53,7 @@ def test_reliable_same_class_cumulative_amount_never_promotes_each_item() -> Non
 
     assert {item.single_level.value for item in results} == {"M0"}
     assert {item.same_class_total_cent for item in results} == {120}
-    assert {item.effective_level.value for item in results} == {"M0"}
+    assert {item.single_level.value for item in results} == {"M0"}
     assert {item.cumulative_level.value for item in results} == {"M1"}
 
 
@@ -67,7 +67,7 @@ def test_inflows_and_outflows_are_never_netted_or_grouped_together() -> None:
     results = module.assess_materiality_records(records, _thresholds())
 
     assert {item.same_class_total_cent for item in results} == {700}
-    assert {item.effective_level.value for item in results} == {"M1"}
+    assert {item.single_level.value for item in results} == {"M1"}
 
 
 def test_pending_candidate_uses_one_conservative_pending_group() -> None:
@@ -81,7 +81,7 @@ def test_pending_candidate_uses_one_conservative_pending_group() -> None:
 
     assert {item.same_class_total_cent for item in results} == {1_200}
     assert {item.cumulative_level.value for item in results} == {"M2"}
-    assert {item.effective_level.value for item in results} == {"M1"}
+    assert {item.single_level.value for item in results} == {"M1"}
     assert {item.grouping_status for item in results} == {"potential"}
     assert all(item.group_key[1] == "待判断" for item in results)
 
@@ -103,7 +103,7 @@ def test_potential_group_only_warns_and_never_promotes_materiality() -> None:
 
     assert {item.single_level.value for item in results} == {"M2"}
     assert {item.cumulative_level.value for item in results} == {"M3"}
-    assert {item.effective_level.value for item in results} == {"M2"}
+    assert {item.single_level.value for item in results} == {"M2"}
     assert {item.grouping_status for item in results} == {"potential"}
     assert {item.grouping_reason for item in results} == {"用途缺失"}
 
@@ -120,19 +120,19 @@ def test_different_candidates_are_not_combined() -> None:
     assert {item.same_class_total_cent for item in results} == {600}
 
 
-def test_semantic_wording_does_not_split_same_candidate_account_and_purpose() -> None:
+def test_same_business_object_and_purpose_are_combined() -> None:
     module = _materiality()
     records = (
         _record(
             "A",
             -600,
-            business_object="购买商品形成的结算",
+            business_object="商品采购",
             purpose="应付商品款",
         ),
         _record(
             "B",
             -600,
-            business_object="商品或外部劳务支出",
+            business_object="商品采购",
             purpose="应付商品款",
         ),
     )

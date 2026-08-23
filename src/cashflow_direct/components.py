@@ -141,15 +141,6 @@ def find_cash_row_cleanup_requests(
         )
         if has_included_cash or has_named_included_cash:
             continue
-        has_confirmed_flow_row = any(
-            _keyword_direction(entry.original_flow_item) is not None
-            and account_key_for_entry(entry) not in scope.excluded_keys
-            for entry in voucher_entries
-        )
-        if has_confirmed_flow_row:
-            # 原现流项目是输入方已经标识的现金分录；只要该账户未被现金范围明确排除，
-            # 就可直接保留，不得反过来要求用户再证明一次它是不是现金行。
-            continue
         has_confirmed_excluded_cash = any(
             entry.account_name
             and account_key_for_entry(entry) in scope.excluded_keys
@@ -314,29 +305,21 @@ def _keyword_direction(item: str) -> int | None:
 
 def flow_direction_source(entry: NormalizedEntry) -> str:
     """该行现金方向的判定依据（写入留痕）。"""
-    if entry.flow_amount_cent and entry.original_flow_item:
-        direction = _keyword_direction(entry.original_flow_item)
-        if direction == -1:
-            return "现流项目名(流出)"
-        if direction == 1:
-            return "现流项目名(流入)"
     if entry.flow_amount_cent:
         return "借贷列+流量金额"
     return "借贷差额"
 
 
 def _signed_flow(entry: NormalizedEntry) -> int:
-    if entry.flow_amount_cent and entry.original_flow_item:
-        direction = _keyword_direction(entry.original_flow_item)
-        if direction is not None:
-            return direction * entry.flow_amount_cent
     if entry.flow_amount_cent:
-        if entry.debit_cent and not entry.credit_cent:
-            side_delta = entry.flow_amount_cent
-        elif entry.credit_cent and not entry.debit_cent:
-            side_delta = -entry.flow_amount_cent
-        else:
-            side_delta = entry.flow_amount_cent
+        account_delta = entry.debit_cent - entry.credit_cent
+        side_delta = (
+            abs(entry.flow_amount_cent)
+            if account_delta > 0
+            else -abs(entry.flow_amount_cent)
+            if account_delta < 0
+            else entry.flow_amount_cent
+        )
     else:
         side_delta = entry.debit_cent - entry.credit_cent
     return -side_delta if entry.retained_side == "counterpart" else side_delta
@@ -577,10 +560,8 @@ def _voucher_components(
 ) -> tuple[list[CashflowComponent], list[InternalTransferLeg]]:
     noncash = [entry for entry in entries if entry not in cash_entries]
     imbalance = sum(entry.debit_cent - entry.credit_cent for entry in entries)
-    cash_delta = (
-        sum(entry.debit_cent - entry.credit_cent for entry in cash_entries)
-        if len(entries) > 1 and imbalance == 0
-        else sum(_signed_flow(entry) for entry in cash_entries)
+    cash_delta = sum(
+        entry.debit_cent - entry.credit_cent for entry in cash_entries
     )
     base_anomalies = tuple(
         dict.fromkeys(
@@ -591,6 +572,66 @@ def _voucher_components(
     counterpart_accounts = tuple(dict.fromkeys(entry.account_name for entry in noncash if entry.account_name))
     labeled = [entry for entry in noncash if entry.original_flow_item]
     positions = {entry.entry_id: position for position, entry in enumerate(entries)}
+
+    if len(cash_entries) > 1 and all(entry.summary for entry in cash_entries):
+        matched_groups = tuple(
+            (
+                cash_entry,
+                tuple(
+                    entry
+                    for entry in noncash
+                    if entry.summary == cash_entry.summary
+                ),
+            )
+            for cash_entry in cash_entries
+        )
+        matched_ids = {
+            entry.entry_id
+            for _, matched in matched_groups
+            for entry in matched
+        }
+        if (
+            matched_ids == {entry.entry_id for entry in noncash}
+            and all(matched for _, matched in matched_groups)
+            and all(
+                sum(_signed_flow(entry) for entry in matched)
+                == cash_entry.debit_cent - cash_entry.credit_cent
+                for cash_entry, matched in matched_groups
+            )
+        ):
+            components = [
+                _component(
+                    voucher_key,
+                    sequence,
+                    cash_entry.debit_cent - cash_entry.credit_cent,
+                    cash_entry.summary,
+                    tuple(
+                        dict.fromkeys(
+                            entry.account_name
+                            for entry in matched
+                            if entry.account_name
+                        )
+                    ),
+                    next(
+                        (
+                            entry.original_flow_item
+                            for entry in matched
+                            if entry.original_flow_item
+                        ),
+                        "",
+                    ),
+                    (cash_entry.entry_id, *(entry.entry_id for entry in matched)),
+                    base_anomalies,
+                    "strong",
+                )
+                for sequence, (cash_entry, matched) in enumerate(matched_groups, 1)
+            ]
+            _, excluded = _match_internal_transfers(
+                voucher_key,
+                cash_entries,
+                tuple(item.cash_delta_cent for item in components),
+            )
+            return components, excluded
 
     def belongs_to_excluded_cash(entry: NormalizedEntry) -> bool:
         if _looks_like_cash(entry.account_name):
@@ -607,6 +648,33 @@ def _voucher_components(
 
     labeled = [entry for entry in labeled if not belongs_to_excluded_cash(entry)]
     labeled_flow_rows = [entry for entry in labeled if entry.flow_amount_cent]
+    cash_directions = {
+        1 if _signed_flow(entry) > 0 else -1
+        for entry in cash_entries
+        if _signed_flow(entry)
+    }
+    if len(cash_directions) > 1:
+        supported_ids: set[str] = set()
+        for direction in cash_directions:
+            cash_direction_total = sum(
+                _signed_flow(entry)
+                for entry in cash_entries
+                if _signed_flow(entry) * direction > 0
+            )
+            same_direction_labels = tuple(
+                entry
+                for entry in labeled_flow_rows
+                if _signed_flow(entry) * direction > 0
+            )
+            supported_ids.update(
+                entry.entry_id
+                for entry in _unique_minimum_amount_rows(
+                    same_direction_labels, cash_direction_total
+                )
+            )
+        labeled_flow_rows = [
+            entry for entry in labeled_flow_rows if entry.entry_id in supported_ids
+        ]
     if labeled_flow_rows:
         components = [
             _component(
@@ -1003,15 +1071,7 @@ def build_cashflow_components(
             )
             if (
                 entry.retained_side == "counterpart"
-                and (
-                    named_cash_counterpart
-                    or (
-                        single_sided
-                        and not has_excluded_cash_account
-                        and bool(entry.original_flow_item.strip())
-                        and bool(entry.flow_amount_cent)
-                    )
-                )
+                and named_cash_counterpart
                 and (entry.flow_amount_cent or entry.debit_cent or entry.credit_cent)
             ):
                 one_sided.append(_build_one_sided(entry))

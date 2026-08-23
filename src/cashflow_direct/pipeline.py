@@ -1258,6 +1258,16 @@ def _summary_dictionary_from_state(
                 candidate_item_ids=tuple(
                     str(value) for value in item.get("candidate_item_ids", ())
                 ),
+                negation=tuple(str(value) for value in item.get("negation", ())),
+                uncertainty=tuple(
+                    str(value) for value in item.get("uncertainty", ())
+                ),
+                conditionality=tuple(
+                    str(value) for value in item.get("conditionality", ())
+                ),
+                source_spans=tuple(
+                    str(value) for value in item.get("source_spans", ())
+                ),
             )
             for item in valid
         )
@@ -1490,7 +1500,17 @@ def confirm_reversal_patterns(
                 "确认人": "用户通过Agent确认",
                 "确认时间": datetime.now(timezone.utc).isoformat(),
                 "影响业务组成": [component_id],
+                "影响业务组成数量": 1,
                 "影响金额分": int(request["现金变化金额分"]),
+                "适用公司": str(state.get("company_name", "本次运行主体")),
+                "适用期间": str(state.get("period", "本次运行期间")),
+                "后续期间影响": (
+                    "后续期间持续适用"
+                    if choice == "长期采用"
+                    else "仅影响本次运行"
+                    if choice == "仅本次采用"
+                    else "本次拒绝采用，后续不自动沿用"
+                ),
                 "状态": status,
                 "涉及科目或词": list(request["完整对方科目路径"]),
                 "适用完整路径": list(request["完整对方科目路径"]),
@@ -2026,6 +2046,24 @@ def import_summary_results(run_dir: Path, result_path: Path) -> dict[str, object
             basis = str(record.get("basis", ""))
             standard_basis = str(record.get("standard_basis", ""))
             facts = tuple(str(value) for value in record.get("classification_facts", ()))
+            negation = tuple(str(value) for value in record.get("negation", ()))
+            uncertainty = tuple(str(value) for value in record.get("uncertainty", ()))
+            conditionality = tuple(
+                str(value) for value in record.get("conditionality", ())
+            )
+            source_spans = tuple(
+                str(value) for value in record.get("source_spans", ())
+            )
+            facts = tuple(
+                dict.fromkeys(
+                    (
+                        *facts,
+                        *(f"negation:{value}" for value in negation),
+                        *(f"uncertainty:{value}" for value in uncertainty),
+                        *(f"conditionality:{value}" for value in conditionality),
+                    )
+                )
+            )
             if (
                 summary != task["summary"]
                 or any(value not in leaf_ids for value in candidate_item_ids)
@@ -2036,6 +2074,12 @@ def import_summary_results(run_dir: Path, result_path: Path) -> dict[str, object
                 or ((item_id or candidate_item_ids) and not facts)
                 or (len(candidate_item_ids) > 1 and confidence != "low")
                 or (item_id and candidate_item_ids)
+                or (
+                    (negation or uncertainty or conditionality)
+                    and not source_spans
+                )
+                or any(span not in summary for span in source_spans)
+                or ((uncertainty or conditionality) and confidence != "low")
                 or not _standard_basis_matches_items(
                     standard_basis,
                     (item_id, *candidate_item_ids),
@@ -2056,6 +2100,10 @@ def import_summary_results(run_dir: Path, result_path: Path) -> dict[str, object
                     "basis": basis,
                     "standard_basis": standard_basis.strip(),
                     "classification_facts": list(facts),
+                    "negation": list(negation),
+                    "uncertainty": list(uncertainty),
+                    "conditionality": list(conditionality),
+                    "source_spans": list(source_spans),
                 }
             )
     missing = (set(expected) - seen) | invalid
@@ -2110,6 +2158,7 @@ def import_component_structure_ai_results(
         payloads,
         validation.invalid_ids,
         validation.duplicate_ids,
+        validation.missing_ids,
         state_prefix="component_structure_ai",
     )
     pending = tuple(
@@ -2312,6 +2361,31 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     if not all(balances.get(key) is not None for key in ("opening_cent", "closing_cent", "fx_cent")):
         raise RuntimeError("请先补充期初、期末现金余额和汇率影响后再分类")
     scope = _scope_from_dict(state["cash_scope"])
+    entries_by_file: dict[str, list[NormalizedEntry]] = {}
+    for entry in entries:
+        entries_by_file.setdefault(entry.source.file_id, []).append(entry)
+    profiles = {
+        file_id: infer_evidence_profile(file_entries)
+        for file_id, file_entries in entries_by_file.items()
+    }
+    state["standardized_evidence_profiles"] = {
+        file_id: _profile_to_dict(profile) for file_id, profile in profiles.items()
+    }
+    single_sided_file_ids = frozenset(
+        file_id
+        for file_id, profile in profiles.items()
+        if profile.has_flow_amount and profile.has_flow_item
+    )
+    rough = compute_rough_reconciliation(
+        entries,
+        profiles,
+        int(balances["opening_cent"]),
+        int(balances["closing_cent"]),
+        int(balances["fx_cent"]),
+    )
+    state["rough_reconciliation"] = asdict(rough)
+    state["single_sided_file_ids"] = sorted(single_sided_file_ids)
+    _write_trace_jsonl(run_dir, "粗勾稽留痕.jsonl", (asdict(rough),))
     cleanup_requests = find_cash_row_cleanup_requests(entries, scope)
     if cleanup_requests:
         entry_by_id = {entry.entry_id: entry for entry in entries}
@@ -2361,31 +2435,6 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             0,
             "待用户清洗现金分录",
         )
-    entries_by_file: dict[str, list[NormalizedEntry]] = {}
-    for entry in entries:
-        entries_by_file.setdefault(entry.source.file_id, []).append(entry)
-    profiles = {
-        file_id: infer_evidence_profile(file_entries)
-        for file_id, file_entries in entries_by_file.items()
-    }
-    state["standardized_evidence_profiles"] = {
-        file_id: _profile_to_dict(profile) for file_id, profile in profiles.items()
-    }
-    single_sided_file_ids = frozenset(
-        file_id
-        for file_id, profile in profiles.items()
-        if profile.has_flow_amount and profile.has_flow_item
-    )
-    rough = compute_rough_reconciliation(
-        entries,
-        profiles,
-        int(balances["opening_cent"]),
-        int(balances["closing_cent"]),
-        int(balances["fx_cent"]),
-    )
-    state["rough_reconciliation"] = asdict(rough)
-    state["single_sided_file_ids"] = sorted(single_sided_file_ids)
-    _write_trace_jsonl(run_dir, "粗勾稽留痕.jsonl", (asdict(rough),))
     _save_state(run_dir, state)
     build = build_cashflow_components(
         entries,
@@ -2534,8 +2583,13 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
                     "原现金流项目、金额或系统候选。若摘要同时支持多个候选，必须填写"
                     "candidate_item_ids并评为low，不得强行挑选一个item_id。凡填写任何"
                     "候选项目，必须另填standard_basis，逐项引用与该项目相符的现金流量表"
-                    "准则条款或应用指南。"
+                    "准则条款或应用指南。另须分别填写negation、uncertainty、"
+                    "conditionality和source_spans；不确定或条件性表述只能评为low。"
                 ),
+                "negation": [],
+                "uncertainty": [],
+                "conditionality": [],
+                "source_spans": [],
             }
             for summary in sorted(
                 {component.summary.strip() for component in components if component.summary.strip()}
@@ -2875,6 +2929,7 @@ def _register_ai_technical_attempts(
     payloads: Sequence[Mapping[str, object]],
     invalid_ids: Sequence[str],
     duplicate_ids: Sequence[str],
+    missing_ids: Sequence[str] = (),
     *,
     state_prefix: str = "ai",
 ) -> set[str]:
@@ -2892,7 +2947,7 @@ def _register_ai_technical_attempts(
     submitted = {
         str(payload.get("task_id", "")) for payload in payloads if payload.get("task_id")
     }
-    failed = submitted.intersection({*invalid_ids, *duplicate_ids})
+    failed = submitted.intersection({*invalid_ids, *duplicate_ids}) | set(missing_ids)
     failure_log = list(state.get(f"{state_prefix}_technical_failure_log", ()))
     for task_id in sorted(failed):
         if task_id in terminal:
@@ -2948,6 +3003,7 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
             payloads,
             validation.invalid_ids,
             validation.duplicate_ids,
+            validation.missing_ids,
         )
         pending_ids = tuple(
             task_id
@@ -3346,6 +3402,35 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         else decision
         for decision in decisions
     )
+    state["decisions"] = [asdict(item) for item in decisions]
+    with _store(run_dir).stage("finalize_decision_routes") as connection:
+        connection.executemany(
+            "INSERT OR REPLACE INTO classification_decision(record_id, payload_json) VALUES (?, ?)",
+            (
+                (item.component_id, json.dumps(asdict(item), ensure_ascii=False))
+                for item in decisions
+            ),
+        )
+        connection.executemany(
+            "INSERT OR REPLACE INTO decision_route(record_id, payload_json) VALUES (?, ?)",
+            (
+                (
+                    item.component_id,
+                    json.dumps(
+                        {
+                            "component_id": item.component_id,
+                            "action": item.decision_action,
+                            "materiality_level": item.materiality_level,
+                            "resolved": item.resolved,
+                            "decision_source": item.decision_source,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                for item in decisions
+            ),
+        )
+    _save_state(run_dir, state)
     unfinished_ai = tuple(
         decision.component_id
         for decision in decisions
@@ -3466,7 +3551,9 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 "inflow" if component_by_id[decision.component_id].cash_delta_cent > 0 else "outflow"
             ),
             original_item=component_by_id[decision.component_id].original_item_text,
-            system_item_id=decision.system_item_id,
+            system_item_id=(
+                decision.system_item_id or decision.original_standard_item_id
+            ),
             review_status="统一动作表要求人工决定",
             counterpart_group=_review_text_pattern(
                 "、".join(component_by_id[decision.component_id].counterpart_accounts)
@@ -3478,10 +3565,15 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 dict.fromkeys(
                     item
                     for item in decision.candidate_item_ids
-                    if item and item != decision.system_item_id
+                    if item
+                    and item
+                    != (decision.system_item_id or decision.original_standard_item_id)
                 )
             ) or tuple(
-                item_id for item_id in leaf_item_ids if item_id != decision.system_item_id
+                item_id
+                for item_id in leaf_item_ids
+                if item_id
+                != (decision.system_item_id or decision.original_standard_item_id)
             ),
             reason=decision.reason,
             system_statement_amount_cent=decision_statement_amount(
@@ -3525,7 +3617,9 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                         "inflow" if component.cash_delta_cent > 0 else "outflow"
                     ),
                     original_item=component.original_item_text,
-                    system_item_id=decision.system_item_id,
+                    system_item_id=(
+                        decision.system_item_id or decision.original_standard_item_id
+                    ),
                     review_status=(
                         "同一业务组仍待人工决定："
                         + str(payload["group_id"])
@@ -3537,7 +3631,8 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     alternative_item_ids=tuple(
                         item_id
                         for item_id in candidate_by_component.get(component_id, ())
-                        if item_id != decision.system_item_id
+                        if item_id
+                        != (decision.system_item_id or decision.original_standard_item_id)
                     ),
                     reason=str(payload["reason"]),
                     system_statement_amount_cent=decision_statement_amount(
@@ -3606,6 +3701,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         _materiality_from_state(state).performance_cent,
         all_leaf_item_ids=leaf_item_ids,
     )
+    state["review_batches"] = [asdict(item) for item in review_batches]
     consistency_group_by_component: dict[str, Mapping[str, object]] = {}
     for group in state.get("consistency_groups", ()):
         for component_id in group.get("component_ids", ()):
@@ -3748,12 +3844,33 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         for error in readiness.errors
         if not error.startswith("仍待人工决定：")
     )
+    isolated_invalid_input = any(
+        decision.decision_action == "isolate_invalid_input"
+        for decision in decisions
+    )
+    normalization_errors = tuple(
+        item
+        for item in state.get("normalization_issues", ())
+        if item.get("kind") == "错误"
+    )
+    isolated_input_errors = bool(
+        isolated_invalid_input
+        and normalization_errors
+        and all(
+            "摘要为空" in str(item.get("message", ""))
+            or "对方科目" in str(item.get("message", ""))
+            for item in normalization_errors
+        )
+    )
     if blocking_readiness_errors:
         status = "诊断材料，不可作为最终表"
     elif statement_unconfirmed:
         status = "草稿：存在未核对的疑似正表"
-    elif any(item.get("kind") == "错误" for item in state.get("normalization_issues", ())):
-        status = "草稿：输入存在未处理错误"
+    elif (
+        normalization_errors
+        and not isolated_input_errors
+    ):
+        status = "诊断材料，不可作为最终表"
     elif (
         review_batches
         or any(group.blocks_manual_completion for group in duplicate_groups)

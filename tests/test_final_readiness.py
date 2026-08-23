@@ -88,6 +88,16 @@ def test_final_readiness_requires_every_business_to_be_decided_or_excluded() -> 
     assert any("仍待人工决定" in error for error in checked.errors)
 
 
+def test_excluded_business_requires_a_reason() -> None:
+    checked = validate_classification(
+        (_component(),),
+        (replace(_decision(), excluded=True, reason=""),),
+    )
+
+    assert checked.valid is False
+    assert any("排除原因" in error for error in checked.errors)
+
+
 def test_final_readiness_rejects_illegal_input_and_allocation_mismatch() -> None:
     component = _component(anomalies=("summary_empty",))
 
