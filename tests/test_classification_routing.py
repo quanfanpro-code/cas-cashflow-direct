@@ -136,10 +136,10 @@ def test_customer_threshold_55_allows_m0_score_55_change() -> None:
     ("score", "summary_quality", "path_quality", "expected_action"),
     (
         (45, 45, 0, "automatic_change"),
-        (50, 25, 25, "automatic_keep"),
+        (50, 25, 25, "automatic_change"),
     ),
 )
-def test_classification_45_single_strong_uses_source_qualities(
+def test_classification_45_threshold_accepts_every_score_at_or_above_45(
     score: int,
     summary_quality: int,
     path_quality: int,

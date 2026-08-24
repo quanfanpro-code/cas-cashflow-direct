@@ -219,11 +219,6 @@ def change_is_authorized(
     account_path_quality: int = 0,
 ) -> bool:
     threshold = validate_automatic_change_threshold(threshold)
-    if threshold == 45:
-        return score in {45, 55, 70, 90} and 45 in {
-            summary_quality,
-            account_path_quality,
-        }
     return score >= threshold
 
 

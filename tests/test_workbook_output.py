@@ -139,15 +139,15 @@ class WorkbookOutputTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_status_sheet_explains_45_as_single_strong(self) -> None:
+    def test_status_sheet_displays_45_as_selected_threshold(self) -> None:
         model = replace(workbook_model(0, 0), automatic_change_threshold=45)
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "单强档说明.xlsx"
+            path = Path(tmp) / "45分档说明.xlsx"
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
                 self.assertEqual(
-                    "45分（单强：至少一个45分强来源；70为默认推荐）",
+                    "45分（客户选择；70为默认推荐）",
                     workbook["使用说明与状态"]["B6"].value,
                 )
             finally:

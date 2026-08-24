@@ -692,14 +692,14 @@ def test_automatic_change_threshold_rejects_other_values(threshold: int) -> None
     ("score", "summary_quality", "path_quality", "expected"),
     (
         (45, 45, 0, True),
+        (50, 25, 25, True),
         (55, 45, 10, True),
         (70, 45, 25, True),
         (90, 45, 45, True),
-        (50, 25, 25, False),
-        (45, 25, 10, False),
+        (35, 25, 10, False),
     ),
 )
-def test_45_single_strong_authorization_requires_a_strong_source(
+def test_45_threshold_authorizes_every_valid_score_at_or_above_45(
     score: int,
     summary_quality: int,
     path_quality: int,
@@ -715,7 +715,7 @@ def test_45_single_strong_authorization_requires_a_strong_source(
     ) is expected
 
 
-def test_45_single_strong_route_does_not_authorize_pure_50() -> None:
+def test_45_threshold_route_authorizes_pure_50() -> None:
     policy = _policy()
 
     pure_50 = policy.route_normal_decision(
@@ -726,7 +726,7 @@ def test_45_single_strong_route_does_not_authorize_pure_50() -> None:
         summary_quality=25,
         account_path_quality=25,
     )
-    single_strong = policy.route_normal_decision(
+    score_45 = policy.route_normal_decision(
         45,
         policy.OriginalItemState.CONFLICTS,
         policy.MaterialityLevel.M0,
@@ -735,8 +735,8 @@ def test_45_single_strong_route_does_not_authorize_pure_50() -> None:
         account_path_quality=0,
     )
 
-    assert pure_50.action.value == "automatic_keep"
-    assert single_strong.action.value == "automatic_change"
+    assert pure_50.action.value == "automatic_change"
+    assert score_45.action.value == "automatic_change"
 
 
 @pytest.mark.parametrize(

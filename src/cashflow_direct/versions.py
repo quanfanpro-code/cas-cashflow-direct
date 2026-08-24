@@ -6,7 +6,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = "4.3"
 SCORING_VERSION = "2026-08-24-vat-companion-single-strong-v16"
-ACTION_MATRIX_VERSION = "2026-08-24-single-strong-v16"
+ACTION_MATRIX_VERSION = "2026-08-24-minimum-change-threshold-v17"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
 SUMMARY_SEMANTICS_VERSION = "2026-08-24-service-tax-purpose-v4"

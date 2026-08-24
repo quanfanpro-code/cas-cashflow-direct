@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         choices=AUTOMATIC_CHANGE_SCORE_OPTIONS,
         default=DEFAULT_AUTOMATIC_CHANGE_SCORE,
-        help="系统自动修改客户原项目的授权档位；可选45（单强）、50、55、70、90，默认并推荐70",
+        help="系统自动修改客户原项目的最低证据分；可选45、50、55、70、90，默认并推荐70",
     )
     preflight.add_argument("--paths", nargs="+", help="直接给出输入文件路径（可多个）；给定后不弹文件选择窗口")
     for name in (

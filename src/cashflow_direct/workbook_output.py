@@ -399,11 +399,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         status.write("A6", "本次自动修改最低证据分", formats["header"])
         status.write(
             "B6",
-            (
-                "45分（单强：至少一个45分强来源；70为默认推荐）"
-                if model.automatic_change_threshold == 45
-                else f"{model.automatic_change_threshold}分（客户选择；70为默认推荐）"
-            ),
+            f"{model.automatic_change_threshold}分（客户选择；70为默认推荐）",
             formats["text"],
         )
         for index, name in enumerate(SHEET_NAMES[1:], 7):

@@ -208,7 +208,7 @@ def test_single_ai_45_threshold_accepts_one_strong_source() -> None:
     assert resolved.system_item_id == "CFO-01"
 
 
-def test_single_ai_45_threshold_rejects_pure_50_without_strong_source() -> None:
+def test_single_ai_45_threshold_accepts_pure_50() -> None:
     decision = _decision(
         original_state="conflicts",
         materiality="M1",
@@ -232,8 +232,8 @@ def test_single_ai_45_threshold_rejects_pure_50_without_strong_source() -> None:
     )[0]
 
     assert resolved.evidence_score == 50
-    assert resolved.decision_action == "automatic_keep"
-    assert resolved.system_item_id == "CFO-03"
+    assert resolved.decision_action == "automatic_change"
+    assert resolved.system_item_id == "CFO-01"
 
 
 def test_single_ai_below_change_threshold_restores_valid_original() -> None:
