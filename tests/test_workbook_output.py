@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 
 from cashflow_direct.workbook_output import (
     REVIEW_HEADERS,
@@ -325,6 +325,151 @@ class WorkbookOutputTests(unittest.TestCase):
                         2, review_headers.index("业务组成编号(技术)") + 1
                     ).value,
                 )
+            finally:
+                workbook.close()
+
+    def test_trace_final_decision_is_editable_for_every_row_with_all_leaf_items(self) -> None:
+        base = workbook_model(1, 0)
+        review = replace(base.review_batches[0], baseline_item_code="CFO-07")
+        model = replace(
+            base,
+            review_batches=(review,),
+            trace_rows=(
+                {
+                    "业务组成编号(技术)": "DONE-1",
+                    "本行分配现金变化": 100.0,
+                    "最终决定项目": "销售商品、提供劳务收到的现金",
+                },
+                {
+                    "业务组成编号(技术)": "RC-1",
+                    "本行分配现金变化": -100.0,
+                    "最终决定项目": "等待人工复核",
+                },
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "全量留痕逐行人工改选.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                trace = workbook["全量分类留痕"]
+                headers = [cell.value for cell in trace[1]]
+                final_column = headers.index("最终决定项目") + 1
+                final_range = (
+                    f"{get_column_letter(final_column)}2:"
+                    f"{get_column_letter(final_column)}3"
+                )
+                validation = next(
+                    item
+                    for item in trace.data_validations.dataValidation
+                    if final_range in str(item.sqref)
+                )
+                source = str(validation.formula1).lstrip("=").replace("$", "")
+                min_col, min_row, max_col, max_row = range_boundaries(source)
+                options = (
+                    [
+                        trace.cell(min_row, column).value
+                        for column in range(min_col, max_col + 1)
+                    ]
+                    if min_row == max_row
+                    else [
+                        trace.cell(row, min_col).value
+                        for row in range(min_row, max_row + 1)
+                    ]
+                )
+                expected_options = [
+                    item.name
+                    for item in sorted(
+                        (item for item in model.rules.statement_items if item.is_leaf),
+                        key=lambda item: item.display_order,
+                    )
+                ] + ["明确排除"]
+
+                self.assertEqual(expected_options, options)
+                self.assertIn(validation.errorStyle, (None, "stop"))
+                self.assertEqual("项目无效", validation.errorTitle)
+                self.assertFalse(trace.cell(2, final_column).protection.locked)
+                self.assertFalse(trace.cell(3, final_column).protection.locked)
+                self.assertEqual(
+                    "销售商品、提供劳务收到的现金",
+                    trace.cell(2, final_column).value,
+                )
+                self.assertIn("重要待复核事项", trace.cell(3, final_column).value)
+
+                technical_headers = (
+                    "人工改选基准项目(技术)",
+                    "人工改选基准金额(技术)",
+                    "人工改选目标金额(技术)",
+                    "人工改选生效标志(技术)",
+                )
+                for header in technical_headers:
+                    column = headers.index(header) + 1
+                    self.assertTrue(_column_is_hidden(trace, column))
+                base_column = headers.index("人工改选基准项目(技术)") + 1
+                self.assertEqual(
+                    "销售商品、提供劳务收到的现金",
+                    trace.cell(2, base_column).value,
+                )
+                pending_base_formula = trace.cell(3, base_column).value
+                self.assertIn("重要待复核事项", pending_base_formula)
+                self.assertIn(model.rules.item_by_id["CFO-07"].name, pending_base_formula)
+            finally:
+                workbook.close()
+
+    def test_trace_override_is_added_to_main_manual_adjustment_formula(self) -> None:
+        base = workbook_model(0, 0)
+        existing = ExistingStatementResult(
+            values={},
+            prior_values={},
+            standardized_values={},
+            custom_rows=(),
+            unit_multiplier=1,
+        )
+        model = replace(
+            base,
+            comparison=compare_statement(existing, base.statement),
+            trace_rows=(
+                {
+                    "业务组成编号(技术)": "DONE-1",
+                    "本行分配现金变化": 100.0,
+                    "最终决定项目": "销售商品、提供劳务收到的现金",
+                },
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "全量留痕改选联动正表.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                trace = workbook["全量分类留痕"]
+                trace_headers = [cell.value for cell in trace[1]]
+                main = workbook["现金流量表正表"]
+                main_headers = [cell.value for cell in main[3]]
+                item_name = model.rules.item_by_id["CFO-01"].name
+                item_row = next(
+                    row
+                    for row in range(4, main.max_row + 1)
+                    if main.cell(row, main_headers.index("项目") + 1).value == item_name
+                )
+                formula = main.cell(
+                    item_row, main_headers.index("人工调整") + 1
+                ).value
+
+                self.assertIn("'全量分类留痕'", formula)
+                self.assertIn("-SUMIFS(", formula)
+                for header in (
+                    "人工改选基准项目(技术)",
+                    "人工改选基准金额(技术)",
+                    "人工改选目标金额(技术)",
+                    "人工改选生效标志(技术)",
+                    "最终决定项目",
+                ):
+                    column = get_column_letter(trace_headers.index(header) + 1)
+                    self.assertIn(f"${column}$2:${column}$2", formula)
+
+                comparison = workbook["正表核对报告"]
+                self.assertEqual("='现金流量表正表'!E4", comparison["E2"].value)
+                self.assertEqual("='现金流量表正表'!F4", comparison["F2"].value)
             finally:
                 workbook.close()
 
@@ -666,10 +811,21 @@ class WorkbookOutputTests(unittest.TestCase):
             validation = validate_output_workbook(path, model)
             self.assertTrue(validation.valid, validation.errors)
 
-    def test_manual_formula_references_only_small_adjustment_sheets(self) -> None:
+    def test_manual_formula_references_all_authorized_adjustment_sheets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "底稿.xlsx"
-            build_output_workbook(workbook_model(review_batches=2, duplicate_groups=2), path)
+            base = workbook_model(review_batches=2, duplicate_groups=2)
+            model = replace(
+                base,
+                trace_rows=(
+                    {
+                        "业务组成编号(技术)": "DONE-1",
+                        "本行分配现金变化": 100.0,
+                        "最终决定项目": "销售商品、提供劳务收到的现金",
+                    },
+                ),
+            )
+            build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
                 formulas = [
@@ -680,7 +836,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 ]
                 self.assertTrue(any("重要待复核事项" in formula for formula in formulas))
                 self.assertTrue(any("疑似重复事项" in formula for formula in formulas))
-                self.assertTrue(all("全量分类留痕" not in formula for formula in formulas))
+                self.assertTrue(any("全量分类留痕" in formula for formula in formulas))
                 self.assertTrue(all("原表与自动判定差异" not in formula for formula in formulas))
                 self.assertLess(len(formulas), 300)
                 self.assertTrue(workbook["现金流量表正表"].freeze_panes)

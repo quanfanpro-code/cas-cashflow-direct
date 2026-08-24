@@ -108,6 +108,12 @@ REVIEW_HEADERS = (
 )
 
 USE_SYSTEM_RECOMMENDATION = "采用系统首选项目"
+TRACE_MANUAL_HEADERS = (
+    "人工改选基准项目(技术)",
+    "人工改选基准金额(技术)",
+    "人工改选目标金额(技术)",
+    "人工改选生效标志(技术)",
+)
 
 
 def _display_value(header: object, value: object) -> object:
@@ -175,6 +181,34 @@ def manual_adjustment_formula(
         f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{item_name}")'
         f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{system_item}$2:{system_item}${review_end},"{item_name}",\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{USE_SYSTEM_RECOMMENDATION}")'
         f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_name}")'
+    )
+
+
+def trace_manual_adjustment_terms(
+    item_name: str,
+    trace_last_row: int,
+    trace_headers: Sequence[str],
+) -> str:
+    required = {*TRACE_MANUAL_HEADERS, "最终决定项目"}
+    if not required.issubset(trace_headers):
+        return ""
+
+    def trace_col(header: str) -> str:
+        return f"${xl_col_to_name(trace_headers.index(header))}"
+
+    base_item = trace_col("人工改选基准项目(技术)")
+    base_amount = trace_col("人工改选基准金额(技术)")
+    target_amount = trace_col("人工改选目标金额(技术)")
+    active = trace_col("人工改选生效标志(技术)")
+    final_item = trace_col("最终决定项目")
+    item = item_name.replace('"', '""')
+    return (
+        f'-SUMIFS(\'全量分类留痕\'!{base_amount}$2:{base_amount}${trace_last_row},'
+        f'\'全量分类留痕\'!{base_item}$2:{base_item}${trace_last_row},"{item}",'
+        f'\'全量分类留痕\'!{active}$2:{active}${trace_last_row},1)'
+        f'+SUMIFS(\'全量分类留痕\'!{target_amount}$2:{target_amount}${trace_last_row},'
+        f'\'全量分类留痕\'!{final_item}$2:{final_item}${trace_last_row},"{item}",'
+        f'\'全量分类留痕\'!{active}$2:{active}${trace_last_row},1)'
     )
 
 
@@ -327,6 +361,28 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     item_name_by_id = {
         item.item_id: item.name for item in model.rules.statement_items
     }
+    cleaned_trace_rows = tuple(
+        {key: value for key, value in row.items() if key != "人工决定"}
+        for row in model.trace_rows
+    )
+    trace_supports_manual_choice = any(
+        "最终决定项目" in row for row in cleaned_trace_rows
+    )
+    trace_rows = tuple(
+        {
+            **row,
+            **(
+                {header: "" for header in TRACE_MANUAL_HEADERS}
+                if trace_supports_manual_choice
+                else {}
+            ),
+        }
+        for row in cleaned_trace_rows
+    )
+    trace_headers = tuple(
+        dict.fromkeys(key for row in trace_rows for key in row.keys())
+    )
+    trace_last = max(2, len(trace_rows) + 1)
     try:
         status = sheets["使用说明与状态"]
         status.set_default_row(18)
@@ -850,6 +906,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         review_last,
                         duplicate_last,
                         model.manual_adjustments.get(item.item_id, 0) / 100,
+                    )
+                    + trace_manual_adjustment_terms(
+                        item.name,
+                        trace_last,
+                        trace_headers,
                     ),
                     formats["money"],
                     model.manual_adjustments.get(item.item_id, 0) / 100,
@@ -1029,49 +1090,162 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 model.reconciliation.status,
             )
         trace_sheet = sheets["全量分类留痕"]
-        trace_rows = tuple(
-            {key: value for key, value in row.items() if key != "人工决定"}
-            for row in model.trace_rows
-        )
         _write_dict_rows(trace_sheet, trace_rows, formats, "没有现金流业务组成。")
-        trace_headers = tuple(
-            dict.fromkeys(key for row in trace_rows for key in row.keys())
-        )
-        if model.review_batches and "最终决定项目" in trace_headers:
+        if trace_rows and "最终决定项目" in trace_headers:
             final_column = trace_headers.index("最终决定项目")
+            base_item_column = trace_headers.index("人工改选基准项目(技术)")
+            base_amount_column = trace_headers.index("人工改选基准金额(技术)")
+            target_amount_column = trace_headers.index("人工改选目标金额(技术)")
+            active_column = trace_headers.index("人工改选生效标志(技术)")
+            amount_column = (
+                trace_headers.index("本行分配现金变化")
+                if "本行分配现金变化" in trace_headers
+                else None
+            )
+            helper_name_column = len(trace_headers) + 1
+            helper_name = xl_col_to_name(helper_name_column)
+            options = tuple(
+                sorted(
+                    (item for item in model.rules.statement_items if item.is_leaf),
+                    key=lambda item: item.display_order,
+                )
+            )
+            option_names = {item.name for item in options}
+            for helper_index, item in enumerate(options):
+                helper_column = helper_name_column + helper_index
+                trace_sheet.write(0, helper_column, item.name, formats["text"])
+                trace_sheet.write_number(
+                    1,
+                    helper_column,
+                    1 if item.normal_direction == "inflow" else -1,
+                    formats["text"],
+                )
+            helper_last_column = helper_name_column + len(options)
+            helper_last = xl_col_to_name(helper_last_column)
+            trace_sheet.write(0, helper_last_column, "明确排除", formats["text"])
+            trace_sheet.write_number(1, helper_last_column, 0, formats["text"])
+            option_range = f"${helper_name}$1:${helper_last}$1"
+            lookup_range = f"${helper_name}$1:${helper_last}$2"
+            trace_sheet.data_validation(
+                1,
+                final_column,
+                len(trace_rows),
+                final_column,
+                {
+                    "validate": "list",
+                    "source": option_range,
+                    "error_type": "stop",
+                    "error_title": "项目无效",
+                    "error_message": "请从下拉菜单选择现金流量表项目或明确排除。",
+                    "input_title": "人工最终选择",
+                    "input_message": "默认显示当前决定；需要调整时从下拉菜单改选。",
+                },
+            )
+            trace_sheet.set_column(
+                helper_name_column,
+                helper_last_column,
+                20,
+                None,
+                {"hidden": True},
+            )
             review_choice = _review_col("人工确认项目", absolute=True)
             review_system_item = _review_col("系统项目(技术)", absolute=True)
             review_components = _review_col("业务组成编号(技术)", absolute=True)
             review_end = len(model.review_batches) + 1
+            review_by_component = {
+                component_id: (excel_row, batch)
+                for excel_row, batch in enumerate(model.review_batches, 2)
+                for component_id in batch.component_ids
+            }
             for row_index, row in enumerate(trace_rows, 1):
-                if row.get("最终决定项目") != "等待人工复核":
-                    continue
+                current_decision = str(row.get("最终决定项目") or "")
                 component_id = str(row.get("业务组成编号(技术)") or "")
-                if not component_id:
-                    continue
-                safe_component_id = component_id.replace("~", "~~").replace("*", "~*").replace("?", "~?").replace('"', '""')
-                match_expression = (
-                    f'MATCH("*、{safe_component_id}、*",'
-                    f"'重要待复核事项'!{review_components}$2:{review_components}${review_end},0)"
-                )
-                selected_expression = (
-                    f"INDEX('重要待复核事项'!{review_choice}$2:{review_choice}${review_end},"
-                    f"{match_expression})"
-                )
-                system_expression = (
-                    f"INDEX('重要待复核事项'!{review_system_item}$2:{review_system_item}${review_end},"
-                    f"{match_expression})"
-                )
-                resolved_expression = (
-                    f'IF({selected_expression}="{USE_SYSTEM_RECOMMENDATION}",'
-                    f'{system_expression},{selected_expression})'
+                review_match = review_by_component.get(component_id)
+                if current_decision == "等待人工复核" and review_match is not None:
+                    _, batch = review_match
+                    safe_component_id = component_id.replace("~", "~~").replace("*", "~*").replace("?", "~?").replace('"', '""')
+                    match_expression = (
+                        f'MATCH("*、{safe_component_id}、*",'
+                        f"'重要待复核事项'!{review_components}$2:{review_components}${review_end},0)"
+                    )
+                    selected_expression = (
+                        f"INDEX('重要待复核事项'!{review_choice}$2:{review_choice}${review_end},"
+                        f"{match_expression})"
+                    )
+                    system_expression = (
+                        f"INDEX('重要待复核事项'!{review_system_item}$2:{review_system_item}${review_end},"
+                        f"{match_expression})"
+                    )
+                    resolved_expression = (
+                        f'IF({selected_expression}="{USE_SYSTEM_RECOMMENDATION}",'
+                        f'{system_expression},{selected_expression})'
+                    )
+                    trace_sheet.write_formula(
+                        row_index,
+                        final_column,
+                        f'=IFERROR(IF({selected_expression}="","等待人工复核",{resolved_expression}),"等待人工复核")',
+                        formats["input"],
+                        "等待人工复核",
+                    )
+                    baseline_name = item_name_by_id.get(batch.baseline_item_code, "")
+                    safe_baseline = baseline_name.replace('"', '""')
+                    trace_sheet.write_formula(
+                        row_index,
+                        base_item_column,
+                        f'=IFERROR(IF({selected_expression}="","{safe_baseline}",{resolved_expression}),"{safe_baseline}")',
+                        formats["text"],
+                        baseline_name,
+                    )
+                else:
+                    trace_sheet.write(
+                        row_index,
+                        final_column,
+                        current_decision,
+                        formats["input"],
+                    )
+                    fallback = str(row.get("原项目标准化结果") or "")
+                    baseline_name = (
+                        current_decision
+                        if current_decision in option_names
+                        or current_decision == "明确排除"
+                        else fallback
+                        if fallback in option_names
+                        else ""
+                    )
+                    trace_sheet.write(
+                        row_index,
+                        base_item_column,
+                        baseline_name,
+                        formats["text"],
+                    )
+                excel_row = row_index + 1
+                final_cell = f"{xl_col_to_name(final_column)}{excel_row}"
+                base_item_cell = f"{xl_col_to_name(base_item_column)}{excel_row}"
+                cash_cell = (
+                    "0"
+                    if amount_column is None
+                    else f"{xl_col_to_name(amount_column)}{excel_row}"
                 )
                 trace_sheet.write_formula(
                     row_index,
-                    final_column,
-                    f'=IFERROR(IF({selected_expression}="","等待人工复核",{resolved_expression}),"等待人工复核")',
-                    formats["pending"],
-                    "等待人工复核",
+                    base_amount_column,
+                    f'=IFERROR({cash_cell}*HLOOKUP({base_item_cell},{lookup_range},2,FALSE),0)',
+                    formats["money"],
+                    0,
+                )
+                trace_sheet.write_formula(
+                    row_index,
+                    target_amount_column,
+                    f'=IFERROR({cash_cell}*HLOOKUP({final_cell},{lookup_range},2,FALSE),0)',
+                    formats["money"],
+                    0,
+                )
+                trace_sheet.write_formula(
+                    row_index,
+                    active_column,
+                    f'=IF(AND(COUNTIF({option_range},{final_cell})=1,{final_cell}<>{base_item_cell}),1,0)',
+                    formats["text"],
+                    0,
                 )
         hidden_trace_headers = {
             "命中规则(技术)",
@@ -1173,8 +1347,15 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
             errors.append("正表未引用重要待复核事项调整层")
         if not any("疑似重复事项" in formula for formula in formulas):
             errors.append("正表未引用疑似重复事项调整层")
-        if any("[" in formula or "全量分类留痕" in formula for formula in formulas):
-            errors.append("正表公式引用了外部工作簿或全量留痕")
+        if any("[" in formula for formula in formulas):
+            errors.append("正表公式引用了外部工作簿")
+        trace_supports_manual_choice = any(
+            "最终决定项目" in row for row in model.trace_rows
+        )
+        if trace_supports_manual_choice and not any(
+            "全量分类留痕" in formula for formula in formulas
+        ):
+            errors.append("正表未引用全量分类留痕人工改选层")
         if any("原表与系统决定差异" in formula for formula in formulas):
             errors.append("正表公式引用了原表与系统决定差异")
         status_formulas = [
