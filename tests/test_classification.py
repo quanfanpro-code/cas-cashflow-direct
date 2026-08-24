@@ -754,6 +754,28 @@ def test_unknown_transfer_does_not_use_a_direction_fallback():
     assert decision.evidence_score == 0
 
 
+def test_external_production_service_path_is_strong_purchase_evidence():
+    """生产成本中的外协加工是外购服务，不因最终结转主营业务成本而失去明细语义。"""
+    decision = classify_component(
+        cashflow_component("支付外协加工款", -10000, ("生产成本_外协加工费",)),
+        load_rule_pack(ROOT),
+    )
+
+    assert decision.system_item_id == "CFO-04"
+    assert decision.account_path_quality == 45
+
+
+def test_internal_inventory_carryforward_does_not_create_a_cashflow_candidate():
+    """完工结转属于内部成本流转，不得仅凭存货或成本去向制造现金流项目。"""
+    decision = classify_component(
+        cashflow_component("完工结转", -10000, ("库存商品_完工结转",)),
+        load_rule_pack(ROOT),
+    )
+
+    assert decision.system_item_id == ""
+    assert decision.account_path_quality in (0, 10)
+
+
 def test_dictionary_hit_reason_includes_note_id():
     """复核修复：经确认的公司特殊规则命中时，理由必须留 NOTE 编号痕迹。"""
     dictionary = AccountDictionary((

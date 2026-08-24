@@ -347,3 +347,94 @@ def test_unknown_detail_is_reported_instead_of_being_hidden_by_parent() -> None:
 
     assert tuple(slot.node_text for slot in result.unresolved_slots) == ("火星专用款",)
     _assert_every_path_node_has_an_explicit_role(result)
+
+
+@pytest.mark.parametrize(
+    "account_path",
+    (
+        "材料采购_直接材料",
+        "在途物资_商品采购",
+        "原材料_钢材",
+        "委托加工物资_加工费",
+        "周转材料_包装物采购",
+        "生产成本_外协加工费",
+        "制造费用_生产用电费",
+        "劳务成本_外部劳务费",
+        "合同履约成本_外部履约服务费",
+        "主营业务成本_外包服务费",
+        "其他业务成本_委托加工",
+        "生产成本_鉴定成本_周期试验费_外部试验费",
+        "制造费用_间接费用_燃料动力费_水",
+        "制造费用_间接费用_燃料动力费_电",
+    ),
+)
+def test_inventory_and_cost_paths_identify_external_operating_inputs(
+    account_path: str,
+) -> None:
+    result = analyze_account_path(account_path, load_account_semantic_rules(ROOT))
+
+    assert result.outflow_candidate_item_ids == ("CFO-04",)
+    assert result.quality.value == 45
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
+@pytest.mark.parametrize(
+    "account_path",
+    (
+        "生产成本_设备折旧",
+        "周转材料_摊销",
+        "库存商品_完工结转",
+        "发出商品_结转主营业务成本",
+        "存货跌价准备_计提减值",
+    ),
+)
+def test_internal_inventory_and_cost_transfers_never_create_cash_candidates(
+    account_path: str,
+) -> None:
+    result = analyze_account_path(account_path, load_account_semantic_rules(ROOT))
+
+    assert not result.candidate_item_ids
+    assert not result.inflow_candidate_item_ids
+    assert not result.outflow_candidate_item_ids
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
+@pytest.mark.parametrize(
+    "account_path",
+    (
+        "主营业务成本",
+        "库存商品",
+        "合同履约成本_差旅费",
+        "生产成本_鉴定成本_检验费_试验费",
+    ),
+)
+def test_broad_cost_or_inventory_destination_does_not_prove_a_purchase(
+    account_path: str,
+) -> None:
+    result = analyze_account_path(account_path, load_account_semantic_rules(ROOT))
+
+    assert "CFO-04" not in result.candidate_item_ids
+    assert "CFO-04" not in result.outflow_candidate_item_ids
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
+def test_staff_cost_still_has_priority_inside_the_cost_chain() -> None:
+    result = analyze_account_path(
+        "生产成本_人工_福利",
+        load_account_semantic_rules(ROOT),
+    )
+
+    assert result.outflow_candidate_item_ids == ("CFO-05",)
+
+
+def test_cost_allocation_marker_does_not_swallow_dividend_distribution_paths() -> None:
+    rules = load_account_semantic_rules(ROOT)
+
+    cost_allocation = analyze_account_path("生产成本_制造费用分配", rules)
+    dividend_distribution = analyze_account_path("利润分配_应付股利", rules)
+
+    assert cost_allocation.matched_rule_ids == ("PATH-NONCASH",)
+    assert "PATH-NONCASH" not in dividend_distribution.matched_rule_ids

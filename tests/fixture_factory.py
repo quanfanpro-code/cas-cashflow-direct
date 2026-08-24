@@ -563,7 +563,7 @@ def write_end_to_end_case(
     journal.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "现流项目"])
     journal.append(["2026-01-01", "记-1", "匿名销售收款", "1002 银行存款", 100, None, "销售商品收到的现金"])
     journal.append(["2026-01-01", "记-1", "匿名销售收款", "主营业务收入", None, 100, "销售商品收到的现金"])
-    journal.append(["2026-01-02", "记-2", "匿名采购付款", "原材料", 40, None, "购买商品支付的现金"])
+    journal.append(["2026-01-02", "记-2", "匿名采购付款", "原材料_钢材", 40, None, "购买商品支付的现金"])
     journal.append(["2026-01-02", "记-2", "匿名采购付款", "1002 银行存款", None, 40, "购买商品支付的现金"])
     if include_cash_balances:
         balance = workbook.create_sheet("现金余额资料")
@@ -592,7 +592,7 @@ def write_large_case(root: Path, row_count: int) -> tuple[Path, int]:
         journal.write(0, column, header)
     patterns = (
         (100, "匿名销售收款", "销售商品、提供劳务收到的现金", "主营业务收入"),
-        (-80, "匿名采购付款", "购买商品、接受劳务支付的现金", "原材料"),
+        (-80, "匿名采购付款", "购买商品、接受劳务支付的现金", "原材料_钢材"),
         (20, "匿名税费返还", "收到的税费返还", "应交税费"),
         (-30, "匿名发放职工工资", "支付给职工以及为职工支付的现金", "应付职工薪酬"),
         (-10, "匿名缴纳税费", "支付的各项税费", "应交税费"),
@@ -709,7 +709,7 @@ def write_detail_plus_statement_fixture(path: Path) -> None:
     detail.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方", "现流项目"])
     detail.append(["2026-01-01", "记-1", "匿名销售收款", "1002 银行存款", 100, None, "销售商品收到的现金"])
     detail.append(["2026-01-01", "记-1", "匿名销售收款", "主营业务收入", None, 100, "销售商品收到的现金"])
-    detail.append(["2026-01-02", "记-2", "匿名采购付款", "原材料", 40, None, "购买商品支付的现金"])
+    detail.append(["2026-01-02", "记-2", "匿名采购付款", "原材料_钢材", 40, None, "购买商品支付的现金"])
     detail.append(["2026-01-02", "记-2", "匿名采购付款", "1002 银行存款", None, 40, "购买商品支付的现金"])
     statement = workbook.create_sheet("报表页_随机")
     statement.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
