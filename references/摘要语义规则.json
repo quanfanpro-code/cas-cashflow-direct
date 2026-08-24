@@ -1,12 +1,12 @@
 ﻿{
-  "schema_version": "1.2.0",
+  "schema_version": "1.3.0",
   "scope": "一般企业现金流量表直接法摘要语义",
   "noise_patterns": [
     {"slot": "noise_date", "pattern": "(?:20\\d{2}[年./-])?\\d{1,2}[月./-]\\d{0,2}日?"},
     {"slot": "noise_amount", "pattern": "(?<![A-Za-z0-9])[-+]?\\d[\\d,]*(?:\\.\\d+)?\\s*(?:元|万元|人民币)"},
     {"slot": "noise_number", "pattern": "(?:凭证|票据|发票|合同|项目)?[A-Za-z]{1,6}[-_/]?[0-9]{4,}"}
   ],
-  "organization_suffix_pattern": "(?:有限责任公司|股份有限公司|有限公司|公司|银行|中心|事务所|合作社|工厂)",
+  "organization_suffix_pattern": "(?:有限责任公司|股份有限公司|有限公司|公司|银行|中心|事务所|合作社|工厂|研究所|研究院|设计院|学院|修理厂|人民法院|管理委员会|公证处)",
   "non_entity_organization_terms": ["子公司", "母公司", "本公司"],
   "organization_suffix_non_entity_follow": ["存款", "借款", "贷款", "利息", "账户", "手续费"],
   "lexicons": {
@@ -20,10 +20,11 @@
       {"slot": "business_relation", "value": "acquire", "terms": ["购买", "购建", "购置", "收购", "取得"]},
       {"slot": "business_relation", "value": "dispose", "terms": ["处置", "出售", "转让"]},
       {"slot": "business_relation", "value": "borrow", "terms": ["借入", "借款"]},
-      {"slot": "business_relation", "value": "repay", "terms": ["归还借款", "偿还", "还本", "偿债"]}
+      {"slot": "business_relation", "value": "repay", "terms": ["归还借款", "偿还", "还本", "偿债"]},
+      {"slot": "business_relation", "value": "reimburse", "terms": ["报销"]}
     ],
     "business_objects": [
-      {"slot": "business_object", "value": "trade_goods", "terms": ["销售商品款", "销售货款", "采购货款", "购买货款", "采购款", "原材料", "库存商品", "商品款", "材料款", "货款"]},
+      {"slot": "business_object", "value": "trade_goods", "terms": ["商品销售款", "销售商品款", "销售货款", "采购货款", "购买货款", "采购款", "原材料", "库存商品", "商品款", "材料款", "货款"]},
       {"slot": "business_object", "value": "service_revenue", "terms": ["物业租赁款", "劳务收入", "服务收入", "服务款"]},
       {"slot": "business_object", "value": "generic_service", "terms": ["咨询服务费", "技术服务费", "咨询费", "服务费"]},
       {"slot": "business_object", "value": "operating_professional_service", "terms": ["法律咨询费", "管理咨询费", "会计服务费", "律师费", "审计费", "佣金", "中介费"]},
@@ -34,12 +35,12 @@
       {"slot": "business_object", "value": "engineering_service", "terms": ["工程勘察费", "工程设计费", "施工监理费", "工程监理费", "监理费", "勘察设计费", "工程咨询费"]},
       {"slot": "business_object", "value": "financing_service", "terms": ["融资顾问费", "债券发行费", "贷款担保费", "承销服务费", "发行服务费", "融资服务费", "保荐承销费"]},
       {"slot": "business_object", "value": "acquisition_service", "terms": ["并购咨询费", "投资并购服务费", "并购尽调费", "尽调服务费", "股权收购服务费"]},
-      {"slot": "business_object", "value": "staff_compensation", "terms": ["职工薪酬", "员工薪酬", "工资薪金", "社会保险费", "住房公积金", "工资", "奖金", "社保", "公积金"]},
+      {"slot": "business_object", "value": "staff_compensation", "terms": ["职工薪酬", "员工薪酬", "人工薪酬", "人员薪酬", "员工福利", "职工福利", "节日福利", "工会经费", "工会会费", "工资薪金", "社会保险费", "住房公积金", "工资", "奖金", "社保", "公积金"]},
       {"slot": "business_object", "value": "staff_individual_tax", "terms": ["代扣代缴个人所得税", "代扣个人所得税", "代缴个人所得税", "缴纳个人所得税", "个人所得税", "代扣个税", "代缴个税", "个税"]},
       {"slot": "business_object", "value": "employee_individual_tax", "terms": ["代扣代缴工资个税", "代缴工资个税", "工资薪金个税", "工资个税", "股权激励个税"]},
       {"slot": "business_object", "value": "shareholder_individual_tax", "terms": ["分红个税", "股利个税"]},
       {"slot": "business_object", "value": "tax_refund", "terms": ["增值税留抵退税", "出口退税", "税费返还", "退税款", "退税"]},
-      {"slot": "business_object", "value": "tax_payment", "terms": ["企业所得税", "增值税", "车船税", "房产税", "土地使用税", "土地增值税", "消费税", "资源税", "城建税", "教育费附加", "印花税", "附加税", "税费", "税款"]},
+      {"slot": "business_object", "value": "tax_payment", "terms": ["企业所得税", "环境保护税", "地方教育费附加", "增值税", "所得税", "环保税", "车船税", "房产税", "土地使用税", "土地增值税", "消费税", "资源税", "城建税", "教育费附加", "地方教育费", "印花税", "附加税", "税费", "税款"]},
       {"slot": "business_object", "value": "asset_acquisition_tax", "terms": ["车辆购置税", "耕地占用税", "契税"]},
       {"slot": "business_object", "value": "penalty", "terms": ["税收滞纳金", "滞纳金", "罚款"]},
       {"slot": "business_object", "value": "bank_deposit_interest", "terms": ["银行存款利息", "活期存款利息", "定期存款利息", "银行利息", "存款利息"]},
@@ -50,7 +51,7 @@
       {"slot": "business_object", "value": "operating_deposit", "terms": ["履约保证金", "投标保证金", "经营保证金", "押金", "保证金"]},
       {"slot": "business_object", "value": "travel_expense", "terms": ["差旅费", "交通费", "住宿费"]},
       {"slot": "business_object", "value": "utilities", "terms": ["水电费", "电费", "水费", "燃气费"]},
-      {"slot": "business_object", "value": "operating_other", "terms": ["办公费", "业务招待费", "手续费", "往来款"]},
+      {"slot": "business_object", "value": "operating_other", "terms": ["业务招待费", "餐饮费", "招待费", "过路费", "通行费", "停车费", "打的费", "打车费", "快递费", "打印费", "会务费", "会议费", "报名费", "培训费", "清理费", "物业费", "保安费", "电话费", "通讯费", "通信费", "短信费", "宽带费", "网络费", "办公费", "餐费", "油费", "手续费", "往来款"]},
       {"slot": "business_object", "value": "investment_principal", "terms": ["理财产品本金", "长期股权投资", "理财本金", "投资本金", "股权投资款", "债权投资款", "投资款"]},
       {"slot": "business_object", "value": "investment_income", "terms": ["被投资单位分红", "收到股利", "债券投资利息", "结构性存款利息", "投资收益", "理财收益", "股利收入", "分红收入"]},
       {"slot": "business_object", "value": "long_asset", "terms": ["固定资产", "无形资产", "长期资产", "机器设备", "生产设备", "使用权资产"]},
@@ -77,7 +78,8 @@
       {"slot": "document_context", "value": "invoice", "terms": ["增值税专用发票", "增值税普通发票", "专票", "普票", "发票"]},
       {"slot": "document_context", "value": "input_vat", "terms": ["进项税额", "进项税", "进项"]},
       {"slot": "document_context", "value": "output_vat", "terms": ["销项税额", "销项税", "销项"]},
-      {"slot": "document_context", "value": "contract", "terms": ["合同", "协议"]}
+      {"slot": "document_context", "value": "contract", "terms": ["合同", "协议"]},
+      {"slot": "document_context", "value": "settlement_document", "terms": ["票据结算单", "结算单"]}
     ],
     "modifiers": [
       {"slot": "refund", "value": "completed", "terms": ["已退回", "退回", "退款", "退还", "返还", "冲回", "冲减"]},
@@ -105,6 +107,11 @@
     {"frame_id": "object-relation", "required_slots": ["business_object", "business_relation"]}
   ],
   "agent_trigger_patterns": ["代.+向.+转", "代.+转.+款", "处理尾款", "转处理"],
+  "unexplained_business_patterns": [
+    "(?:报销|采购|购买|销售|施工|安装|加工|检测|检验|试验|维修|修理|运输|设计|咨询|验收|验资|租赁|结算)",
+    "[\\u4e00-\\u9fff]{1,12}(?:费|税|收入|支出|收益|成本|劳务|服务|工程|材料|设备|货物|商品)",
+    "(?:保证金|押金|定金|尾款|质保款|租金|房租|房屋租金|租赁费)"
+  ],
   "candidate_rules": [
     {"rule_id": "CFO-01-trade", "candidate_item_ids": ["CFO-01"], "all": {"cash_action": ["inflow"], "business_object": ["trade_goods", "service_revenue"]}, "without": {"refund": ["completed"]}},
     {"rule_id": "CFO-01-sale-relation", "candidate_item_ids": ["CFO-01"], "all": {"cash_action": ["inflow"], "business_relation": ["sale"]}},

@@ -19,11 +19,24 @@ from cashflow_direct.summary_semantics import (
     SummarySpan,
     analyze_summary,
     load_summary_rules,
+    merge_summary_agent_slots,
 )
 from tests.fixture_factory import cashflow_component
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _complete_summary_for_test(summary: str) -> SummarySemanticResult:
+    rules = load_summary_rules(ROOT)
+    result = analyze_summary(summary, rules)
+    if result.status == "needs_agent":
+        return merge_summary_agent_slots(
+            result,
+            {"outcome": "source_insufficient", "spans": []},
+            rules,
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -90,13 +103,9 @@ def classify_component(
     if isinstance(summary_semantics, SummaryDictionary):
         semantics = _fixture_semantics(summary_semantics)
         if component.summary not in semantics:
-            semantics[component.summary] = analyze_summary(
-                component.summary, load_summary_rules(ROOT)
-            )
+            semantics[component.summary] = _complete_summary_for_test(component.summary)
     elif summary_semantics is None:
-        semantics = {
-            component.summary: analyze_summary(component.summary, load_summary_rules(ROOT))
-        }
+        semantics = {component.summary: _complete_summary_for_test(component.summary)}
     else:
         semantics = summary_semantics
     account_dictionary = dictionary or load_common_dictionary(ROOT)
@@ -154,7 +163,7 @@ def test_original_label_alone_is_not_a_candidate_or_evidence() -> None:
 
 def test_complete_path_dictionary_can_create_candidate_without_keyword_rule() -> None:
     component = cashflow_component(
-        "付彭娟报销停车费",
+        "付彭娟",
         -3_100,
         ("管理费用_交通费_车辆费用_停车费",),
         original_item_text="支付其他与经营活动有关的现金",

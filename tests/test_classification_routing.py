@@ -14,7 +14,12 @@ from cashflow_direct.models import (
 )
 from cashflow_direct.account_dictionary import load_common_dictionary
 from cashflow_direct.classification import classify_all as _classify_all, load_rule_pack
-from cashflow_direct.summary_semantics import analyze_summary, load_summary_rules
+from cashflow_direct.summary_semantics import (
+    analyze_summary,
+    build_summary_agent_task,
+    load_summary_rules,
+    merge_summary_agent_slots,
+)
 from tests.fixture_factory import cashflow_component
 
 
@@ -172,6 +177,44 @@ def test_classification_45_threshold_accepts_every_score_at_or_above_45(
     )
 
     assert result.decisions[0].decision_action == expected_action
+
+
+def test_unexplained_summary_does_not_cancel_a_strong_account_path() -> None:
+    root = Path(__file__).resolve().parents[1]
+    summary = "支付鉴定试验费"
+    summary_rules = load_summary_rules(root)
+    unresolved = analyze_summary(summary, summary_rules)
+    assert build_summary_agent_task(unresolved) is not None
+    insufficient = merge_summary_agent_slots(
+        unresolved,
+        {"outcome": "source_insufficient", "spans": []},
+        summary_rules,
+    )
+    component = cashflow_component(
+        summary,
+        -50,
+        ("应交税费_车船税",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id="PATH-STRONG-SUMMARY-UNKNOWN",
+    )
+    decisions = _classify_all(
+        (component,),
+        load_rule_pack(root),
+        load_common_dictionary(root),
+        {summary: insufficient},
+    )
+
+    result = route_classification_decisions(
+        (component,),
+        decisions,
+        THRESHOLDS,
+        automatic_change_threshold=45,
+    )
+
+    assert decisions[0].summary_quality == 0
+    assert decisions[0].account_path_quality == 45
+    assert decisions[0].source_conflict is False
+    assert result.decisions[0].decision_action == "automatic_change"
 
 
 def test_same_source_business_conflict_is_blocked_before_ai_tasks() -> None:

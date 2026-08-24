@@ -15,7 +15,11 @@ from cashflow_direct.classification import (
     load_rule_pack,
     standardize_flow_item,
 )
-from cashflow_direct.summary_semantics import analyze_summary, load_summary_rules
+from cashflow_direct.summary_semantics import (
+    analyze_summary,
+    load_summary_rules,
+    merge_summary_agent_slots,
+)
 from cashflow_direct.models import CashflowComponent
 from cashflow_direct.validation import validate_classification
 from cashflow_direct.money import statement_amount_cent
@@ -27,9 +31,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def classify_component(component, rules, dictionary=None, summary_semantics=None):
     """测试入口始终先形成正式摘要语义，禁止回退到旧关键词分类。"""
-    semantics = summary_semantics or {
-        component.summary: analyze_summary(component.summary, load_summary_rules(ROOT))
-    }
+    if summary_semantics is None:
+        summary_rules = load_summary_rules(ROOT)
+        summary_result = analyze_summary(component.summary, summary_rules)
+        if summary_result.status == "needs_agent":
+            summary_result = merge_summary_agent_slots(
+                summary_result,
+                {"outcome": "source_insufficient", "spans": []},
+                summary_rules,
+            )
+        semantics = {component.summary: summary_result}
+    else:
+        semantics = summary_semantics
     account_dictionary = dictionary or load_common_dictionary(ROOT)
     return _classify_component(component, rules, account_dictionary, semantics)
 

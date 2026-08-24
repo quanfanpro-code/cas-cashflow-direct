@@ -180,14 +180,168 @@ class SummarySemanticsTests(unittest.TestCase):
         task = build_summary_agent_task(unresolved)
         self.assertIsNotNone(task)
         self.assertEqual(
-            {"task_id", "summary", "unresolved_slots", "allowed_slots", "instruction"},
+            {
+                "task_id",
+                "summary",
+                "unresolved_slots",
+                "unexplained_spans",
+                "allowed_slots",
+                "allowed_outcomes",
+                "instruction",
+            },
             set(task or {}),
         )
+
+    def test_unexplained_business_phrases_are_sent_to_the_summary_agent(self):
+        for summary, expected_text in (
+            ("支付外部安装劳务费", "外部安装劳务费"),
+            ("支付鉴定试验费", "鉴定试验费"),
+            ("支付打孔加工费", "打孔加工费"),
+        ):
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+
+                self.assertEqual("needs_agent", result.status)
+                self.assertIn(
+                    expected_text,
+                    "".join(span.text for span in result.unexplained_spans),
+                )
+                self.assertIsNotNone(build_summary_agent_task(result))
+
+    def test_names_numbers_and_a_bare_payment_suffix_do_not_trigger_the_agent(self):
+        result = analyze_summary(
+            "2026年3月支付成都工程投资有限公司款1000元，合同ABCD1234",
+            self.rules,
+        )
+
+        self.assertEqual("rule_complete", result.status)
+        self.assertEqual((), result.unexplained_spans)
+        self.assertIsNone(build_summary_agent_task(result))
+
+    def test_common_expenses_and_reimbursement_are_completed_by_fixed_rules(self):
+        for summary in ("支付张三报销快递费", "支付打的费", "支付物业费"):
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+
+                self.assertEqual("rule_complete", result.status)
+                self.assertEqual(("CFO-07",), result.candidate_item_ids)
+                self.assertLess(result.quality.value, 45)
+
+    def test_employee_welfare_is_fixed_but_unclassified_rent_uses_the_agent(self):
+        welfare = analyze_summary("支付员工福利", self.rules)
+        rent = analyze_summary("收到某单位转入房租", self.rules)
+
+        self.assertEqual("rule_complete", welfare.status)
+        self.assertEqual(("CFO-05",), welfare.candidate_item_ids)
+        self.assertEqual("needs_agent", rent.status)
+        self.assertIn("房租", "".join(span.text for span in rent.unexplained_spans))
+
+    def test_organization_suffix_and_clear_goods_sales_do_not_trigger_the_agent(self):
+        result = analyze_summary(
+            "收到中国北方车辆研究所电汇商品销售款",
+            self.rules,
+        )
+        design_institute = analyze_summary(
+            "收到中国长峰机电技术研究设计院电汇商品销售款",
+            self.rules,
+        )
+
+        self.assertEqual("rule_complete", result.status)
+        self.assertEqual(("CFO-01",), result.candidate_item_ids)
+        self.assertIsNone(build_summary_agent_task(result))
+        self.assertEqual("rule_complete", design_institute.status)
+        self.assertEqual(("CFO-01",), design_institute.candidate_item_ids)
+
+    def test_common_communication_union_and_environmental_tax_use_fixed_rules(self):
+        expected = {
+            "支付单位电话费": ("CFO-07",),
+            "支付工会经费": ("CFO-05",),
+            "支付人工薪酬": ("CFO-05",),
+            "支付人员薪酬": ("CFO-05",),
+            "缴纳环保税": ("CFO-06",),
+        }
+        for summary, candidate in expected.items():
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+
+                self.assertEqual("rule_complete", result.status)
+                self.assertEqual(candidate, result.candidate_item_ids)
+
+    def test_anonymized_placeholder_does_not_trigger_the_agent(self):
+        for summary in ("匿名销售收款", "匿名采购付款"):
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+
+                self.assertEqual("rule_complete", result.status)
+                self.assertEqual((), result.unexplained_spans)
+
+    def test_agent_must_explain_every_remaining_business_phrase(self):
+        summary = "支付外部安装劳务费并支付鉴定试验费"
+        unresolved = analyze_summary(summary, self.rules)
+        start = summary.index("外部安装劳务费")
+
+        with self.assertRaisesRegex(ValueError, "仍未完成"):
+            merge_summary_agent_slots(
+                unresolved,
+                {
+                    "outcome": "resolved",
+                    "spans": [
+                        {
+                            "slot": "business_object",
+                            "value": "generic_service",
+                            "text": "外部安装劳务费",
+                            "start": start,
+                            "end": start + len("外部安装劳务费"),
+                        }
+                    ],
+                },
+                self.rules,
+            )
+
+    def test_agent_can_finish_one_unexplained_business_phrase(self):
+        summary = "支付鉴定试验费"
+        unresolved = analyze_summary(summary, self.rules)
+        start = summary.index("鉴定试验费")
+
+        merged = merge_summary_agent_slots(
+            unresolved,
+            {
+                "outcome": "resolved",
+                "spans": [
+                    {
+                        "slot": "business_object",
+                        "value": "ambiguous_external_service",
+                        "text": "鉴定试验费",
+                        "start": start,
+                        "end": start + len("鉴定试验费"),
+                    }
+                ],
+            },
+            self.rules,
+        )
+
+        self.assertEqual("agent_complete", merged.status)
+        self.assertEqual((), merged.unexplained_spans)
+        self.assertEqual({"CFO-04", "CFO-07"}, set(merged.candidate_item_ids))
+
+    def test_agent_can_record_that_the_source_is_still_insufficient(self):
+        unresolved = analyze_summary("支付鉴定试验费", self.rules)
+
+        merged = merge_summary_agent_slots(
+            unresolved,
+            {"outcome": "source_insufficient", "spans": []},
+            self.rules,
+        )
+
+        self.assertEqual("agent_insufficient", merged.status)
+        self.assertEqual((), merged.candidate_item_ids)
+        self.assertIs(EvidenceQuality.INVALID, merged.quality)
+        self.assertTrue(merged.unexplained_spans)
 
     def test_organization_name_does_not_create_a_second_cash_action(self):
         result = analyze_summary("收到支付宝支付科技有限公司款，验资", self.rules)
 
-        self.assertEqual("rule_complete", result.status)
+        self.assertEqual("needs_agent", result.status)
         self.assertEqual(
             ["收到"],
             [span.text for span in result.spans if span.slot == "cash_action"],
@@ -239,7 +393,7 @@ class SummarySemanticsTests(unittest.TestCase):
             self.rules,
         )
 
-        self.assertEqual("rule_complete", result.status)
+        self.assertEqual("needs_agent", result.status)
         self.assertEqual(
             ["付"],
             [span.text for span in result.spans if span.slot == "cash_action"],
@@ -307,6 +461,30 @@ class SummarySemanticsTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "整批摘要语义退化"):
             validate_summary_batch((empty,), ("摘要甲",))
+
+    def test_batch_accepts_source_insufficient_without_fixed_rule_spans(self):
+        unresolved = analyze_summary("地下电动铲运机评估费", self.rules)
+        insufficient = merge_summary_agent_slots(
+            unresolved,
+            {"outcome": "source_insufficient", "spans": []},
+            self.rules,
+        )
+
+        validate_summary_batch((insufficient,), (insufficient.summary,))
+
+    def test_batch_accepts_invalid_summary_next_to_source_insufficient(self):
+        invalid = analyze_summary("", self.rules)
+        unresolved = analyze_summary("地下电动铲运机评估费", self.rules)
+        insufficient = merge_summary_agent_slots(
+            unresolved,
+            {"outcome": "source_insufficient", "spans": []},
+            self.rules,
+        )
+
+        validate_summary_batch(
+            (invalid, insufficient),
+            (invalid.summary, insufficient.summary),
+        )
 
     def test_rule_file_covers_all_statement_leaf_items(self):
         covered = {

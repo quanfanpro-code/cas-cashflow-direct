@@ -1381,6 +1381,7 @@ def _summary_result_to_dict(result: SummarySemanticResult) -> dict[str, object]:
         "quality": result.quality.value,
         "reason": result.reason,
         "unresolved_slots": list(result.unresolved_slots),
+        "unexplained_spans": [asdict(span) for span in result.unexplained_spans],
     }
 
 
@@ -1405,6 +1406,16 @@ def _summary_result_from_dict(payload: Mapping[str, object]) -> SummarySemanticR
         reason=str(payload.get("reason", "")),
         unresolved_slots=tuple(
             str(value) for value in payload.get("unresolved_slots", ())
+        ),
+        unexplained_spans=tuple(
+            SummarySpan(
+                slot=str(span.get("slot", "unexplained")),
+                text=str(span["text"]),
+                start=int(span["start"]),
+                end=int(span["end"]),
+                source=str(span.get("source", "rule")),
+            )
+            for span in payload.get("unexplained_spans", ())
         ),
     )
 
@@ -2291,7 +2302,7 @@ def import_summary_results(run_dir: Path, result_path: Path) -> dict[str, object
         if results.get(str(task["summary"]), SummarySemanticResult(
             str(task["summary"]), "needs_agent", (), (), EvidenceQuality.INVALID, ""
         )).status
-        != "agent_complete"
+        not in {"agent_complete", "agent_insufficient"}
     )
     pending["results"] = [
         _summary_result_to_dict(result)

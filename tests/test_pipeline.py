@@ -118,6 +118,51 @@ class SummarySemanticsPipelineTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "不得返回"):
                     import_summary_results(Path(tmp), result_path)
 
+    def test_summary_import_accepts_an_explicit_source_insufficient_result(self) -> None:
+        unresolved = analyze_summary(
+            "支付鉴定试验费",
+            load_summary_rules(ROOT),
+        )
+        task = build_summary_agent_task(unresolved)
+        self.assertIsNotNone(task)
+        state = {
+            "summary_semantics": {
+                "tasks": [task],
+                "results": [pipeline_module._summary_result_to_dict(unresolved)],
+                "missing_ids": [task["task_id"]],
+            },
+            "summary_semantics_completed": False,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "摘要原文不足.jsonl"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task["task_id"],
+                        "summary": unresolved.summary,
+                        "outcome": "source_insufficient",
+                        "spans": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8-sig",
+            )
+            with (
+                patch.object(pipeline_module, "_load_state", return_value=state),
+                patch.object(pipeline_module, "_assert_inputs_unchanged"),
+                patch.object(pipeline_module, "_save_state"),
+            ):
+                imported = import_summary_results(Path(tmp), result_path)
+
+        self.assertEqual("摘要语义已导入", imported["status"])
+        self.assertTrue(state["summary_semantics_completed"])
+        self.assertEqual([], state["summary_semantics"]["missing_ids"])
+        self.assertEqual(
+            "agent_insufficient",
+            state["summary_semantics"]["results"][0]["status"],
+        )
+
 
 def test_dictionary_display_uses_the_confirmed_full_path_result() -> None:
     confirmed = {
@@ -317,8 +362,42 @@ def _structured_ai_payload(
 
 def _complete_all_pending_ai(run_dir: Path, root: Path) -> None:
     state_path = run_dir / "计算留痕数据" / "运行状态.json"
-    for round_no in range(1, 6):
+    for round_no in range(1, 9):
         state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        if state.get("stage") == "waiting_human":
+            return
+        summary_tasks = state.get("summary_semantics", {}).get("tasks", ())
+        summary_results = {
+            item["summary"]: item["status"]
+            for item in state.get("summary_semantics", {}).get("results", ())
+        }
+        pending_summary = [
+            task
+            for task in summary_tasks
+            if summary_results.get(task["summary"])
+            not in {"agent_complete", "agent_insufficient"}
+        ]
+        if pending_summary:
+            result_path = root / f"自动完成摘要语义_{round_no}.jsonl"
+            result_path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "task_id": task["task_id"],
+                            "summary": task["summary"],
+                            "outcome": "source_insufficient",
+                            "spans": [],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                    for task in pending_summary
+                ),
+                encoding="utf-8-sig",
+            )
+            import_summary_results(run_dir, result_path)
+            run_classification(run_dir)
+            continue
         completed_ids = {
             item["task_id"]
             for item in state.get("structured_ai_validation", {}).get(
@@ -339,7 +418,7 @@ def _complete_all_pending_ai(run_dir: Path, root: Path) -> None:
             encoding="utf-8-sig",
         )
         import_ai_results(run_dir, result_path)
-    raise AssertionError("测试用AI复核在五轮内仍未完成")
+    raise AssertionError("测试用摘要和分类AI在八轮内仍未完成")
 
 
 class PipelineTests(unittest.TestCase):

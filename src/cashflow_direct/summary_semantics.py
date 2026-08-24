@@ -51,6 +51,7 @@ class SummarySemanticResult:
     quality: EvidenceQuality
     reason: str
     unresolved_slots: tuple[str, ...] = ()
+    unexplained_spans: tuple[SummarySpan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,17 +467,62 @@ def _candidate_ids(facts: Sequence[_Fact], rules: Mapping[str, object]) -> tuple
     return tuple(sorted(candidates))
 
 
-def _unresolved_slots(
+def _unexplained_business_spans(
     summary: str,
     facts: Sequence[_Fact],
     rules: Mapping[str, object],
+) -> tuple[SummarySpan, ...]:
+    covered = [False] * len(summary)
+    for fact in facts:
+        for index in range(fact.start, fact.end):
+            covered[index] = True
+
+    patterns = tuple(
+        str(pattern)
+        for pattern in (
+            *rules.get("agent_trigger_patterns", ()),
+            *rules.get("unexplained_business_patterns", ()),
+        )
+    )
+    spans: list[SummarySpan] = []
+    for chinese_run in re.finditer(r"[\u4e00-\u9fff]+", summary):
+        start = chinese_run.start()
+        while start < chinese_run.end():
+            while start < chinese_run.end() and covered[start]:
+                start += 1
+            end = start
+            while end < chinese_run.end() and not covered[end]:
+                end += 1
+            text = summary[start:end]
+            if len(text) >= 2 and any(re.search(pattern, text) for pattern in patterns):
+                spans.append(SummarySpan("unexplained", text, start, end))
+            start = end
+    return tuple(spans)
+
+
+def _unresolved_slots(
+    facts: Sequence[_Fact],
+    unexplained_spans: Sequence[SummarySpan],
 ) -> tuple[str, ...]:
     actions = [fact for fact in facts if fact.slot == "cash_action"]
-    if len({fact.value for fact in actions}) > 1:
-        return ("clause_binding",)
-    if not actions and any(re.search(pattern, summary) for pattern in rules.get("agent_trigger_patterns", [])):
-        return ("cash_action", "business_object", "clause_binding")
-    return ()
+    resolved_slots = {fact.slot for fact in facts}
+    unresolved: list[str] = []
+    if len({fact.value for fact in actions}) > 1 and "clause_binding" not in resolved_slots:
+        unresolved.append("clause_binding")
+    if unexplained_spans:
+        if not actions:
+            unresolved.append("cash_action")
+        unresolved.extend(
+            (
+                "business_relation",
+                "business_object",
+                "counterparty_role",
+                "purpose",
+                "attribute",
+                "clause_binding",
+            )
+        )
+    return tuple(dict.fromkeys(unresolved))
 
 
 def _quality(
@@ -541,7 +587,8 @@ def _analyze(
     ]
     facts = _normalize_nested_actions(summary, (*noise, *entities, *lexical, *agent_facts))
     facts = _normalize_business_relations(summary, facts)
-    unresolved = () if agent_facts else _unresolved_slots(summary, facts, rules)
+    unexplained = _unexplained_business_spans(summary, facts, rules)
+    unresolved = _unresolved_slots(facts, unexplained)
     meaningful = [
         fact
         for fact in facts
@@ -569,6 +616,7 @@ def _analyze(
         quality,
         _reason(status, candidates, quality),
         unresolved,
+        unexplained,
     )
 
 
@@ -583,8 +631,13 @@ def build_summary_agent_task(result: SummarySemanticResult) -> dict[str, object]
         "task_id": "SUMMARY-" + hashlib.sha256(result.summary.encode("utf-8")).hexdigest()[:20],
         "summary": result.summary,
         "unresolved_slots": list(result.unresolved_slots),
+        "unexplained_spans": [
+            {"text": span.text, "start": span.start, "end": span.end}
+            for span in result.unexplained_spans
+        ],
         "allowed_slots": list(result.unresolved_slots),
-        "instruction": "只返回摘要原文中的受控语义槽位、枚举值和半开区间；不得判断项目、质量、分数或动作。",
+        "allowed_outcomes": ["resolved", "source_insufficient"],
+        "instruction": "只返回未解释原文中的受控语义槽位、枚举值和半开区间；确实无法从原文解释时返回source_insufficient；不得判断项目、质量、分数或动作。",
     }
 
 
@@ -610,7 +663,23 @@ def merge_summary_agent_slots(
         raise ValueError("该摘要没有待Agent补充的语言槽位")
     if payload.get("summary", result.summary) != result.summary:
         raise ValueError("Agent结果摘要与当前任务不一致")
+    outcome = payload.get("outcome", "resolved")
+    if outcome not in {"resolved", "source_insufficient"}:
+        raise ValueError("Agent结果outcome必须是resolved或source_insufficient")
     raw_spans = payload.get("spans")
+    if outcome == "source_insufficient":
+        if raw_spans not in (None, []):
+            raise ValueError("原文无法进一步解释时不得同时返回语义槽位")
+        return SummarySemanticResult(
+            result.summary,
+            "agent_insufficient",
+            result.spans,
+            (),
+            EvidenceQuality.INVALID,
+            "摘要Agent仍无法从原文解释剩余业务内容；摘要不参与候选和评分",
+            result.unresolved_slots,
+            result.unexplained_spans,
+        )
     if not isinstance(raw_spans, list) or not raw_spans:
         raise ValueError("Agent结果必须包含非空spans")
 
@@ -633,6 +702,11 @@ def merge_summary_agent_slots(
             raise ValueError("Agent返回的原文区间非法")
         if result.summary[start:end] != text:
             raise ValueError("Agent返回的原文区间与摘要不一致")
+        if not any(
+            unresolved.start <= start and end <= unresolved.end
+            for unresolved in result.unexplained_spans
+        ):
+            raise ValueError("Agent只能解释当前记录的未解释原文区间")
         agent_facts.append(_Fact(slot, value, text, start, end, "agent"))
 
     merged = _analyze(result.summary, rules, agent_facts)
@@ -653,8 +727,12 @@ def validate_summary_batch(
     for result in results:
         if any(result.summary[span.start : span.end] != span.text for span in result.spans):
             raise ValueError("摘要语义存在与原文不一致的区间")
-    if results and (
-        all(not result.spans and not result.candidate_item_ids for result in results)
-        or all(result.quality is EvidenceQuality.INVALID for result in results)
-    ):
-        raise ValueError("整批摘要语义退化：没有形成可用槽位、候选或证据质量")
+        if result.status in {"rule_complete", "agent_complete"} and result.unexplained_spans:
+            raise ValueError("摘要语义标记完成但仍有未解释业务内容")
+        if (
+            result.status in {"rule_complete", "agent_complete"}
+            and result.quality is EvidenceQuality.INVALID
+        ):
+            raise ValueError("整批摘要语义退化：完成状态没有形成有效语义证据")
+        if result.status == "agent_insufficient" and not result.unexplained_spans:
+            raise ValueError("摘要原文不足终态必须保留未解释业务内容")
