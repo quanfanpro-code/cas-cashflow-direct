@@ -111,7 +111,7 @@ class DecisionRoute:
 
 _GENERIC_FACT_PREFIXES = ("cash_direction:",)
 _ALLOWED_SCORES = frozenset({0, 10, 20, 25, 35, 45, 50, 55, 70, 90})
-AUTOMATIC_CHANGE_SCORE_OPTIONS = (50, 55, 70, 90)
+AUTOMATIC_CHANGE_SCORE_OPTIONS = (45, 50, 55, 70, 90)
 DEFAULT_AUTOMATIC_CHANGE_SCORE = 70
 _LEVEL_INDEX = {
     MaterialityLevel.M0: 0,
@@ -208,12 +208,37 @@ _VALID_ORIGINAL_STATES = frozenset(
 
 def validate_automatic_change_threshold(value: int) -> int:
     if value not in AUTOMATIC_CHANGE_SCORE_OPTIONS:
-        raise ValueError("自动修改最低证据分只允许50、55、70、90")
+        raise ValueError("自动修改最低证据分只允许45、50、55、70、90")
     return value
 
 
-def score_meets_change_threshold(score: int, threshold: int) -> bool:
-    return score >= validate_automatic_change_threshold(threshold)
+def change_is_authorized(
+    score: int,
+    threshold: int,
+    summary_quality: int = 0,
+    account_path_quality: int = 0,
+) -> bool:
+    threshold = validate_automatic_change_threshold(threshold)
+    if threshold == 45:
+        return score in {45, 55, 70, 90} and 45 in {
+            summary_quality,
+            account_path_quality,
+        }
+    return score >= threshold
+
+
+def score_meets_change_threshold(
+    score: int,
+    threshold: int,
+    summary_quality: int = 0,
+    account_path_quality: int = 0,
+) -> bool:
+    return change_is_authorized(
+        score,
+        threshold,
+        summary_quality,
+        account_path_quality,
+    )
 
 
 def _specific_facts(source: EvidenceSourceAssessment) -> frozenset[str]:
@@ -335,9 +360,14 @@ def _allowed_operations(
     automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
     *,
     valid_original: bool = False,
+    summary_quality: int = 0,
+    account_path_quality: int = 0,
 ) -> frozenset[DecisionOperation]:
     if valid_original and score_meets_change_threshold(
-        score, automatic_change_threshold
+        score,
+        automatic_change_threshold,
+        summary_quality,
+        account_path_quality,
     ):
         return frozenset(DecisionOperation)
     if score in {45, 50, 55}:
@@ -352,6 +382,9 @@ def route_normal_decision(
     original_state: OriginalItemState,
     materiality: MaterialityLevel,
     automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
+    *,
+    summary_quality: int = 0,
+    account_path_quality: int = 0,
 ) -> DecisionRoute:
     automatic_change_threshold = validate_automatic_change_threshold(
         automatic_change_threshold
@@ -369,7 +402,10 @@ def route_normal_decision(
     action = table[score][_LEVEL_INDEX[materiality]]
     if not agrees and original_state in _VALID_ORIGINAL_STATES:
         threshold_met = score_meets_change_threshold(
-            score, automatic_change_threshold
+            score,
+            automatic_change_threshold,
+            summary_quality,
+            account_path_quality,
         )
         if materiality is MaterialityLevel.M0:
             action = (
@@ -431,6 +467,8 @@ def route_normal_decision(
         valid_original=(
             not agrees and original_state in _VALID_ORIGINAL_STATES
         ),
+        summary_quality=summary_quality,
+        account_path_quality=account_path_quality,
     )
     if action is DecisionAction.AUTOMATIC_KEEP and not agrees:
         # 原项目是有效基线时，证据不足的结果只是“不改”，不是取得了修改权限。
@@ -458,6 +496,8 @@ def route_decision(
     individual_tax_fact_missing: bool = False,
     direction_status: str = "compatible",
     automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
+    summary_quality: int = 0,
+    account_path_quality: int = 0,
 ) -> DecisionRoute:
     automatic_change_threshold = validate_automatic_change_threshold(
         automatic_change_threshold
@@ -578,4 +618,6 @@ def route_decision(
         original_state,
         materiality,
         automatic_change_threshold,
+        summary_quality=summary_quality,
+        account_path_quality=account_path_quality,
     )

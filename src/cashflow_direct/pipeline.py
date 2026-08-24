@@ -134,6 +134,10 @@ from cashflow_direct.validation import (
     validate_statement,
 )
 from cashflow_direct.versions import assert_current_versions, current_versions
+from cashflow_direct.vat_companion import (
+    apply_vat_companion_relations,
+    build_vat_companion_relations,
+)
 from cashflow_direct.workbook_output import WorkbookModel, build_output_workbook
 from cashflow_direct.workbook_structure import open_workbook_robust, scan_workbook
 
@@ -306,6 +310,21 @@ def _decision_from_dict(payload: Mapping[str, object]) -> ClassificationDecision
     return ClassificationDecision(**data)
 
 
+def _refresh_vat_companion_decisions(
+    state: Mapping[str, object],
+    decisions: Sequence[ClassificationDecision],
+) -> tuple[ClassificationDecision, ...]:
+    components = tuple(
+        _component_from_dict(item) for item in state.get("components", ())
+    )
+    allocations = tuple(
+        ComponentSourceAllocation(**item)
+        for item in state.get("source_allocations", ())
+    )
+    relations = build_vat_companion_relations(components, allocations)
+    return apply_vat_companion_relations(decisions, relations)
+
+
 def _evidence_assessment_payload(
     decision: ClassificationDecision,
 ) -> dict[str, object]:
@@ -320,6 +339,8 @@ def _evidence_assessment_payload(
         "business_conflict": decision.business_conflict,
         "company_rule_conflict": decision.company_rule_conflict,
         "vat_base_missing": decision.vat_base_missing,
+        "vat_base_component_id": decision.vat_base_component_id,
+        "vat_relation_status": decision.vat_relation_status,
         "net_item_facts_missing": decision.net_item_facts_missing,
         "direction_status": decision.direction_status,
         "evidence_score": decision.evidence_score,
@@ -1182,7 +1203,8 @@ def _store_consistency_resolution(
     state: dict[str, object],
     resolution: object,
 ) -> None:
-    state["decisions"] = [asdict(item) for item in resolution.decisions]
+    decisions = _refresh_vat_companion_decisions(state, resolution.decisions)
+    state["decisions"] = [asdict(item) for item in decisions]
     state["consistency_resolution"] = {
         "statuses": [
             {
@@ -2802,6 +2824,7 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         _materiality_from_state(state),
         company_notes=state.get("company_notes", ()),
         automatic_change_threshold=int(state["automatic_change_threshold"]),
+        source_allocations=build.source_allocations,
     )
     decisions = routing.decisions
     checked = validate_classification(components, decisions)
@@ -3139,6 +3162,7 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
                     state["automatic_change_threshold"]
                 ),
             )
+            resolved = _refresh_vat_companion_decisions(state, resolved)
             state["decisions"] = [asdict(item) for item in resolved]
             with _store(run_dir).stage("structured_ai_resolution") as connection:
                 connection.executemany(
@@ -3341,6 +3365,7 @@ def confirm_manual_decisions(
     updated = tuple(
         replacements.get(item.component_id, item) for item in decisions
     )
+    updated = _refresh_vat_companion_decisions(state, updated)
     state["decisions"] = [asdict(item) for item in updated]
     state["human_decisions"] = [*state.get("human_decisions", ()), *records]
     pending = [
@@ -3477,6 +3502,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         else decision
         for decision in decisions
     )
+    decisions = _refresh_vat_companion_decisions(state, decisions)
     state["decisions"] = [asdict(item) for item in decisions]
     with _store(run_dir).stage("finalize_decision_routes") as connection:
         connection.executemany(
@@ -3679,6 +3705,11 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 >= _materiality_from_state(state).overall_cent
             ),
             baseline_item_code=decision.original_standard_item_id,
+            follows_component_id=(
+                decision.vat_base_component_id
+                if decision.decision_action == "vat_follow_base"
+                else ""
+            ),
         )
         for decision in decisions
         if (
@@ -3737,6 +3768,11 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     group_impact_cent=int(payload["gross_cent"]),
                     mandatory=abs(component.cash_delta_cent) >= _materiality_from_state(state).overall_cent,
                     baseline_item_code=decision.original_standard_item_id,
+                    follows_component_id=(
+                        decision.vat_base_component_id
+                        if decision.decision_action == "vat_follow_base"
+                        else ""
+                    ),
                 )
             )
     unresolved = tuple(unresolved_list)
@@ -3784,6 +3820,11 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 ),
                 mandatory=True,
                 baseline_item_code=decision.original_standard_item_id,
+                follows_component_id=(
+                    decision.vat_base_component_id
+                    if decision.decision_action == "vat_follow_base"
+                    else ""
+                ),
             )
         )
     unresolved = tuple(unresolved_list)

@@ -4,14 +4,14 @@ import hashlib
 from pathlib import Path
 
 
-SCHEMA_VERSION = "4.2"
-SCORING_VERSION = "2026-08-24-complete-account-path-v15"
-ACTION_MATRIX_VERSION = "2026-08-24-selectable-change-threshold-v15"
+SCHEMA_VERSION = "4.3"
+SCORING_VERSION = "2026-08-24-vat-companion-single-strong-v16"
+ACTION_MATRIX_VERSION = "2026-08-24-single-strong-v16"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
-SUMMARY_SEMANTICS_VERSION = "2026-08-24-fixed-relations-v3"
+SUMMARY_SEMANTICS_VERSION = "2026-08-24-service-tax-purpose-v4"
 MATERIALITY_VERSION = "2026-08-23-single-item-only-v2"
-FORCED_CHECKS_VERSION = "2026-08-23-forced-checks-v1"
+FORCED_CHECKS_VERSION = "2026-08-24-vat-companion-v2"
 
 
 def _combined_sha256(paths: tuple[Path, ...]) -> str:

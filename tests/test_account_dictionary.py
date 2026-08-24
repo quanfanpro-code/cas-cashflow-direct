@@ -316,6 +316,29 @@ def test_common_detail_families_keep_every_full_path_node(account_path: str) -> 
     _assert_every_path_node_has_an_explicit_role(result)
 
 
+@pytest.mark.parametrize(
+    ("account_path", "expected_item"),
+    (
+        ("应付职工薪酬_劳务派遣_生产人员", "CFO-05"),
+        ("制造费用_外协加工费", "CFO-04"),
+        ("管理费用_计量认证费", "CFO-07"),
+        ("应付票据_设备款_银行承兑汇票", "CFI-06"),
+        ("应付票据_材料款_商业承兑汇票", "CFO-04"),
+        ("在建工程_生产线_安装改造费", "CFI-06"),
+    ),
+)
+def test_complete_detail_paths_keep_their_business_substance(
+    account_path: str,
+    expected_item: str,
+) -> None:
+    result = analyze_account_path(account_path, load_account_semantic_rules(ROOT))
+
+    assert result.outflow_candidate_item_ids == (expected_item,)
+    assert result.quality.value == 45
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
 def test_unknown_detail_is_reported_instead_of_being_hidden_by_parent() -> None:
     result = analyze_account_path(
         "其他应付款_火星专用款",

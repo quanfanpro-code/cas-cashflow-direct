@@ -69,6 +69,56 @@ class SummarySemanticsTests(unittest.TestCase):
                 self.assertNotIn("CFO-05", result.candidate_item_ids)
                 self.assertLess(result.quality.value, 45)
 
+    def test_external_service_relationships_use_purpose_instead_of_service_word(self):
+        expected = {
+            "支付生产线产品检测费": ("CFO-04",),
+            "支付管理咨询费": ("CFO-07",),
+            "支付客户项目设备安装服务费": ("CFO-04",),
+            "支付委外加工费": ("CFO-04",),
+            "支付设备日常维修费": ("CFO-07",),
+        }
+        for summary, candidate in expected.items():
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+                self.assertEqual(candidate, result.candidate_item_ids)
+                self.assertIs(EvidenceQuality.STRONG, result.quality)
+
+        generic = analyze_summary("支付外部物流运输费", self.rules)
+        self.assertEqual({"CFO-04", "CFO-07"}, set(generic.candidate_item_ids))
+        self.assertIs(EvidenceQuality.WEAK, generic.quality)
+
+    def test_installation_and_utility_purpose_bind_to_the_business_object(self):
+        asset = analyze_summary("支付自有设备安装改造款", self.rules)
+        production_power = analyze_summary("支付生产用电费", self.rules)
+        office_power = analyze_summary("支付办公用电费", self.rules)
+        generic_power = analyze_summary("支付电费", self.rules)
+
+        self.assertEqual(("CFI-06",), asset.candidate_item_ids)
+        self.assertIs(EvidenceQuality.STRONG, asset.quality)
+        self.assertEqual(("CFO-04",), production_power.candidate_item_ids)
+        self.assertIs(EvidenceQuality.STRONG, production_power.quality)
+        self.assertEqual(("CFO-07",), office_power.candidate_item_ids)
+        self.assertIs(EvidenceQuality.STRONG, office_power.quality)
+        self.assertNotIn("CFO-04", generic_power.candidate_item_ids)
+        self.assertLess(generic_power.quality.value, 45)
+
+    def test_individual_tax_uses_the_service_object(self) -> None:
+        wage = analyze_summary("缴纳工资个税", self.rules)
+        equity_incentive = analyze_summary("缴纳股权激励个税", self.rules)
+        dividend = analyze_summary("缴纳分红个税", self.rules)
+        generic = analyze_summary("缴纳个人所得税", self.rules)
+
+        self.assertEqual(("CFO-05",), wage.candidate_item_ids)
+        self.assertEqual(("CFO-05",), equity_incentive.candidate_item_ids)
+        self.assertEqual(("CFF-05",), dividend.candidate_item_ids)
+        self.assertTrue(
+            all(
+                result.quality is EvidenceQuality.STRONG
+                for result in (wage, equity_incentive, dividend)
+            )
+        )
+        self.assertNotEqual(("CFO-05",), generic.candidate_item_ids)
+
     def test_employee_advance_return_does_not_become_financing_borrowing(self):
         for summary in (
             "收到员工退回借款",

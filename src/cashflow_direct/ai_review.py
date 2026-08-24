@@ -1002,9 +1002,12 @@ def resolve_structured_ai_results(
                     and all(
                         assessment.score is not None
                         and score_meets_change_threshold(
-                            assessment.score, automatic_change_threshold
+                            assessment.score,
+                            automatic_change_threshold,
+                            result.summary.quality.value,
+                            result.account_path.quality.value,
                         )
-                        for assessment, _ in valid_votes
+                        for assessment, result in valid_votes
                     )
                 )
                 next_action = (
@@ -1089,9 +1092,12 @@ def resolve_structured_ai_results(
                 can_change = all(
                     assessment.score is not None
                     and score_meets_change_threshold(
-                        assessment.score, automatic_change_threshold
+                        assessment.score,
+                        automatic_change_threshold,
+                        result.summary.quality.value,
+                        result.account_path.quality.value,
                     )
-                    for assessment, _ in valid_votes
+                    for assessment, result in valid_votes
                 )
                 next_action = (
                     DecisionAction.AUTOMATIC_CHANGE
@@ -1195,9 +1201,12 @@ def resolve_structured_ai_results(
                     and all(
                         assessment.score is not None
                         and score_meets_change_threshold(
-                            assessment.score, automatic_change_threshold
+                            assessment.score,
+                            automatic_change_threshold,
+                            result.summary.quality.value,
+                            result.account_path.quality.value,
                         )
-                        for assessment, _ in valid_votes
+                        for assessment, result in valid_votes
                     )
                     and chosen_assessment.candidate_item_id
                     != decision.original_standard_item_id
@@ -1290,7 +1299,18 @@ def resolve_structured_ai_results(
                     chosen_assessment is not None
                     and chosen_assessment.score is not None
                     and score_meets_change_threshold(
-                        chosen_assessment.score, automatic_change_threshold
+                        chosen_assessment.score,
+                        automatic_change_threshold,
+                        (
+                            chosen_result.summary.quality.value
+                            if chosen_result is not None
+                            else 0
+                        ),
+                        (
+                            chosen_result.account_path.quality.value
+                            if chosen_result is not None
+                            else 0
+                        ),
                     )
                     and chosen_assessment.candidate_item_id == decision.system_item_id
                     and chosen_assessment.candidate_item_id

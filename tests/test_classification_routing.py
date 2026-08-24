@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from cashflow_direct.components import ComponentSourceAllocation
 from cashflow_direct.models import (
     CashflowComponent,
     ClassificationDecision,
@@ -129,6 +130,48 @@ def test_customer_threshold_55_allows_m0_score_55_change() -> None:
 
     assert result.decisions[0].resolved is True
     assert result.decisions[0].decision_action == "automatic_change"
+
+
+@pytest.mark.parametrize(
+    ("score", "summary_quality", "path_quality", "expected_action"),
+    (
+        (45, 45, 0, "automatic_change"),
+        (50, 25, 25, "automatic_keep"),
+    ),
+)
+def test_classification_45_single_strong_uses_source_qualities(
+    score: int,
+    summary_quality: int,
+    path_quality: int,
+    expected_action: str,
+) -> None:
+    component = cashflow_component(
+        "支付应改判事项",
+        -50,
+        ("其他应付款_构造事项",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id=f"SINGLE-STRONG-{score}",
+    )
+    decision = replace(
+        _decision(
+            component.component_id,
+            score=score,
+            state="conflicts",
+            candidate="CFO-04",
+        ),
+        original_standard_item_id="CFO-07",
+        summary_quality=summary_quality,
+        account_path_quality=path_quality,
+    )
+
+    result = route_classification_decisions(
+        (component,),
+        (decision,),
+        THRESHOLDS,
+        automatic_change_threshold=45,
+    )
+
+    assert result.decisions[0].decision_action == expected_action
 
 
 def test_same_source_business_conflict_is_blocked_before_ai_tasks() -> None:
@@ -815,6 +858,127 @@ def test_vat_without_a_base_transaction_cannot_reclassify_a_valid_original() -> 
     assert result.decisions[0].system_item_id == "CFO-07"
     assert result.decisions[0].vat_base_missing is True
     assert result.ai_tasks == ()
+
+
+def test_split_vat_follows_reliably_kept_base_through_shared_cash_source() -> None:
+    components = (
+        replace(
+            cashflow_component(
+                "支付材料款",
+                -500,
+                ("应付账款_材料供应商",),
+                original_item_text="购买商品、接受劳务支付的现金",
+                component_id="VAT-BASE-KEPT",
+            ),
+            voucher_key="V-VAT-KEPT",
+        ),
+        replace(
+            cashflow_component(
+                "支付材料进项税",
+                -65,
+                ("应交税费_应交增值税_进项税额",),
+                original_item_text="支付的各项税费",
+                component_id="VAT-FOLLOW-KEPT",
+            ),
+            voucher_key="V-VAT-KEPT",
+        ),
+    )
+    decisions = (
+        replace(
+            _decision("VAT-BASE-KEPT", score=70, candidate="CFO-04"),
+            original_standard_item_id="CFO-04",
+        ),
+        replace(
+            _decision(
+                "VAT-FOLLOW-KEPT",
+                score=70,
+                state="conflicts",
+                candidate="CFO-06",
+            ),
+            original_standard_item_id="CFO-06",
+        ),
+    )
+
+    result = route_classification_decisions(
+        components,
+        decisions,
+        THRESHOLDS,
+        source_allocations=(
+            ComponentSourceAllocation("VAT-BASE-KEPT", "CASH-ROW-1", -500),
+            ComponentSourceAllocation("VAT-FOLLOW-KEPT", "CASH-ROW-1", -65),
+        ),
+    )
+    vat = result.decisions[1]
+
+    assert vat.system_item_id == "CFO-04"
+    assert vat.resolved is True
+    assert vat.vat_base_missing is False
+    assert vat.vat_base_component_id == "VAT-BASE-KEPT"
+    assert vat.decision_action == "vat_follow_base"
+    assert "缺少同一现金业务" not in vat.reason
+
+
+def test_split_vat_waits_for_material_base_without_own_ai_task() -> None:
+    components = (
+        replace(
+            cashflow_component(
+                "支付设备款",
+                -20_000,
+                ("在建工程_设备安装",),
+                original_item_text="支付其他与经营活动有关的现金",
+                component_id="VAT-BASE-PENDING",
+            ),
+            voucher_key="V-VAT-PENDING",
+        ),
+        replace(
+            cashflow_component(
+                "支付设备进项税",
+                -2_600,
+                ("应交税费_应交增值税_进项税额",),
+                original_item_text="支付的各项税费",
+                component_id="VAT-FOLLOW-PENDING",
+            ),
+            voucher_key="V-VAT-PENDING",
+        ),
+    )
+    decisions = (
+        replace(
+            _decision(
+                "VAT-BASE-PENDING",
+                score=90,
+                state="conflicts",
+                candidate="CFI-06",
+            ),
+            system_item_name="购建固定资产、无形资产和其他长期资产支付的现金",
+            original_standard_item_id="CFO-07",
+        ),
+        replace(
+            _decision(
+                "VAT-FOLLOW-PENDING",
+                score=90,
+                state="conflicts",
+                candidate="CFO-06",
+            ),
+            original_standard_item_id="CFO-06",
+        ),
+    )
+
+    result = route_classification_decisions(
+        components,
+        decisions,
+        THRESHOLDS,
+        source_allocations=(
+            ComponentSourceAllocation("VAT-BASE-PENDING", "CASH-ROW-2", -20_000),
+            ComponentSourceAllocation("VAT-FOLLOW-PENDING", "CASH-ROW-2", -2_600),
+        ),
+    )
+    vat = result.decisions[1]
+
+    assert vat.resolved is False
+    assert vat.decision_action == "vat_follow_base"
+    assert vat.vat_base_component_id == "VAT-BASE-PENDING"
+    assert vat.component_id not in {task.component_id for task in result.ai_tasks}
+    assert "缺少同一现金业务" not in vat.reason
 
 
 def test_overall_material_refund_clue_uses_the_normal_human_route() -> None:

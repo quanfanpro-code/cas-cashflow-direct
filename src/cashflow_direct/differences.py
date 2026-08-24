@@ -49,6 +49,12 @@ def _independent_sources(
     component: CashflowComponent,
     decision: ClassificationDecision,
 ) -> tuple[str, str]:
+    if decision.decision_action == "vat_follow_base":
+        return (
+            "增值税附属关系：与基础组成"
+            f"{decision.vat_base_component_id}共用唯一现金来源",
+            f"基础项目决定：{decision.system_item_name or '明确排除'}",
+        )
     sources: list[str] = []
     if decision.summary_quality > 0:
         sources.append(
@@ -72,6 +78,8 @@ def _independent_sources(
 def _score_description(decision: ClassificationDecision) -> str:
     if decision.matched_rule_id == "INTERNAL-TRANSFER":
         return "不适用：内部划转在现金范围阶段判定，不进入现金流项目分类评分。"
+    if decision.decision_action == "vat_follow_base":
+        return "不适用：增值税组成随同一现金业务的唯一基础项目确定，不单独参加修改评分。"
     summary = _QUALITY_TEXT.get(decision.summary_quality, "质量未记录")
     account = _QUALITY_TEXT.get(decision.account_path_quality, "质量未记录")
     if decision.source_conflict or decision.evidence_score is None:
@@ -99,6 +107,17 @@ def _difference_reason(
         return (
             "两个已确认纳入现金范围的账户在同一凭证内方向相反且金额相等，"
             "按现金范围规则自动排除为内部划转。"
+        )
+    if decision.decision_action == "vat_follow_base":
+        target = (
+            "明确排除"
+            if decision.excluded
+            else f"基础项目“{decision.system_item_name}”自动确定"
+        )
+        return (
+            "增值税组成与唯一基础业务组成"
+            f"{decision.vat_base_component_id}共用现金来源，随{target}；"
+            "不按增值税自身证据分数单独改判。"
         )
     score = (
         "证据不存在可用合计分"

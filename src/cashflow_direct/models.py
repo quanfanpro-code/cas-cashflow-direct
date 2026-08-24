@@ -109,6 +109,8 @@ class ClassificationDecision:
     candidate_status: str = "available"
     original_standard_item_id: str = ""
     single_materiality_level: str = ""
+    vat_base_component_id: str = ""
+    vat_relation_status: str = ""
 
     @property
     def item_code(self) -> str:
@@ -146,6 +148,7 @@ class ReviewBatch:
     source_locations: tuple[str, ...] = ()
     mandatory: bool = False
     baseline_item_code: str = ""
+    follows_component_id: str = ""
 
     @property
     def alternative_item_code(self) -> str:
@@ -182,6 +185,7 @@ class UnresolvedDecision:
     group_impact_cent: int = 0
     mandatory: bool = False
     baseline_item_code: str = ""
+    follows_component_id: str = ""
 
 
 def validate_materiality_order(amounts: MaterialityAmounts) -> MaterialityAmounts:

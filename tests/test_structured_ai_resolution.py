@@ -151,7 +151,7 @@ def test_ai_resolution_rejects_invalid_customer_threshold_before_routing() -> No
         original_standard_item_id="CFO-01",
     )
 
-    with pytest.raises(ValueError, match="只允许50、55、70、90"):
+    with pytest.raises(ValueError, match="只允许45、50、55、70、90"):
         resolve_structured_ai_results(
             (decision,),
             (),
@@ -160,6 +160,80 @@ def test_ai_resolution_rejects_invalid_customer_threshold_before_routing() -> No
             ITEM_DIRECTIONS,
             automatic_change_threshold=60,
         )
+
+
+def test_single_ai_45_threshold_accepts_one_strong_source() -> None:
+    decision = _decision(
+        original_state="conflicts",
+        materiality="M1",
+        action="ai_review",
+        original_standard_item_id="CFO-03",
+    )
+    result = StructuredAIResult(
+        task_id="AI-1",
+        component_id="CMP-1",
+        summary=AISourceReview(
+            "CFO-01",
+            EvidenceQuality.STRONG,
+            "销售回款",
+            ("action:sale_collection",),
+            False,
+        ),
+        account_path=AISourceReview(
+            "",
+            EvidenceQuality.INVALID,
+            "完整路径不足以形成候选",
+            (),
+            False,
+        ),
+        sources_independent=False,
+        business_conflict=False,
+        direction_status="compatible",
+        reason="摘要形成单一强证据，路径未形成相反证据",
+        alternative_item_ids=(),
+        note_ids=(),
+    )
+
+    resolved = resolve_structured_ai_results(
+        (decision,),
+        (_task("AI-1"),),
+        (result,),
+        ITEM_NAMES,
+        ITEM_DIRECTIONS,
+        automatic_change_threshold=45,
+    )[0]
+
+    assert resolved.evidence_score == 45
+    assert resolved.decision_action == "automatic_change"
+    assert resolved.system_item_id == "CFO-01"
+
+
+def test_single_ai_45_threshold_rejects_pure_50_without_strong_source() -> None:
+    decision = _decision(
+        original_state="conflicts",
+        materiality="M1",
+        action="ai_review",
+        original_standard_item_id="CFO-03",
+    )
+
+    resolved = resolve_structured_ai_results(
+        (decision,),
+        (_task("AI-1"),),
+        (
+            _result(
+                "AI-1",
+                summary_quality=EvidenceQuality.MEDIUM,
+                account_quality=EvidenceQuality.MEDIUM,
+            ),
+        ),
+        ITEM_NAMES,
+        ITEM_DIRECTIONS,
+        automatic_change_threshold=45,
+    )[0]
+
+    assert resolved.evidence_score == 50
+    assert resolved.decision_action == "automatic_keep"
+    assert resolved.system_item_id == "CFO-03"
 
 
 def test_single_ai_below_change_threshold_restores_valid_original() -> None:

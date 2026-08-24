@@ -7,7 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 import cashflow_direct.pipeline as pipeline_module
 from cashflow_direct.component_structure_ai import build_structure_ai_tasks
@@ -171,7 +171,7 @@ def test_component_structure_ai_low_first_result_gets_second_review_then_finishe
 
 def test_refund_confirmation_api_has_been_removed() -> None:
     assert "confirm_reversal_patterns" not in dir(pipeline_module)
-from cashflow_direct.models import ClassificationDecision
+from cashflow_direct.models import CashflowComponent, ClassificationDecision
 from tests.fixture_factory import mark_dictionary_complete, write_end_to_end_case
 
 
@@ -186,6 +186,8 @@ def test_evidence_record_keeps_every_forced_check_that_can_change_the_route() ->
         evidence_level="strong",
         company_rule_conflict=True,
         vat_base_missing=True,
+        vat_base_component_id="VAT-BASE-1",
+        vat_relation_status="unique",
         net_item_facts_missing=True,
     )
 
@@ -193,8 +195,69 @@ def test_evidence_record_keeps_every_forced_check_that_can_change_the_route() ->
 
     assert payload["company_rule_conflict"] is True
     assert payload["vat_base_missing"] is True
+    assert payload["vat_base_component_id"] == "VAT-BASE-1"
+    assert payload["vat_relation_status"] == "unique"
     assert payload["net_item_facts_missing"] is True
     assert "new_reversal_pattern" not in payload
+
+
+def test_pipeline_refreshes_vat_after_base_decision_changes() -> None:
+    state = {
+        "components": [
+            asdict(
+                CashflowComponent(
+                    "BASE",
+                    "V-1",
+                    "支付材料款",
+                    -100,
+                    ("应付账款_材料供应商",),
+                )
+            ),
+            asdict(
+                CashflowComponent(
+                    "VAT",
+                    "V-1",
+                    "支付材料进项税",
+                    -13,
+                    ("应交税费_应交增值税_进项税额",),
+                )
+            ),
+        ],
+        "source_allocations": [
+            {"component_id": "BASE", "entry_id": "CASH-1", "allocated_cent": -100},
+            {"component_id": "VAT", "entry_id": "CASH-1", "allocated_cent": -13},
+        ],
+    }
+    decisions = (
+        ClassificationDecision(
+            "BASE",
+            "CFO-04",
+            "购买商品、接受劳务支付的现金",
+            "outflow",
+            "TEST",
+            "基础项目已落定",
+            "strong",
+            resolved=True,
+            decision_action="automatic_change",
+        ),
+        ClassificationDecision(
+            "VAT",
+            "CFO-06",
+            "支付的各项税费",
+            "outflow",
+            "TEST",
+            "等待基础项目",
+            "strong",
+            resolved=False,
+            vat_base_missing=True,
+        ),
+    )
+
+    refreshed = pipeline_module._refresh_vat_companion_decisions(state, decisions)
+
+    assert refreshed[1].system_item_id == "CFO-04"
+    assert refreshed[1].resolved is True
+    assert refreshed[1].vat_base_component_id == "BASE"
 
 
 def test_final_ai_records_include_valid_results_and_technical_failure_terminal_states() -> None:
@@ -361,6 +424,114 @@ def _write_illegal_summary_case(root: Path) -> Path:
     return path
 
 
+def _write_split_vat_case(root: Path) -> Path:
+    path = root / "构造价税拆分.xlsx"
+    workbook = Workbook()
+    detail = workbook.active
+    detail.title = "序时账"
+    detail.append(
+        ["日期", "凭证号", "摘要", "科目", "借方", "贷方", "流量金额", "现流项目"]
+    )
+    detail.append(
+        [
+            "2026-01-01",
+            "记-1",
+            "支付材料含税款",
+            "1002 银行存款",
+            None,
+            113,
+            None,
+            "购买商品、接受劳务支付的现金",
+        ]
+    )
+    detail.append(
+        [
+            "2026-01-01",
+            "记-1",
+            "支付材料款",
+            "应付账款_应付材料款",
+            100,
+            None,
+            100,
+            "购买商品、接受劳务支付的现金",
+        ]
+    )
+    detail.append(
+        [
+            "2026-01-01",
+            "记-1",
+            "支付材料进项税",
+            "应交税费_应交增值税_进项税额",
+            13,
+            None,
+            13,
+            "支付的各项税费",
+        ]
+    )
+    balances = workbook.create_sheet("现金余额资料")
+    balances.append(["项目", "金额"])
+    balances.append(["期初现金及现金等价物余额", 113])
+    balances.append(["期末现金及现金等价物余额", 0])
+    balances.append(["汇率变动对现金及现金等价物的影响", 0])
+    workbook.save(path)
+    workbook.close()
+    return path
+
+
+def _write_split_vat_ai_case(root: Path) -> Path:
+    path = root / "构造价税待AI.xlsx"
+    workbook = Workbook()
+    detail = workbook.active
+    detail.title = "序时账"
+    detail.append(
+        ["日期", "凭证号", "摘要", "科目", "借方", "贷方", "流量金额", "现流项目"]
+    )
+    detail.append(
+        [
+            "2026-01-01",
+            "记-2",
+            "支付生产线设备含税款",
+            "1002 银行存款",
+            None,
+            11_300,
+            None,
+            "支付其他与经营活动有关的现金",
+        ]
+    )
+    detail.append(
+        [
+            "2026-01-01",
+            "记-2",
+            "支付自有设备购置款用于生产线建设",
+            "在建工程_生产线设备",
+            10_000,
+            None,
+            10_000,
+            "支付其他与经营活动有关的现金",
+        ]
+    )
+    detail.append(
+        [
+            "2026-01-01",
+            "记-2",
+            "支付设备进项税",
+            "应交税费_应交增值税_进项税额",
+            1_300,
+            None,
+            1_300,
+            "支付的各项税费",
+        ]
+    )
+    balances = workbook.create_sheet("现金余额资料")
+    balances.append(["项目", "金额"])
+    balances.append(["期初现金及现金等价物余额", 11_300])
+    balances.append(["期末现金及现金等价物余额", 0])
+    balances.append(["汇率变动对现金及现金等价物的影响", 0])
+    workbook.save(path)
+    workbook.close()
+    return path
+
+
 def test_run_classification_persists_the_automatic_fill_route() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -412,6 +583,161 @@ def test_run_classification_persists_the_automatic_fill_route() -> None:
         assert counts["run_version"] == len(
             current_versions(Path(__file__).resolve().parents[1])
         )
+
+
+def test_pipeline_uses_source_allocations_for_split_vat_companion() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preflight = run_preflight(
+            [_write_split_vat_case(root)],
+            ("100000", "50000", "5000"),
+            output_parent=root,
+        )
+        confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+        mark_dictionary_complete(preflight.run_dir)
+
+        run_classification(preflight.run_dir)
+
+        state = json.loads(
+            (
+                preflight.run_dir / "计算留痕数据" / "运行状态.json"
+            ).read_text(encoding="utf-8-sig")
+        )
+        decisions = {item["component_id"]: item for item in state["decisions"]}
+        vat = next(
+            item
+            for item in decisions.values()
+            if item["vat_relation_status"] == "unique"
+        )
+        base = decisions[vat["vat_base_component_id"]]
+
+        assert vat["system_item_id"] == base["system_item_id"] == "CFO-04"
+        assert vat["decision_action"] == "vat_follow_base"
+        assert vat["vat_base_missing"] is False
+        assert vat["component_id"] not in {
+            task["component_id"] for task in state["ai_tasks"]
+        }
+
+
+def test_pipeline_refreshes_split_vat_after_ai_resolves_the_base() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preflight = run_preflight(
+            [_write_split_vat_ai_case(root)],
+            ("100000", "50000", "5000"),
+            output_parent=root,
+        )
+        confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+        mark_dictionary_complete(preflight.run_dir)
+
+        classified = run_classification(preflight.run_dir)
+        state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        assert classified.status == "waiting_ai"
+        assert len(state["ai_tasks"]) == 1
+        task = state["ai_tasks"][0]
+        vat_before = next(
+            item for item in state["decisions"] if item["vat_relation_status"] == "unique"
+        )
+        assert vat_before["resolved"] is False
+        assert task["component_id"] == vat_before["vat_base_component_id"]
+        assert "CFI-06" in task["candidate_item_ids"], task
+        assert "支付自有设备购置款用于生产线建设" in task["context"], task["context"]
+        assert "在建工程_生产线设备" in task["context"], task["context"]
+
+        result_path = root / "价税基础AI结果.jsonl"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task["task_id"],
+                    "component_id": task["component_id"],
+                    "summary": {
+                        "candidate_item_id": "CFI-06",
+                        "quality": "strong",
+                        "basis_text": "支付自有设备购置款用于生产线建设",
+                        "classification_facts": ["purpose:long_asset_construction"],
+                        "conflict": False,
+                    },
+                    "account_path": {
+                        "candidate_item_id": "CFI-06",
+                        "quality": "strong",
+                        "basis_text": "在建工程_生产线设备",
+                        "classification_facts": ["account:construction_in_progress"],
+                        "conflict": False,
+                    },
+                    "sources_independent": True,
+                    "business_conflict": False,
+                    "direction_status": "compatible",
+                    "reason": "摘要和完整路径均唯一指向自有长期资产购建",
+                    "alternative_item_ids": [],
+                    "note_ids": [],
+                    "review_round": "single",
+                    "reviewer_id": "test-reviewer",
+                    "model_id": "test-model",
+                    "reviewed_at": "2026-08-24T12:00:00+08:00",
+                    "prior_result_difference": "首轮复核，无前序结果",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8-sig",
+        )
+
+        imported = import_ai_results(preflight.run_dir, result_path)
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        vat_after = next(
+            item for item in state["decisions"] if item["vat_relation_status"] == "unique"
+        )
+
+        assert imported.status == "AI 已完成", state["structured_ai_validation"]
+        assert vat_after["system_item_id"] == "CFI-06"
+        assert vat_after["resolved"] is True
+        assert vat_after["decision_action"] == "vat_follow_base"
+
+
+def test_pipeline_builds_one_manual_choice_for_pending_base_and_vat() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preflight = run_preflight(
+            [_write_split_vat_ai_case(root)],
+            ("10000", "5000", "500"),
+            output_parent=root,
+        )
+        confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+        mark_dictionary_complete(preflight.run_dir)
+
+        classified = run_classification(preflight.run_dir)
+        assert classified.status == "waiting_human"
+        final = finalize_run(preflight.run_dir)
+        state = json.loads(
+            (
+                preflight.run_dir / "计算留痕数据" / "运行状态.json"
+            ).read_text(encoding="utf-8-sig")
+        )
+        dependent = next(
+            batch for batch in state["review_batches"] if batch["follows_component_id"]
+        )
+
+        assert dependent["follows_component_id"] in {
+            component_id
+            for batch in state["review_batches"]
+            for component_id in batch["component_ids"]
+        }
+        workbook = load_workbook(final.workbook_path, data_only=False)
+        try:
+            review = workbook["重要待复核事项"]
+            headers = [cell.value for cell in review[1]]
+            manual_column = headers.index("人工确认项目") + 1
+            dependent_row = next(
+                row
+                for row, batch in enumerate(state["review_batches"], 2)
+                if batch["follows_component_id"]
+            )
+            self_choice = review.cell(dependent_row, manual_column)
+            assert self_choice.data_type == "f"
+            assert self_choice.protection.locked is True
+        finally:
+            workbook.close()
 
 
 def test_pipeline_imports_structured_ai_sources_then_system_recalculates_action() -> None:

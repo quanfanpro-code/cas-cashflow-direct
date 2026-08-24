@@ -673,19 +673,70 @@ def test_removed_refund_route_argument_is_not_part_of_the_policy_api() -> None:
         )
 
 
-@pytest.mark.parametrize("threshold", (50, 55, 70, 90))
+@pytest.mark.parametrize("threshold", (45, 50, 55, 70, 90))
 def test_automatic_change_threshold_accepts_only_customer_options(threshold: int) -> None:
     policy = _policy()
 
     assert policy.validate_automatic_change_threshold(threshold) == threshold
 
 
-@pytest.mark.parametrize("threshold", (0, 45, 60, 80, 100))
+@pytest.mark.parametrize("threshold", (0, 40, 60, 80, 100))
 def test_automatic_change_threshold_rejects_other_values(threshold: int) -> None:
     policy = _policy()
 
-    with pytest.raises(ValueError, match="只允许50、55、70、90"):
+    with pytest.raises(ValueError, match="只允许45、50、55、70、90"):
         policy.validate_automatic_change_threshold(threshold)
+
+
+@pytest.mark.parametrize(
+    ("score", "summary_quality", "path_quality", "expected"),
+    (
+        (45, 45, 0, True),
+        (55, 45, 10, True),
+        (70, 45, 25, True),
+        (90, 45, 45, True),
+        (50, 25, 25, False),
+        (45, 25, 10, False),
+    ),
+)
+def test_45_single_strong_authorization_requires_a_strong_source(
+    score: int,
+    summary_quality: int,
+    path_quality: int,
+    expected: bool,
+) -> None:
+    policy = _policy()
+
+    assert policy.change_is_authorized(
+        score,
+        45,
+        summary_quality,
+        path_quality,
+    ) is expected
+
+
+def test_45_single_strong_route_does_not_authorize_pure_50() -> None:
+    policy = _policy()
+
+    pure_50 = policy.route_normal_decision(
+        50,
+        policy.OriginalItemState.CONFLICTS,
+        policy.MaterialityLevel.M0,
+        automatic_change_threshold=45,
+        summary_quality=25,
+        account_path_quality=25,
+    )
+    single_strong = policy.route_normal_decision(
+        45,
+        policy.OriginalItemState.CONFLICTS,
+        policy.MaterialityLevel.M0,
+        automatic_change_threshold=45,
+        summary_quality=45,
+        account_path_quality=0,
+    )
+
+    assert pure_50.action.value == "automatic_keep"
+    assert single_strong.action.value == "automatic_change"
 
 
 @pytest.mark.parametrize(

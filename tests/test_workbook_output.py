@@ -56,6 +56,76 @@ def _column_is_hidden(sheet, one_based_index: int) -> bool:
 
 
 class WorkbookOutputTests(unittest.TestCase):
+    def test_vat_review_row_follows_the_base_without_a_second_manual_choice(self) -> None:
+        base_batch = ReviewBatch(
+            "REV-BASE",
+            ("CMP-BASE",),
+            "CFI-06",
+            ("CFO-07",),
+            10_000,
+            "基础项目待人工决定",
+            baseline_statement_amount_cent=-10_000,
+            cash_delta_cent=-10_000,
+            baseline_item_code="CFO-07",
+        )
+        vat_batch = ReviewBatch(
+            "REV-VAT",
+            ("CMP-VAT",),
+            "CFO-06",
+            ("CFI-06", "CFO-07"),
+            1_300,
+            "增值税随基础项目决定",
+            baseline_statement_amount_cent=-1_300,
+            cash_delta_cent=-1_300,
+            baseline_item_code="CFO-06",
+            mandatory=True,
+            follows_component_id="CMP-BASE",
+        )
+        model = replace(
+            workbook_model(0, 0),
+            review_batches=(base_batch, vat_batch),
+            trace_rows=(
+                {"业务组成编号(技术)": "CMP-BASE", "最终决定项目": "等待人工复核"},
+                {"业务组成编号(技术)": "CMP-VAT", "最终决定项目": "等待人工复核"},
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "增值税随基础人工选择.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                review = workbook["重要待复核事项"]
+                headers = [cell.value for cell in review[1]]
+                manual_column = headers.index("人工确认项目") + 1
+                system_column = headers.index("系统项目(技术)") + 1
+                status_column = headers.index("人工处理状态") + 1
+                options_column = headers.index("人工可选标准项目") + 1
+                base_choice = review.cell(2, manual_column)
+                vat_choice = review.cell(3, manual_column)
+                vat_status = review.cell(3, status_column)
+
+                self.assertEqual("n", base_choice.data_type)
+                self.assertEqual("f", vat_choice.data_type)
+                self.assertIn(base_choice.coordinate, vat_choice.value)
+                self.assertIn(review.cell(2, system_column).coordinate, vat_choice.value)
+                self.assertIn("随基础项目待定", vat_status.value)
+                self.assertIn("随基础项目完成", vat_status.value)
+                validated_cells = " ".join(
+                    str(validation.sqref)
+                    for validation in review.data_validations.dataValidation
+                )
+                self.assertIn(base_choice.coordinate, validated_cells)
+                self.assertNotIn(vat_choice.coordinate, validated_cells)
+                self.assertTrue(vat_choice.protection.locked)
+                self.assertEqual(
+                    "随基础项目自动确定（无需重复选择）",
+                    review.cell(3, options_column).value,
+                )
+            finally:
+                workbook.close()
+            validation = validate_output_workbook(path, model)
+            self.assertTrue(validation.valid, validation.errors)
+
     def test_status_sheet_displays_selected_automatic_change_threshold(self) -> None:
         model = replace(workbook_model(0, 0), automatic_change_threshold=55)
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,6 +136,20 @@ class WorkbookOutputTests(unittest.TestCase):
                 status = workbook["使用说明与状态"]
                 self.assertEqual("本次自动修改最低证据分", status["A6"].value)
                 self.assertEqual("55分（客户选择；70为默认推荐）", status["B6"].value)
+            finally:
+                workbook.close()
+
+    def test_status_sheet_explains_45_as_single_strong(self) -> None:
+        model = replace(workbook_model(0, 0), automatic_change_threshold=45)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "单强档说明.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                self.assertEqual(
+                    "45分（单强：至少一个45分强来源；70为默认推荐）",
+                    workbook["使用说明与状态"]["B6"].value,
+                )
             finally:
                 workbook.close()
 

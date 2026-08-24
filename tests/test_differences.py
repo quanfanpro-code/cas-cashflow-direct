@@ -250,6 +250,37 @@ class OriginalAutoDifferenceTests(unittest.TestCase):
         self.assertIn("A2:L2", row["独立来源2"])
         self.assertIn("A3:L3", row["独立来源2"])
 
+    def test_vat_companion_explains_base_following_instead_of_score_change(self) -> None:
+        source = entry("E1", "支付其他与经营活动有关的现金")
+        current = component("VAT", source.original_flow_item, ("E1",))
+        vat = replace(
+            decision("VAT", "CFO-02", "支付给职工以及为职工支付的现金"),
+            decision_action="vat_follow_base",
+            decision_source="vat_companion",
+            vat_base_component_id="BASE",
+            vat_relation_status="unique",
+            evidence_score=0,
+            summary_quality=0,
+            account_path_quality=0,
+        )
+
+        row = self.build((source,), (current,), (vat,))[0]
+
+        self.assertEqual(
+            "增值税组成与唯一基础业务组成BASE共用现金来源，随基础项目"
+            "“支付给职工以及为职工支付的现金”自动确定；不按增值税自身证据分数单独改判。",
+            row["差异形成原因"],
+        )
+        self.assertEqual(
+            "不适用：增值税组成随同一现金业务的唯一基础项目确定，不单独参加修改评分。",
+            row["打分逻辑描述及打分结果"],
+        )
+        self.assertEqual("增值税附属关系：与基础组成BASE共用唯一现金来源", row["独立来源1"])
+        self.assertEqual(
+            "基础项目决定：支付给职工以及为职工支付的现金",
+            row["独立来源2"],
+        )
+
     def test_auto_fill_for_blank_original_is_a_difference_result(self) -> None:
         source = entry("E1", "")
         current = component("C1", "", ("E1",))

@@ -27,12 +27,17 @@
       {"slot": "business_object", "value": "service_revenue", "terms": ["物业租赁款", "劳务收入", "服务收入", "服务款"]},
       {"slot": "business_object", "value": "generic_service", "terms": ["咨询服务费", "技术服务费", "咨询费", "服务费"]},
       {"slot": "business_object", "value": "operating_professional_service", "terms": ["法律咨询费", "管理咨询费", "会计服务费", "律师费", "审计费", "佣金", "中介费"]},
-      {"slot": "business_object", "value": "production_service", "terms": ["生产外包服务费", "设备运维费", "矿山作业费", "产品检测费", "生产服务费"]},
+      {"slot": "business_object", "value": "production_service", "terms": ["生产外包服务费", "设备运维费", "矿山作业费", "产品检测费", "生产服务费", "委外加工费", "外协加工费"]},
+      {"slot": "business_object", "value": "customer_project_service", "terms": ["客户项目设备安装服务费", "客户项目安装服务费", "项目履约安装服务费"]},
+      {"slot": "business_object", "value": "maintenance_service", "terms": ["设备日常维修费", "日常维修费", "维修保养费"]},
+      {"slot": "business_object", "value": "ambiguous_external_service", "terms": ["外部物流运输费", "物流运输费", "计量认证费", "认证费", "评审费"]},
       {"slot": "business_object", "value": "engineering_service", "terms": ["工程勘察费", "工程设计费", "施工监理费", "工程监理费", "监理费", "勘察设计费", "工程咨询费"]},
       {"slot": "business_object", "value": "financing_service", "terms": ["融资顾问费", "债券发行费", "贷款担保费", "承销服务费", "发行服务费", "融资服务费", "保荐承销费"]},
       {"slot": "business_object", "value": "acquisition_service", "terms": ["并购咨询费", "投资并购服务费", "并购尽调费", "尽调服务费", "股权收购服务费"]},
       {"slot": "business_object", "value": "staff_compensation", "terms": ["职工薪酬", "员工薪酬", "工资薪金", "社会保险费", "住房公积金", "工资", "奖金", "社保", "公积金"]},
-      {"slot": "business_object", "value": "staff_individual_tax", "terms": ["代扣代缴个人所得税", "代扣个人所得税", "代缴个人所得税", "缴纳个人所得税", "个人所得税", "分红个税", "代扣个税", "代缴个税", "个税"]},
+      {"slot": "business_object", "value": "staff_individual_tax", "terms": ["代扣代缴个人所得税", "代扣个人所得税", "代缴个人所得税", "缴纳个人所得税", "个人所得税", "代扣个税", "代缴个税", "个税"]},
+      {"slot": "business_object", "value": "employee_individual_tax", "terms": ["代扣代缴工资个税", "代缴工资个税", "工资薪金个税", "工资个税", "股权激励个税"]},
+      {"slot": "business_object", "value": "shareholder_individual_tax", "terms": ["分红个税", "股利个税"]},
       {"slot": "business_object", "value": "tax_refund", "terms": ["增值税留抵退税", "出口退税", "税费返还", "退税款", "退税"]},
       {"slot": "business_object", "value": "tax_payment", "terms": ["企业所得税", "增值税", "车船税", "房产税", "土地使用税", "土地增值税", "消费税", "资源税", "城建税", "教育费附加", "印花税", "附加税", "税费", "税款"]},
       {"slot": "business_object", "value": "asset_acquisition_tax", "terms": ["车辆购置税", "耕地占用税", "契税"]},
@@ -53,7 +58,7 @@
       {"slot": "business_object", "value": "long_asset_disposal", "terms": ["处置固定资产款", "出售固定资产款", "无形资产转让款", "资产处置款"]},
       {"slot": "business_object", "value": "subsidiary_disposal", "terms": ["处置子公司款", "出售子公司款", "处置营业单位款"]},
       {"slot": "business_object", "value": "investing_other", "terms": ["其他与投资活动有关的款项", "其他投资活动款项", "投资活动保证金", "投资活动往来款", "投资活动其他款"]},
-      {"slot": "business_object", "value": "long_asset_acquisition", "terms": ["长期待摊费用装修款", "固定资产购置款", "设备购置款", "无形资产购置款", "生产线设备款", "在建工程款", "土地购置款", "设备款"]},
+      {"slot": "business_object", "value": "long_asset_acquisition", "terms": ["长期待摊费用装修款", "固定资产购置款", "设备购置款", "无形资产购置款", "生产线设备款", "在建工程款", "土地购置款", "自有设备安装改造款", "厂房搬迁改造费", "自有资产改造款", "设备款"]},
       {"slot": "business_object", "value": "subsidiary_acquisition", "terms": ["收购子公司款", "取得子公司款", "收购营业单位款"]},
       {"slot": "business_object", "value": "capital_contribution", "terms": ["股东出资款", "增资款", "资本金", "实收资本", "吸收投资款"]},
       {"slot": "business_object", "value": "borrowing", "terms": ["银行借款", "借款本金", "贷款本金", "借款"]},
@@ -83,6 +88,12 @@
     "purposes_attributes": [
       {"slot": "purpose", "value": "capital_use", "terms": ["用于生产线建设", "用于在建工程", "用于固定资产购建", "生产线建设", "资本化"]},
       {"slot": "purpose", "value": "operating_use", "terms": ["用于日常经营", "经营周转", "日常经营"]},
+      {"slot": "purpose", "value": "production_use", "terms": ["生产线产品", "生产用", "生产人员", "委外加工", "外协加工"]},
+      {"slot": "purpose", "value": "administrative_use", "terms": ["管理咨询费", "办公用", "行政人员", "日常维修"]},
+      {"slot": "purpose", "value": "customer_project_use", "terms": ["客户项目", "履约项目"]},
+      {"slot": "purpose", "value": "own_asset_use", "terms": ["自有设备", "自有资产", "厂房搬迁改造"]},
+      {"slot": "attribute", "value": "employee_tax_service", "terms": ["代扣代缴工资个税", "代缴工资个税", "工资薪金个税", "工资个税", "股权激励个税"]},
+      {"slot": "attribute", "value": "shareholder_tax_service", "terms": ["分红个税", "股利个税"]},
       {"slot": "attribute", "value": "principal", "terms": ["本金"]},
       {"slot": "attribute", "value": "interest", "terms": ["利息"]},
       {"slot": "attribute", "value": "net_amount", "terms": ["现金净额", "净额"]}
@@ -104,12 +115,17 @@
     {"rule_id": "CFO-04-trade", "candidate_item_ids": ["CFO-04"], "all": {"cash_action": ["outflow"], "business_object": ["trade_goods"]}, "without": {"refund": ["completed"]}},
     {"rule_id": "CFO-04-purchase-relation", "candidate_item_ids": ["CFO-04"], "all": {"cash_action": ["outflow"], "business_relation": ["purchase"]}, "without": {"refund": ["completed"]}},
     {"rule_id": "CFO-04-production-service", "candidate_item_ids": ["CFO-04"], "all": {"business_object": ["production_service", "utility_fund"]}},
+    {"rule_id": "CFO-04-customer-project-service", "candidate_item_ids": ["CFO-04"], "all": {"business_object": ["customer_project_service"]}},
+    {"rule_id": "CFO-04-production-utility", "candidate_item_ids": ["CFO-04"], "all": {"cash_action": ["outflow"], "business_object": ["utilities"], "purpose": ["production_use"]}},
     {"rule_id": "CFO-05-staff", "candidate_item_ids": ["CFO-05"], "all": {"cash_action": ["outflow"], "business_object": ["staff_compensation"]}},
     {"rule_id": "CFO-05-staff-tax", "candidate_item_ids": ["CFO-05"], "all": {"business_object": ["staff_individual_tax"], "counterparty_role": ["employee"]}},
+    {"rule_id": "CFO-05-explicit-employee-tax", "candidate_item_ids": ["CFO-05"], "all": {"business_object": ["employee_individual_tax"]}},
     {"rule_id": "CFO-06-tax", "candidate_item_ids": ["CFO-06"], "all": {"cash_action": ["outflow"], "business_object": ["tax_payment"]}},
     {"rule_id": "CFO-06-return-tax-refund", "candidate_item_ids": ["CFO-06"], "all": {"cash_action": ["outflow"], "business_object": ["tax_refund"]}},
-    {"rule_id": "CFO-07-other", "candidate_item_ids": ["CFO-07"], "all": {"cash_action": ["outflow"], "business_object": ["employee_advance", "operating_deposit", "travel_expense", "utilities", "operating_other"]}},
+    {"rule_id": "CFO-07-other", "candidate_item_ids": ["CFO-07"], "all": {"cash_action": ["outflow"], "business_object": ["employee_advance", "operating_deposit", "travel_expense", "utilities", "operating_other"]}, "without": {"purpose": ["production_use"]}},
     {"rule_id": "CFO-07-professional-service", "candidate_item_ids": ["CFO-07"], "all": {"business_object": ["operating_professional_service"]}},
+    {"rule_id": "CFO-07-maintenance-service", "candidate_item_ids": ["CFO-07"], "all": {"business_object": ["maintenance_service"]}},
+    {"rule_id": "CFO-ambiguous-external-service", "candidate_item_ids": ["CFO-04", "CFO-07"], "all": {"business_object": ["ambiguous_external_service"]}},
     {"rule_id": "CFO-03-penalty-receipt", "candidate_item_ids": ["CFO-03"], "all": {"cash_action": ["inflow"], "business_object": ["penalty"]}},
     {"rule_id": "CFO-07-penalty-payment", "candidate_item_ids": ["CFO-07"], "all": {"cash_action": ["outflow"], "business_object": ["penalty"]}},
     {"rule_id": "CFO-penalty-action-missing", "candidate_item_ids": ["CFO-03", "CFO-07"], "all": {"business_object": ["penalty"]}, "without": {"cash_action": ["inflow", "outflow"]}},
@@ -140,6 +156,7 @@
     {"rule_id": "CFF-04-repay", "candidate_item_ids": ["CFF-04"], "all": {"cash_action": ["outflow"], "business_object": ["debt_principal"]}},
     {"rule_id": "CFF-04-repay-borrowing", "candidate_item_ids": ["CFF-04"], "all": {"cash_action": ["outflow"], "business_relation": ["repay"], "business_object": ["borrowing"]}},
     {"rule_id": "CFF-05-dividend-interest", "candidate_item_ids": ["CFF-05"], "all": {"cash_action": ["outflow"], "business_object": ["dividend_interest"]}, "without": {"business_object": ["financing_other"]}},
+    {"rule_id": "CFF-05-shareholder-tax", "candidate_item_ids": ["CFF-05"], "all": {"business_object": ["shareholder_individual_tax"]}},
     {"rule_id": "CFF-06-other", "candidate_item_ids": ["CFF-06"], "all": {"cash_action": ["outflow"], "business_object": ["financing_other"]}}
     ,{"rule_id": "CFF-06-financing-service", "candidate_item_ids": ["CFF-06"], "all": {"business_object": ["financing_service"]}}
   ],
@@ -147,8 +164,8 @@
     "strong_values": {
       "business_relation": ["sale", "purchase", "acquire", "dispose", "borrow", "repay"],
       "counterparty_role": ["customer", "supplier", "employee", "shareholder", "bank"],
-      "purpose": ["capital_use", "operating_use"],
-      "attribute": ["principal", "interest", "net_amount", "decisive_object"]
+      "purpose": ["capital_use", "operating_use", "production_use", "administrative_use", "customer_project_use", "own_asset_use"],
+      "attribute": ["principal", "interest", "net_amount", "decisive_object", "employee_tax_service", "shareholder_tax_service"]
     }
   }
 }

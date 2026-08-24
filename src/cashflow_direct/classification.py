@@ -21,6 +21,7 @@ from cashflow_direct.decision_policy import (
     route_decision,
 )
 from cashflow_direct.consistency import find_consistency_groups
+from cashflow_direct.components import ComponentSourceAllocation
 from cashflow_direct.materiality import (
     MaterialityAssessment,
     MaterialityRecord,
@@ -29,6 +30,10 @@ from cashflow_direct.materiality import (
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
 from cashflow_direct.money import stable_id
 from cashflow_direct.summary_semantics import SummarySemanticResult
+from cashflow_direct.vat_companion import (
+    apply_vat_companion_relations,
+    build_vat_companion_relations,
+)
 
 # 来源中文名映射（用于 reason 展示，最终 xlsx 人类可读列一律中文）
 _SOURCE_CN = {
@@ -470,6 +475,7 @@ def route_classification_decisions(
     materiality,
     company_notes: Sequence[dict[str, object]] = (),
     automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
+    source_allocations: Sequence[ComponentSourceAllocation] = (),
 ) -> ClassificationRoutingResult:
     from cashflow_direct.ai_review import (
         build_ai_task,
@@ -596,6 +602,8 @@ def route_classification_decisions(
             business_conflict=business_conflict,
             direction_status=direction_status,
             automatic_change_threshold=automatic_change_threshold,
+            summary_quality=decision.summary_quality,
+            account_path_quality=decision.account_path_quality,
         )
         is_automatic = route.action in automatic_actions
         if company_rule_conflict:
@@ -722,4 +730,14 @@ def route_classification_decisions(
                         context=f"{base.context}；独立复核{slot}：不得查看另一复核结果",
                     )
                 )
+    relations = build_vat_companion_relations(components, source_allocations)
+    routed = list(apply_vat_companion_relations(routed, relations))
+    dependent_vat_ids = {
+        relation.vat_component_id
+        for relation in relations
+        if relation.status == "unique"
+    }
+    tasks = [
+        task for task in tasks if task.component_id not in dependent_vat_ids
+    ]
     return ClassificationRoutingResult(tuple(routed), tuple(tasks), assessments)

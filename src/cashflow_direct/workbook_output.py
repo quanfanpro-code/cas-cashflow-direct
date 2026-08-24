@@ -399,7 +399,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         status.write("A6", "本次自动修改最低证据分", formats["header"])
         status.write(
             "B6",
-            f"{model.automatic_change_threshold}分（客户选择；70为默认推荐）",
+            (
+                "45分（单强：至少一个45分强来源；70为默认推荐）"
+                if model.automatic_change_threshold == 45
+                else f"{model.automatic_change_threshold}分（客户选择；70为默认推荐）"
+            ),
             formats["text"],
         )
         for index, name in enumerate(SHEET_NAMES[1:], 7):
@@ -444,6 +448,20 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             helper_column_name = xl_col_to_name(helper_column)
             helper_ranges: dict[tuple[str, ...], tuple[str, str]] = {}
             helper_row = 0
+            review_row_by_component = {
+                component_id: excel_row
+                for excel_row, batch in enumerate(model.review_batches, 2)
+                for component_id in batch.component_ids
+            }
+            for batch in model.review_batches:
+                if (
+                    batch.follows_component_id
+                    and batch.follows_component_id not in review_row_by_component
+                ):
+                    raise ValueError(
+                        "增值税附属复核行找不到基础项目复核行："
+                        + batch.follows_component_id
+                    )
             for batch in model.review_batches:
                 selectable_ids = tuple(
                     item_id
@@ -516,8 +534,10 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "强制检查": review_fact(batch, "强制检查"),
                     "唯一动作": review_fact(batch, "唯一动作"),
                     "异常": review_fact(batch, "异常"),
-                    "人工可选标准项目": "、".join(
-                        (*selectable_names, "明确排除")
+                    "人工可选标准项目": (
+                        "随基础项目自动确定（无需重复选择）"
+                        if batch.follows_component_id
+                        else "、".join((*selectable_names, "明确排除"))
                     ),
                 }
                 for header, value in facts.items():
@@ -560,6 +580,8 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "处理人",
                     "处理时间",
                 ):
+                    if header == "人工确认项目" and batch.follows_component_id:
+                        continue
                     review.write_blank(
                         row_index,
                         REVIEW_HEADERS.index(header),
@@ -577,9 +599,21 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 excel_row = row_index + 1
                 manual_col = _review_col("人工确认项目")
                 system_col = _review_col("系统项目(技术)")
+                status_col = _review_col("人工处理状态")
                 baseline_col = _review_col("系统基线金额(技术)")
                 baseline_item_col = _review_col("原基线项目(技术)")
                 cash_change_col = _review_col("批次现金变化金额")
+                if batch.follows_component_id:
+                    base_row = review_row_by_component[batch.follows_component_id]
+                    base_choice = f"{manual_col}{base_row}"
+                    base_system = f"{system_col}{base_row}"
+                    review.write_formula(
+                        row_index,
+                        REVIEW_HEADERS.index("人工确认项目"),
+                        f'=IF({base_choice}="","",IF({base_choice}="{USE_SYSTEM_RECOMMENDATION}",{base_system},{base_choice}))',
+                        formats["text"],
+                        "",
+                    )
                 effective_item = (
                     f'IF({manual_col}{excel_row}="{USE_SYSTEM_RECOMMENDATION}",'
                     f'{system_col}{excel_row},{manual_col}{excel_row})'
@@ -629,16 +663,26 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     formats["money"],
                     0,
                 )
-                review.write_formula(
-                    row_index,
-                    REVIEW_HEADERS.index("人工处理状态"),
-                    f'=IF({manual_col}{excel_row}="","等待人工处理",'
-                    f'IF(AND({manual_col}{excel_row}="{USE_SYSTEM_RECOMMENDATION}",'
-                    f'{system_col}{excel_row}="尚未形成系统候选"),'
-                    '"系统没有首选项目，请改选","人工处理完成"))',
-                    formats["pending"],
-                    "等待人工处理",
-                )
+                if batch.follows_component_id:
+                    base_row = review_row_by_component[batch.follows_component_id]
+                    review.write_formula(
+                        row_index,
+                        REVIEW_HEADERS.index("人工处理状态"),
+                        f'=IF({status_col}{base_row}="人工处理完成","随基础项目完成","随基础项目待定")',
+                        formats["pending"],
+                        "随基础项目待定",
+                    )
+                else:
+                    review.write_formula(
+                        row_index,
+                        REVIEW_HEADERS.index("人工处理状态"),
+                        f'=IF({manual_col}{excel_row}="","等待人工处理",'
+                        f'IF(AND({manual_col}{excel_row}="{USE_SYSTEM_RECOMMENDATION}",'
+                        f'{system_col}{excel_row}="尚未形成系统候选"),'
+                        '"系统没有首选项目，请改选","人工处理完成"))',
+                        formats["pending"],
+                        "等待人工处理",
+                    )
                 review.write_number(
                     row_index,
                     REVIEW_HEADERS.index("包含笔数(技术)"),
@@ -657,16 +701,17 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     item_name_by_id.get(batch.baseline_item_code, ""),
                     formats["text"],
                 )
-                review.data_validation(
-                    row_index,
-                    REVIEW_HEADERS.index("人工确认项目"),
-                    row_index,
-                    REVIEW_HEADERS.index("人工确认项目"),
-                    {
-                        "validate": "list",
-                        "source": f"='重要待复核事项'!{list_range}",
-                    },
-                )
+                if not batch.follows_component_id:
+                    review.data_validation(
+                        row_index,
+                        REVIEW_HEADERS.index("人工确认项目"),
+                        row_index,
+                        REVIEW_HEADERS.index("人工确认项目"),
+                        {
+                            "validate": "list",
+                            "source": f"='重要待复核事项'!{list_range}",
+                        },
+                    )
             review.autofilter(0, 0, len(model.review_batches), len(REVIEW_HEADERS) - 1)
         else:
             review.write(1, 0, "本期无重大剩余不确定事项，无需人工复核。", formats["note"])
@@ -1150,7 +1195,12 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
             if actual != expected:
                 errors.append(f"自动基线不一致：{item.item_id}")
                 break
-        if model.review_batches and not workbook["重要待复核事项"].data_validations.dataValidation:
+        manual_batches = tuple(
+            (index + 2, batch)
+            for index, batch in enumerate(model.review_batches)
+            if not batch.follows_component_id
+        )
+        if manual_batches and not workbook["重要待复核事项"].data_validations.dataValidation:
             errors.append("重要待复核事项缺少下拉选择")
         review_sheet = workbook["重要待复核事项"]
         if tuple(cell.value for cell in review_sheet[1][: len(REVIEW_HEADERS)]) != REVIEW_HEADERS:
@@ -1159,7 +1209,7 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
         mandatory_excel_rows = [
             index + 2
             for index, batch in enumerate(model.review_batches)
-            if batch.mandatory
+            if batch.mandatory and not batch.follows_component_id
         ]
         if mandatory_excel_rows:
             validations = workbook["重要待复核事项"].data_validations.dataValidation
@@ -1174,9 +1224,10 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
                     break
         if model.duplicate_groups and not workbook["疑似重复事项"].data_validations.dataValidation:
             errors.append("疑似重复事项缺少下拉选择")
-        if model.review_batches:
+        if manual_batches:
             choice_column = _review_col("人工确认项目")
-            fill = workbook["重要待复核事项"][f"{choice_column}2"].fill.fgColor.rgb
+            first_manual_row = manual_batches[0][0]
+            fill = workbook["重要待复核事项"][f"{choice_column}{first_manual_row}"].fill.fgColor.rgb
             if fill not in {"FFDDEBF7", "DDEBF7"}:
                 errors.append("人工输入单元格未使用蓝色标识")
     finally:

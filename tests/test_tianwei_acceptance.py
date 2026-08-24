@@ -463,12 +463,18 @@ def test_real_files_complete_the_generic_pipeline() -> None:
         )
         validations = review.data_validations.dataValidation
         choice_column = get_column_letter(review_headers.index("人工确认项目") + 1)
-        for row in review_data_rows:
+        for row, batch in zip(review_data_rows, state["review_batches"], strict=True):
             matching = [
                 validation
                 for validation in validations
                 if f"{choice_column}{row}" in validation.sqref
             ]
+            if batch.get("follows_component_id"):
+                assert not matching
+                assert review.cell(row, option_column).value == (
+                    "随基础项目自动确定（无需重复选择）"
+                )
+                continue
             assert len(matching) == 1
             helper_range = str(matching[0].formula1).split("!")[-1].replace("'", "")
             first_cell = helper_range.split(":", 1)[0].replace("$", "")

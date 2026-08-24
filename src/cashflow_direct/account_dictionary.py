@@ -323,6 +323,8 @@ def _fixed_account_quality(
         "bank_interest_income",
         "sales_business",
         "purchase_inventory",
+        "operating_expense_detail",
+        "production_service_detail",
         "penalty",
         "repurchase_obligation",
         "employee_advance",

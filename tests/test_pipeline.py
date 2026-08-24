@@ -64,19 +64,19 @@ def test_preflight_persists_customer_automatic_change_threshold() -> None:
     assert state["automatic_change_threshold"] == 55
 
 
-def test_preflight_cli_exposes_four_customer_threshold_choices() -> None:
+def test_preflight_cli_exposes_five_customer_threshold_choices() -> None:
     arguments = build_parser().parse_args(
         [
             "preflight",
             "--overall", "1000000",
             "--performance", "750000",
             "--trivial", "50000",
-            "--automatic-change-threshold", "90",
+            "--automatic-change-threshold", "45",
             "--paths", "示例.xlsx",
         ]
     )
 
-    assert arguments.automatic_change_threshold == 90
+    assert arguments.automatic_change_threshold == 45
 
 
 class SummarySemanticsPipelineTests(unittest.TestCase):
