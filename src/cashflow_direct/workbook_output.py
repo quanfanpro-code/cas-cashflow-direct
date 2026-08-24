@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 from xlsxwriter.utility import xl_col_to_name
 
 from cashflow_direct.classification import RulePack
+from cashflow_direct.decision_policy import DEFAULT_AUTOMATIC_CHANGE_SCORE
 from cashflow_direct.duplicates import DuplicateGroup
 from cashflow_direct.models import ReviewBatch
 from cashflow_direct.money import statement_amount_cent
@@ -141,6 +142,7 @@ class WorkbookModel:
     trace_rows: tuple[Mapping[str, object], ...]
     mapping_rows: tuple[Mapping[str, object], ...]
     overall_status: str
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE
     difference_rows: tuple[Mapping[str, object], ...] = ()
     unconfirmed_statement: bool = False
     dictionary_rows: tuple[Mapping[str, object], ...] = ()
@@ -394,6 +396,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             status.write("B3", "最终可使用", formats["text"])
         status.write("A5", "使用说明", formats["header"])
         status.write("B5", "蓝色或黄色单元格为人工选择区；修改后结果会即时更新，无需再次运行本工具。", formats["text"])
+        status.write("A6", "本次自动修改最低证据分", formats["header"])
+        status.write(
+            "B6",
+            f"{model.automatic_change_threshold}分（客户选择；70为默认推荐）",
+            formats["text"],
+        )
         for index, name in enumerate(SHEET_NAMES[1:], 7):
             status.write_url(index - 1, 0, f"internal:'{name}'!A1", formats["link"], string=name)
         status.set_column("A:A", 24)

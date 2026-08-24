@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """科目语义词典模块测试（Task 4）。"""
 from __future__ import annotations
 
@@ -142,6 +142,27 @@ def test_account_agent_cannot_return_item_or_confidence() -> None:
         )
 
 
+def test_account_agent_can_only_fill_an_unresolved_path_node() -> None:
+    rules = load_account_semantic_rules(ROOT)
+    result = analyze_account_path("其他应付款_客户特殊款", rules)
+
+    with pytest.raises(ValueError, match="只能补未识别节点"):
+        merge_account_agent_concepts(
+            result,
+            {
+                "node_concepts": [
+                    {
+                        "level_index": 0,
+                        "node_text": "其他应付款",
+                        "source_text": "其他应付款",
+                        "concept": "other_receivable_payable",
+                    }
+                ]
+            },
+            rules,
+        )
+
+
 def test_account_agent_relation_is_kept_as_traceable_fixed_rule_input() -> None:
     rules = load_account_semantic_rules(ROOT)
     result = analyze_account_path("其他应付款_客户特殊款", rules)
@@ -243,3 +264,63 @@ def test_no_company_special_rule_cannot_replace_general_semantic_judgment() -> N
         "管理费用_差旅费",
         "完整路径“管理费用_差旅费”显示为日常经营管理支出",
     )
+
+
+def _assert_every_path_node_has_an_explicit_role(result) -> None:
+    level_count = len(result.account.split("_"))
+    roles_by_level: dict[int, set[str]] = {index: set() for index in range(level_count)}
+    for concept in result.concepts:
+        roles_by_level[concept.level_index].add(concept.source)
+    for slot in result.unresolved_slots:
+        roles_by_level[slot.level_index].add("unresolved")
+
+    valid_roles = (
+        {"direct"},
+        {"parent_inheritance"},
+        {"neutral"},
+        {"agent"},
+        {"unresolved"},
+    )
+    assert all(roles in valid_roles for roles in roles_by_level.values())
+
+
+def test_specific_vehicle_tax_full_path_is_strong_tax_evidence() -> None:
+    result = analyze_account_path(
+        "应交税费_车船税",
+        load_account_semantic_rules(ROOT),
+    )
+
+    assert result.outflow_candidate_item_ids == ("CFO-06",)
+    assert result.quality.value == 45
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
+@pytest.mark.parametrize(
+    "account_path",
+    (
+        "应付职工薪酬_社会保险费_基本养老保险",
+        "应付职工薪酬_社会保险费_养老",
+        "研发支出_费用化支出_直接费用",
+        "研发支出_费用化支出_直接投入_直接材料",
+        "生产成本_预防成本_培训费",
+        "应付票据_银行承兑汇票",
+        "长期股权投资_示例科技有限公司",
+        "长期股权投资_示例科技有限责任公司",
+    ),
+)
+def test_common_detail_families_keep_every_full_path_node(account_path: str) -> None:
+    result = analyze_account_path(account_path, load_account_semantic_rules(ROOT))
+
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
+def test_unknown_detail_is_reported_instead_of_being_hidden_by_parent() -> None:
+    result = analyze_account_path(
+        "其他应付款_火星专用款",
+        load_account_semantic_rules(ROOT),
+    )
+
+    assert tuple(slot.node_text for slot in result.unresolved_slots) == ("火星专用款",)
+    _assert_every_path_node_has_an_explicit_role(result)

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib
 from dataclasses import replace
@@ -109,6 +109,26 @@ def test_m1_original_conflict_with_score_90_still_requires_ai() -> None:
     assert result.decisions[0].resolved is False
     assert result.decisions[0].decision_action == "ai_review"
     assert len(result.ai_tasks) == 1
+
+
+def test_customer_threshold_55_allows_m0_score_55_change() -> None:
+    component = cashflow_component(
+        "税费付款",
+        -50,
+        ("应交税费_车船税",),
+        original_item_text="支付其他与经营活动有关的现金",
+        component_id="CUSTOM-THRESHOLD",
+    )
+
+    result = route_classification_decisions(
+        (component,),
+        (_decision("CUSTOM-THRESHOLD", score=55, state="conflicts", candidate="CFO-07"),),
+        THRESHOLDS,
+        automatic_change_threshold=55,
+    )
+
+    assert result.decisions[0].resolved is True
+    assert result.decisions[0].decision_action == "automatic_change"
 
 
 def test_same_source_business_conflict_is_blocked_before_ai_tasks() -> None:

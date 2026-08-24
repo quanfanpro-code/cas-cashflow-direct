@@ -111,6 +111,8 @@ class DecisionRoute:
 
 _GENERIC_FACT_PREFIXES = ("cash_direction:",)
 _ALLOWED_SCORES = frozenset({0, 10, 20, 25, 35, 45, 50, 55, 70, 90})
+AUTOMATIC_CHANGE_SCORE_OPTIONS = (50, 55, 70, 90)
+DEFAULT_AUTOMATIC_CHANGE_SCORE = 70
 _LEVEL_INDEX = {
     MaterialityLevel.M0: 0,
     MaterialityLevel.M1: 1,
@@ -202,6 +204,16 @@ _VALID_ORIGINAL_STATES = frozenset(
         OriginalItemState.PENDING_COMPARISON,
     }
 )
+
+
+def validate_automatic_change_threshold(value: int) -> int:
+    if value not in AUTOMATIC_CHANGE_SCORE_OPTIONS:
+        raise ValueError("自动修改最低证据分只允许50、55、70、90")
+    return value
+
+
+def score_meets_change_threshold(score: int, threshold: int) -> bool:
+    return score >= validate_automatic_change_threshold(threshold)
 
 
 def _specific_facts(source: EvidenceSourceAssessment) -> frozenset[str]:
@@ -318,7 +330,16 @@ def materiality_level(amount_cent: int, thresholds) -> MaterialityLevel:
     return MaterialityLevel.M0
 
 
-def _allowed_operations(score: int) -> frozenset[DecisionOperation]:
+def _allowed_operations(
+    score: int,
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
+    *,
+    valid_original: bool = False,
+) -> frozenset[DecisionOperation]:
+    if valid_original and score_meets_change_threshold(
+        score, automatic_change_threshold
+    ):
+        return frozenset(DecisionOperation)
     if score in {45, 50, 55}:
         return frozenset({DecisionOperation.KEEP})
     if score in {70, 90}:
@@ -330,7 +351,11 @@ def route_normal_decision(
     score: int,
     original_state: OriginalItemState,
     materiality: MaterialityLevel,
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
 ) -> DecisionRoute:
+    automatic_change_threshold = validate_automatic_change_threshold(
+        automatic_change_threshold
+    )
     if score not in _ALLOWED_SCORES:
         raise ValueError(f"不允许的证据分数：{score}")
 
@@ -342,6 +367,22 @@ def route_normal_decision(
     else:
         table = _OTHER_ACTIONS
     action = table[score][_LEVEL_INDEX[materiality]]
+    if not agrees and original_state in _VALID_ORIGINAL_STATES:
+        threshold_met = score_meets_change_threshold(
+            score, automatic_change_threshold
+        )
+        if materiality is MaterialityLevel.M0:
+            action = (
+                DecisionAction.AUTOMATIC_CHANGE
+                if threshold_met
+                else DecisionAction.AUTOMATIC_KEEP
+            )
+        elif materiality is MaterialityLevel.M1:
+            action = (
+                DecisionAction.AI_REVIEW
+                if threshold_met
+                else DecisionAction.AUTOMATIC_KEEP
+            )
     if action is DecisionAction.AUTOMATIC_FILL and original_state is OriginalItemState.CONFLICTS:
         action = DecisionAction.AUTOMATIC_CHANGE
 
@@ -350,10 +391,14 @@ def route_normal_decision(
     if original_state in _VALID_ORIGINAL_STATES:
         if materiality is MaterialityLevel.M2 and score <= 50:
             review_policy = "valid_original_retention"
-            required_score = 70
+            required_score = (
+                DEFAULT_AUTOMATIC_CHANGE_SCORE
+                if agrees
+                else automatic_change_threshold
+            )
         elif action in {DecisionAction.AI_REVIEW, DecisionAction.DOUBLE_AI_REVIEW}:
             review_policy = "valid_original_change"
-            required_score = 70
+            required_score = automatic_change_threshold
     elif score <= 50:
         review_policy = (
             "blank_low_single"
@@ -380,7 +425,13 @@ def route_normal_decision(
     }:
         review_policy = "blank_90_single"
         required_score = 90
-    allowed_operations = _allowed_operations(score)
+    allowed_operations = _allowed_operations(
+        score,
+        automatic_change_threshold,
+        valid_original=(
+            not agrees and original_state in _VALID_ORIGINAL_STATES
+        ),
+    )
     if action is DecisionAction.AUTOMATIC_KEEP and not agrees:
         # 原项目是有效基线时，证据不足的结果只是“不改”，不是取得了修改权限。
         allowed_operations = frozenset()
@@ -406,7 +457,11 @@ def route_decision(
     business_conflict: bool = False,
     individual_tax_fact_missing: bool = False,
     direction_status: str = "compatible",
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
 ) -> DecisionRoute:
+    automatic_change_threshold = validate_automatic_change_threshold(
+        automatic_change_threshold
+    )
     if invalid_input:
         return DecisionRoute(
             DecisionAction.ISOLATE_INVALID_INPUT,
@@ -472,7 +527,7 @@ def route_decision(
         return DecisionRoute(
             action,
             frozenset(),
-            70 if action is DecisionAction.AI_REVIEW else None,
+            automatic_change_threshold if action is DecisionAction.AI_REVIEW else None,
             forced_check="source_conflict",
             review_policy=(
                 "valid_original_retention"
@@ -518,4 +573,9 @@ def route_decision(
         raise ValueError(f"不允许的现金方向状态：{direction_status}")
     if score is None:
         raise ValueError("无可用证据分数时必须给出来源冲突或其他强制检查")
-    return route_normal_decision(score, original_state, materiality)
+    return route_normal_decision(
+        score,
+        original_state,
+        materiality,
+        automatic_change_threshold,
+    )

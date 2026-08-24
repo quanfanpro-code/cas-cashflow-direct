@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sqlite3
@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from openpyxl import Workbook
 from openpyxl import load_workbook
+
+from cashflow_direct.cli import build_parser
 
 import cashflow_direct.pipeline as pipeline_module
 from cashflow_direct.pipeline import (
@@ -42,6 +44,39 @@ from cashflow_direct.summary_semantics import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_preflight_persists_customer_automatic_change_threshold() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preflight = run_preflight(
+            write_end_to_end_case(root),
+            ("1000000", "750000", "50000"),
+            output_parent=root,
+            automatic_change_threshold=55,
+        )
+        state = json.loads(
+            (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+
+    assert state["automatic_change_threshold"] == 55
+
+
+def test_preflight_cli_exposes_four_customer_threshold_choices() -> None:
+    arguments = build_parser().parse_args(
+        [
+            "preflight",
+            "--overall", "1000000",
+            "--performance", "750000",
+            "--trivial", "50000",
+            "--automatic-change-threshold", "90",
+            "--paths", "示例.xlsx",
+        ]
+    )
+
+    assert arguments.automatic_change_threshold == 90
 
 
 class SummarySemanticsPipelineTests(unittest.TestCase):
@@ -1572,6 +1607,8 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertIn("## 规则覆盖情况", dictionary_doc)
             self.assertIn("业务组成笔数", dictionary_doc)
+            self.assertIn("节点解释", dictionary_doc)
+            self.assertIn("未识别节点", dictionary_doc)
 
     def test_company_notes_gate_and_injection(self) -> None:
         # 传入 --notes 后，未确认前停止；确认后只把与当前完整路径相关的说明带入任务。

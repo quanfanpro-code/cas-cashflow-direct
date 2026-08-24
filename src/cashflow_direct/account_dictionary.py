@@ -61,7 +61,7 @@ class AccountNodeConcept:
     node_text: str
     concept: str
     source_text: str
-    source: str = "rule"
+    source: str = "direct"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +90,7 @@ class AccountPathRelation:
 class AccountSemanticRules:
     concepts: tuple[dict[str, object], ...]
     path_rules: tuple[dict[str, object], ...]
+    inheritance_rules: tuple[dict[str, object], ...] = ()
 
     @property
     def allowed_concepts(self) -> tuple[str, ...]:
@@ -191,6 +192,7 @@ def load_account_semantic_rules(root: Path) -> AccountSemanticRules:
     return AccountSemanticRules(
         tuple(dict(item) for item in payload.get("concepts", ())),
         tuple(dict(item) for item in payload.get("path_rules", ())),
+        tuple(dict(item) for item in payload.get("inheritance_rules", ())),
     )
 
 
@@ -226,7 +228,13 @@ def _node_concepts(
             if hits and (level_index, concept) not in seen:
                 source_text = max(hits, key=len)
                 found.append(
-                    AccountNodeConcept(level_index, node_text, concept, source_text)
+                    AccountNodeConcept(
+                        level_index,
+                        node_text,
+                        concept,
+                        source_text,
+                        str(definition.get("role", "direct")),
+                    )
                 )
                 seen.add((level_index, concept))
     for item in agent_concepts:
@@ -237,6 +245,30 @@ def _node_concepts(
         if (item.level_index, item.concept) not in seen:
             found.append(item)
             seen.add((item.level_index, item.concept))
+    for level_index, node_text in enumerate(levels):
+        if any(item.level_index == level_index for item in found):
+            continue
+        parent_concepts = {
+            item.concept for item in found if item.level_index < level_index
+        }
+        for rule in rules.inheritance_rules:
+            parent_concept = str(rule.get("parent_concept", ""))
+            terms = tuple(str(value) for value in rule.get("terms", ()))
+            hits = [term for term in terms if _concept_matches(node_text, term)]
+            if parent_concept not in parent_concepts or not hits:
+                continue
+            concept = str(rule["concept"])
+            found.append(
+                AccountNodeConcept(
+                    level_index,
+                    node_text,
+                    concept,
+                    max(hits, key=len),
+                    "parent_inheritance",
+                )
+            )
+            seen.add((level_index, concept))
+            break
     return tuple(found)
 
 
@@ -294,6 +326,7 @@ def _fixed_account_quality(
         "penalty",
         "repurchase_obligation",
         "employee_advance",
+        "other_tax",
     }
     if concept_names.intersection(decisive):
         return EvidenceQuality.STRONG
@@ -375,7 +408,7 @@ def analyze_account_path(
         dict.fromkeys(str(rule.get("semantic", "")) for rule in matches if rule.get("semantic"))
     )
     concept_basis = "、".join(
-        f"第{item.level_index + 1}层“{item.source_text}”={item.concept}"
+        f"第{item.level_index + 1}层“{item.source_text}”={item.concept}（{item.source}）"
         for item in concepts
     )
     rule_basis = "、".join(matched_rule_ids) or "未形成完整路径规则"
@@ -456,6 +489,9 @@ def merge_account_agent_concepts(
         raise ValueError("科目路径Agent不得返回项目、质量或分数")
     levels = split_account_levels(result.account)
     allowed = set(rules.allowed_concepts)
+    unresolved_level_indexes = {
+        slot.level_index for slot in result.unresolved_slots
+    }
     additions: list[AccountNodeConcept] = []
     for raw in payload.get("node_concepts", ()):
         item = dict(raw)
@@ -463,6 +499,8 @@ def merge_account_agent_concepts(
         node_text = str(item.get("node_text", ""))
         source_text = str(item.get("source_text", ""))
         concept = str(item.get("concept", ""))
+        if level_index not in unresolved_level_indexes:
+            raise ValueError("科目路径Agent只能补未识别节点")
         if (
             level_index < 0
             or level_index >= len(levels)

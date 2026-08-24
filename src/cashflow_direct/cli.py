@@ -7,6 +7,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from cashflow_direct.intake import choose_input_files
+from cashflow_direct.decision_policy import (
+    AUTOMATIC_CHANGE_SCORE_OPTIONS,
+    DEFAULT_AUTOMATIC_CHANGE_SCORE,
+)
 from cashflow_direct.pipeline import (
     confirm_company_notes,
     confirm_component_structure,
@@ -36,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--output-parent", help="由 Skill 自动传递的输出父目录")
     preflight.add_argument("--statement-path", help="客户现有现金流量表正表文件；指定后只认该文件，识别失败即报错")
     preflight.add_argument("--notes", help="公司特殊规则注意事项文本文件路径（UTF-8），可选")
+    preflight.add_argument(
+        "--automatic-change-threshold",
+        type=int,
+        choices=AUTOMATIC_CHANGE_SCORE_OPTIONS,
+        default=DEFAULT_AUTOMATIC_CHANGE_SCORE,
+        help="系统自动修改客户原项目的最低证据分；可选50、55、70、90，默认并推荐70",
+    )
     preflight.add_argument("--paths", nargs="+", help="直接给出输入文件路径（可多个）；给定后不弹文件选择窗口")
     for name in (
         "confirm-mapping",
@@ -119,6 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 None if arguments.output_parent is None else Path(arguments.output_parent),
                 None if arguments.statement_path is None else Path(arguments.statement_path),
                 notes=notes,
+                automatic_change_threshold=arguments.automatic_change_threshold,
             )
         elif arguments.command == "confirm-mapping":
             result = confirm_mapping(Path(arguments.run_dir), json.loads(arguments.decisions))

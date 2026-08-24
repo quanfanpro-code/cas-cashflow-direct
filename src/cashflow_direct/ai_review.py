@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from cashflow_direct.decision_policy import (
+    DEFAULT_AUTOMATIC_CHANGE_SCORE,
     DecisionAction,
     EvidenceQuality,
     EvidenceSource,
@@ -16,6 +17,8 @@ from cashflow_direct.decision_policy import (
     MaterialityLevel,
     OriginalItemState,
     combine_source_assessments,
+    score_meets_change_threshold,
+    validate_automatic_change_threshold,
 )
 from cashflow_direct.evidence import split_account_levels
 from cashflow_direct.models import (
@@ -781,8 +784,12 @@ def resolve_structured_ai_results(
     item_directions: Mapping[str, str],
     *,
     failed_task_ids: set[str] | frozenset[str] = frozenset(),
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
 ) -> tuple[ClassificationDecision, ...]:
     """把AI对两个原始来源的解释交回系统，按既定门槛形成唯一后续动作。"""
+    automatic_change_threshold = validate_automatic_change_threshold(
+        automatic_change_threshold
+    )
     tasks_by_component: dict[str, list[AITask]] = {}
     for task in tasks:
         tasks_by_component.setdefault(task.component_id, []).append(task)
@@ -993,7 +1000,10 @@ def resolve_structured_ai_results(
                     and chosen_assessment.candidate_item_id
                     != decision.original_standard_item_id
                     and all(
-                        assessment.score in {70, 90}
+                        assessment.score is not None
+                        and score_meets_change_threshold(
+                            assessment.score, automatic_change_threshold
+                        )
                         for assessment, _ in valid_votes
                     )
                 )
@@ -1077,7 +1087,10 @@ def resolve_structured_ai_results(
                 decision_source = "ai_reviewed_original_kept"
             else:
                 can_change = all(
-                    assessment.score in {70, 90}
+                    assessment.score is not None
+                    and score_meets_change_threshold(
+                        assessment.score, automatic_change_threshold
+                    )
                     for assessment, _ in valid_votes
                 )
                 next_action = (
@@ -1180,7 +1193,10 @@ def resolve_structured_ai_results(
                     same_candidate
                     and chosen_assessment is not None
                     and all(
-                        assessment.score in {70, 90}
+                        assessment.score is not None
+                        and score_meets_change_threshold(
+                            assessment.score, automatic_change_threshold
+                        )
                         for assessment, _ in valid_votes
                     )
                     and chosen_assessment.candidate_item_id
@@ -1272,7 +1288,10 @@ def resolve_structured_ai_results(
             elif review_policy == "valid_original_change":
                 can_change = bool(
                     chosen_assessment is not None
-                    and chosen_assessment.score in {70, 90}
+                    and chosen_assessment.score is not None
+                    and score_meets_change_threshold(
+                        chosen_assessment.score, automatic_change_threshold
+                    )
                     and chosen_assessment.candidate_item_id == decision.system_item_id
                     and chosen_assessment.candidate_item_id
                     != decision.original_standard_item_id

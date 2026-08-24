@@ -14,6 +14,7 @@ from cashflow_direct.evidence import (
     aggregate_evidence,
 )
 from cashflow_direct.decision_policy import (
+    DEFAULT_AUTOMATIC_CHANGE_SCORE,
     DecisionAction,
     MaterialityLevel,
     OriginalItemState,
@@ -468,6 +469,7 @@ def route_classification_decisions(
     decisions: Sequence[ClassificationDecision],
     materiality,
     company_notes: Sequence[dict[str, object]] = (),
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
 ) -> ClassificationRoutingResult:
     from cashflow_direct.ai_review import (
         build_ai_task,
@@ -593,6 +595,7 @@ def route_classification_decisions(
             source_conflict=decision.source_conflict,
             business_conflict=business_conflict,
             direction_status=direction_status,
+            automatic_change_threshold=automatic_change_threshold,
         )
         is_automatic = route.action in automatic_actions
         if company_rule_conflict:

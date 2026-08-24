@@ -73,7 +73,12 @@ from cashflow_direct.consistency import (
     apply_consistency_forced_checks,
     find_consistency_groups,
 )
-from cashflow_direct.decision_policy import EvidenceQuality, materiality_level
+from cashflow_direct.decision_policy import (
+    DEFAULT_AUTOMATIC_CHANGE_SCORE,
+    EvidenceQuality,
+    materiality_level,
+    validate_automatic_change_threshold,
+)
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
 from cashflow_direct.differences import build_original_auto_differences
 from cashflow_direct.excel_recalculation import recalculate_workbook_with_excel
@@ -538,7 +543,11 @@ def run_preflight(
     output_parent: Path | None = None,
     statement_path: Path | None = None,
     notes: str | None = None,
+    automatic_change_threshold: int = DEFAULT_AUTOMATIC_CHANGE_SCORE,
 ) -> PreflightResult:
+    automatic_change_threshold = validate_automatic_change_threshold(
+        automatic_change_threshold
+    )
     amounts = validate_materiality(*materiality)
     intake = register_inputs(inputs, output_parent=output_parent)
     run_dir = intake.run_dir
@@ -740,6 +749,7 @@ def run_preflight(
             for item in intake.files
         ],
         "materiality": asdict(amounts),
+        "automatic_change_threshold": automatic_change_threshold,
         "entries": [asdict(entry) for entry in entries],
         "mappings": mappings,
         "mapping_questions": questions,
@@ -762,7 +772,11 @@ def run_preflight(
             (
                 run_id,
                 json.dumps(
-                    {"materiality": asdict(amounts), "versions": versions},
+                    {
+                        "materiality": asdict(amounts),
+                        "automatic_change_threshold": automatic_change_threshold,
+                        "versions": versions,
+                    },
                     ensure_ascii=False,
                 ),
             ),
@@ -1251,7 +1265,7 @@ def _account_path_result_from_dict(
                 str(item["node_text"]),
                 str(item["concept"]),
                 str(item["source_text"]),
-                str(item.get("source", "rule")),
+                str(item.get("source", "direct")),
             )
             for item in payload.get("concepts", ())
         ),
@@ -1651,12 +1665,28 @@ def _write_dictionary_doc(
         lines.extend(["", "## 完整路径明细", ""])
     lines.append(
         "| 客户原完整路径 | 客户一级科目 | 标准一级科目 | 中间层级 | 末级明细 | "
-        "规范化路径 | 科目语义 | 疑似现金流项目 | 固定质量 | 事实依据 | 适用NOTE | 解释状态 |"
+        "规范化路径 | 科目语义 | 疑似现金流项目 | 固定质量 | 节点解释 | 未识别节点 | "
+        "事实依据 | 适用NOTE | 解释状态 |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    source_names = {
+        "direct": "直接识别",
+        "parent_inheritance": "继承父属性",
+        "neutral": "中性限定",
+        "agent": "Agent补充",
+    }
     for item in valid:
         levels = split_account_levels(str(item["account"]))
         originals = item.get("original_paths", ()) or (item["account"],)
+        node_explanations = "；".join(
+            f"第{int(concept.get('level_index', 0)) + 1}层“{concept.get('node_text', '')}”="
+            f"{concept.get('concept', '')}（{source_names.get(str(concept.get('source', '')), concept.get('source', ''))}）"
+            for concept in item.get("concepts", ())
+        ) or "无直接、继承或中性解释"
+        unresolved_nodes = "；".join(
+            f"第{int(slot.get('level_index', 0)) + 1}层“{slot.get('node_text', '')}”"
+            for slot in item.get("unresolved_slots", ())
+        ) or "无"
         if item.get("candidate_item_ids"):
             item_display = "候选：" + "、".join(item["candidate_item_ids"])
         elif any(
@@ -1678,7 +1708,8 @@ def _write_dictionary_doc(
             f"{' / '.join(levels[1:-1])} | {levels[-1] if levels else ''} | {item['account']} | "
             f"{item.get('semantic', '')} | "
             f"{item_display} | "
-            f"{item.get('quality_score', 0)} | {item.get('basis', '')} | "
+            f"{item.get('quality_score', 0)} | {node_explanations} | {unresolved_nodes} | "
+            f"{item.get('basis', '')} | "
             f"{item.get('note_id', '')} | {item.get('status', '')} |"
         )
     if company_notes:
@@ -2770,6 +2801,7 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         candidate_decisions,
         _materiality_from_state(state),
         company_notes=state.get("company_notes", ()),
+        automatic_change_threshold=int(state["automatic_change_threshold"]),
     )
     decisions = routing.decisions
     checked = validate_classification(components, decisions)
@@ -3103,6 +3135,9 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
                     for key, item in item_by_id.items()
                 },
                 failed_task_ids=terminal_failure_ids,
+                automatic_change_threshold=int(
+                    state["automatic_change_threshold"]
+                ),
             )
             state["decisions"] = [asdict(item) for item in resolved]
             with _store(run_dir).stage("structured_ai_resolution") as connection:
@@ -4066,6 +4101,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         difference_rows=difference_rows,
         mapping_rows=mapping_rows,
         overall_status=status,
+        automatic_change_threshold=int(state["automatic_change_threshold"]),
         unconfirmed_statement=statement_unconfirmed,
         dictionary_rows=dictionary_rows,
         consistency_rows=consistency_rows,

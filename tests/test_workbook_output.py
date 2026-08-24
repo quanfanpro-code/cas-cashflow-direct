@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import unittest
@@ -56,6 +56,19 @@ def _column_is_hidden(sheet, one_based_index: int) -> bool:
 
 
 class WorkbookOutputTests(unittest.TestCase):
+    def test_status_sheet_displays_selected_automatic_change_threshold(self) -> None:
+        model = replace(workbook_model(0, 0), automatic_change_threshold=55)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "改判阈值.xlsx"
+            build_output_workbook(model, path)
+            workbook = load_workbook(path, data_only=False)
+            try:
+                status = workbook["使用说明与状态"]
+                self.assertEqual("本次自动修改最低证据分", status["A6"].value)
+                self.assertEqual("55分（客户选择；70为默认推荐）", status["B6"].value)
+            finally:
+                workbook.close()
+
     def test_final_workbook_uses_date_only_and_human_decision_is_the_only_manual_gate(self) -> None:
         trace_row = {
             "业务组成编号(技术)": "RC-1",

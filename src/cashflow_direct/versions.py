@@ -4,9 +4,9 @@ import hashlib
 from pathlib import Path
 
 
-SCHEMA_VERSION = "4.1"
-SCORING_VERSION = "2026-08-24-summary-relations-v14"
-ACTION_MATRIX_VERSION = "2026-08-23-anomaly-clue-only-v14"
+SCHEMA_VERSION = "4.2"
+SCORING_VERSION = "2026-08-24-complete-account-path-v15"
+ACTION_MATRIX_VERSION = "2026-08-24-selectable-change-threshold-v15"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
 SUMMARY_SEMANTICS_VERSION = "2026-08-24-fixed-relations-v3"

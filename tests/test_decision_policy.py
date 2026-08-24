@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib
 import unittest
@@ -671,3 +671,103 @@ def test_removed_refund_route_argument_is_not_part_of_the_policy_api() -> None:
             materiality=policy.MaterialityLevel.M1,
             已移除退款专用路由=True,
         )
+
+
+@pytest.mark.parametrize("threshold", (50, 55, 70, 90))
+def test_automatic_change_threshold_accepts_only_customer_options(threshold: int) -> None:
+    policy = _policy()
+
+    assert policy.validate_automatic_change_threshold(threshold) == threshold
+
+
+@pytest.mark.parametrize("threshold", (0, 45, 60, 80, 100))
+def test_automatic_change_threshold_rejects_other_values(threshold: int) -> None:
+    policy = _policy()
+
+    with pytest.raises(ValueError, match="只允许50、55、70、90"):
+        policy.validate_automatic_change_threshold(threshold)
+
+
+@pytest.mark.parametrize(
+    ("score", "threshold", "expected_action"),
+    (
+        (50, 50, "automatic_change"),
+        (50, 55, "automatic_keep"),
+        (55, 55, "automatic_change"),
+        (55, 70, "automatic_keep"),
+        (70, 70, "automatic_change"),
+        (70, 90, "automatic_keep"),
+        (90, 90, "automatic_change"),
+    ),
+)
+def test_customer_threshold_controls_m0_change_of_valid_original(
+    score: int,
+    threshold: int,
+    expected_action: str,
+) -> None:
+    policy = _policy()
+
+    route = policy.route_normal_decision(
+        score,
+        policy.OriginalItemState.CONFLICTS,
+        policy.MaterialityLevel.M0,
+        automatic_change_threshold=threshold,
+    )
+
+    assert route.action.value == expected_action
+
+
+def test_default_change_threshold_remains_70() -> None:
+    policy = _policy()
+
+    assert policy.route_normal_decision(
+        55,
+        policy.OriginalItemState.CONFLICTS,
+        policy.MaterialityLevel.M0,
+    ).action.value == "automatic_keep"
+    assert policy.route_normal_decision(
+        70,
+        policy.OriginalItemState.CONFLICTS,
+        policy.MaterialityLevel.M0,
+    ).action.value == "automatic_change"
+
+
+def test_threshold_does_not_change_blank_original_fill_rule() -> None:
+    policy = _policy()
+
+    route = policy.route_normal_decision(
+        70,
+        policy.OriginalItemState.BLANK,
+        policy.MaterialityLevel.M0,
+        automatic_change_threshold=90,
+    )
+
+    assert route.action.value == "automatic_fill"
+
+
+def test_change_threshold_does_not_grant_change_operation_when_candidate_agrees() -> None:
+    policy = _policy()
+
+    route = policy.route_normal_decision(
+        50,
+        policy.OriginalItemState.AGREES,
+        policy.MaterialityLevel.M0,
+        automatic_change_threshold=50,
+    )
+
+    assert route.action.value == "automatic_keep"
+    assert policy.DecisionOperation.CHANGE not in route.allowed_operations
+
+
+def test_selected_threshold_is_required_after_valid_original_review() -> None:
+    policy = _policy()
+
+    route = policy.route_normal_decision(
+        55,
+        policy.OriginalItemState.CONFLICTS,
+        policy.MaterialityLevel.M2,
+        automatic_change_threshold=90,
+    )
+
+    assert route.action.value == "ai_review"
+    assert route.required_post_review_score == 90
