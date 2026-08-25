@@ -794,9 +794,9 @@ def test_valid_original_low_score_ai_change_claim_requests_blind_double_followup
     assert unresolved.decision_action == "ai_double_followup_review"
 
 
-def test_valid_original_blind_double_followup_changes_only_at_70() -> None:
+def test_valid_original_blind_double_followup_uses_selected_threshold() -> None:
     decision = _decision(
-        original_state="conflicts",
+        original_state="agrees",
         materiality="M2",
         action="ai_double_followup_review",
         candidate="CFO-03",
@@ -806,15 +806,29 @@ def test_valid_original_blind_double_followup_changes_only_at_70() -> None:
     resolved = resolve_structured_ai_results(
         (decision,),
         (_task("AI-A"), _task("AI-B")),
-        (_result("AI-A", candidate="CFO-03"), _result("AI-B", candidate="CFO-03")),
+        (
+            _result(
+                "AI-A",
+                candidate="CFO-03",
+                summary_quality=EvidenceQuality.MEDIUM,
+                account_quality=EvidenceQuality.MEDIUM,
+            ),
+            _result(
+                "AI-B",
+                candidate="CFO-03",
+                summary_quality=EvidenceQuality.MEDIUM,
+                account_quality=EvidenceQuality.MEDIUM,
+            ),
+        ),
         ITEM_NAMES,
         ITEM_DIRECTIONS,
+        automatic_change_threshold=50,
     )[0]
 
     assert resolved.resolved is True
     assert resolved.decision_action == "automatic_change"
     assert resolved.system_item_id == "CFO-03"
-    assert resolved.evidence_score == 70
+    assert resolved.evidence_score == 50
 
 
 def test_valid_original_blind_double_followup_accepts_same_candidate_at_70_and_90() -> None:

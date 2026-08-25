@@ -326,13 +326,12 @@ def test_obsolete_effective_materiality_entry_is_removed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("score", "actions", "post_review_minimums"),
+    ("score", "actions"),
     [
         *[
             (
                 score,
                 ("automatic_keep", "automatic_keep", "ai_review", "human_decision"),
-                (None, None, 70, None),
             )
             for score in (0, 10, 20, 25, 35, 45, 50)
         ],
@@ -340,7 +339,6 @@ def test_obsolete_effective_materiality_entry_is_removed() -> None:
             (
                 score,
                 ("automatic_keep", "automatic_keep", "automatic_keep", "human_decision"),
-                (None, None, None, None),
             )
             for score in (55, 70, 90)
         ],
@@ -349,7 +347,6 @@ def test_obsolete_effective_materiality_entry_is_removed() -> None:
 def test_original_item_agreement_uses_the_first_approved_action_table(
     score: int,
     actions: tuple[str, ...],
-    post_review_minimums: tuple[int | None, ...],
 ) -> None:
     policy = _policy()
 
@@ -363,23 +360,21 @@ def test_original_item_agreement_uses_the_first_approved_action_table(
     )
 
     assert tuple(route.action.value for route in routes) == actions
-    assert tuple(route.required_post_review_score for route in routes) == post_review_minimums
 
 
 @pytest.mark.parametrize(
-    ("score", "actions", "post_review_minimums"),
+    ("score", "actions"),
     [
         *[
             (
                 score,
                 ("ai_review", "double_ai_review", "double_ai_review", "human_decision"),
-                (0, 0, 0, 0),
             )
             for score in (0, 10, 20, 25, 35, 45, 50)
         ],
-        (55, ("ai_review", "ai_review", "double_ai_review", "human_decision"), (55, 55, 55, 55)),
-        (70, ("automatic_fill", "ai_review", "ai_review", "human_decision"), (None, 70, 70, None)),
-        (90, ("automatic_fill", "ai_review", "ai_review", "ai_review"), (None, 90, 90, 90)),
+        (55, ("ai_review", "ai_review", "double_ai_review", "human_decision")),
+        (70, ("automatic_fill", "ai_review", "ai_review", "human_decision")),
+        (90, ("automatic_fill", "ai_review", "ai_review", "ai_review")),
     ],
 )
 @pytest.mark.parametrize(
@@ -389,7 +384,6 @@ def test_original_item_agreement_uses_the_first_approved_action_table(
 def test_blank_or_unstandardizable_original_item_uses_the_second_action_table(
     score: int,
     actions: tuple[str, ...],
-    post_review_minimums: tuple[int | None, ...],
     state: str,
 ) -> None:
     policy = _policy()
@@ -404,7 +398,6 @@ def test_blank_or_unstandardizable_original_item_uses_the_second_action_table(
     )
 
     assert tuple(route.action.value for route in routes) == actions
-    assert tuple(route.required_post_review_score for route in routes) == post_review_minimums
 
 
 def test_conflicting_original_item_uses_change_instead_of_fill() -> None:
@@ -478,7 +471,6 @@ def test_valid_original_score_55_conflict_at_performance_materiality_requires_ai
     )
 
     assert route.action.value == "ai_review"
-    assert route.required_post_review_score == 70
 
 
 def test_source_conflict_at_performance_materiality_starts_ai_for_valid_original() -> None:
@@ -808,17 +800,3 @@ def test_change_threshold_does_not_grant_change_operation_when_candidate_agrees(
 
     assert route.action.value == "automatic_keep"
     assert policy.DecisionOperation.CHANGE not in route.allowed_operations
-
-
-def test_selected_threshold_is_required_after_valid_original_review() -> None:
-    policy = _policy()
-
-    route = policy.route_normal_decision(
-        55,
-        policy.OriginalItemState.CONFLICTS,
-        policy.MaterialityLevel.M2,
-        automatic_change_threshold=90,
-    )
-
-    assert route.action.value == "ai_review"
-    assert route.required_post_review_score == 90

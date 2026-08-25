@@ -104,7 +104,6 @@ class EvidenceAssessment:
 class DecisionRoute:
     action: DecisionAction
     allowed_operations: frozenset[DecisionOperation]
-    required_post_review_score: int | None = None
     forced_check: str = ""
     review_policy: str = ""
 
@@ -417,45 +416,34 @@ def route_normal_decision(
     if action is DecisionAction.AUTOMATIC_FILL and original_state is OriginalItemState.CONFLICTS:
         action = DecisionAction.AUTOMATIC_CHANGE
 
-    required_score = None
     review_policy = ""
     if original_state in _VALID_ORIGINAL_STATES:
         if materiality is MaterialityLevel.M2 and score <= 50:
             review_policy = "valid_original_retention"
-            required_score = (
-                DEFAULT_AUTOMATIC_CHANGE_SCORE
-                if agrees
-                else automatic_change_threshold
-            )
         elif action in {DecisionAction.AI_REVIEW, DecisionAction.DOUBLE_AI_REVIEW}:
             review_policy = "valid_original_change"
-            required_score = automatic_change_threshold
     elif score <= 50:
         review_policy = (
             "blank_low_single"
             if materiality is MaterialityLevel.M0
             else "blank_low_majority"
         )
-        required_score = 0
     elif score == 55:
         review_policy = (
             "blank_55_double"
             if materiality is MaterialityLevel.M2
             else "blank_55_single"
         )
-        required_score = 55
     elif score == 70 and action in {
         DecisionAction.AI_REVIEW,
         DecisionAction.DOUBLE_AI_REVIEW,
     }:
         review_policy = "blank_70_single"
-        required_score = 70
     elif score == 90 and action in {
         DecisionAction.AI_REVIEW,
         DecisionAction.DOUBLE_AI_REVIEW,
     }:
         review_policy = "blank_90_single"
-        required_score = 90
     allowed_operations = _allowed_operations(
         score,
         automatic_change_threshold,
@@ -471,7 +459,6 @@ def route_normal_decision(
     return DecisionRoute(
         action,
         allowed_operations,
-        required_score,
         review_policy=review_policy,
     )
 
@@ -562,7 +549,6 @@ def route_decision(
         return DecisionRoute(
             action,
             frozenset(),
-            automatic_change_threshold if action is DecisionAction.AI_REVIEW else None,
             forced_check="source_conflict",
             review_policy=(
                 "valid_original_retention"
