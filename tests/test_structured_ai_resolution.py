@@ -763,7 +763,7 @@ def test_direction_check_technical_failure_uses_amount_specific_exit() -> None:
         failed_task_ids={"AI-1"},
     )[0]
 
-    assert low_result.decision_action == "low_amount_human_batch"
+    assert low_result.decision_action == "human_decision"
     assert middle_result.decision_action == "human_decision"
 
 

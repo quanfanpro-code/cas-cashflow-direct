@@ -244,6 +244,60 @@ def test_pipeline_builds_only_round_c_after_two_blind_reviews_disagree() -> None
     assert "不得查看独立复核A、B结果" in tasks[0].context
 
 
+def test_round_c_keeps_the_original_allowed_candidates_after_a_b_disagree() -> None:
+    component = CashflowComponent(
+        component_id="CMP-THIRD-ORIGINAL-CANDIDATES",
+        voucher_key="V-3",
+        summary="收到往来款",
+        cash_delta_cent=100_000,
+        counterpart_accounts=("其他应付款_往来款",),
+    )
+    original = ClassificationDecision(
+        component_id=component.component_id,
+        system_item_id="CFO-03",
+        system_item_name="收到其他与经营活动有关的现金",
+        normal_direction="inflow",
+        matched_rule_id="TEST",
+        reason="A、B生成前的原始候选",
+        evidence_level="weak",
+        candidate_item_ids=("CFO-01", "CFO-03"),
+        summary_candidate_item_ids=("CFO-01", "CFO-03"),
+        account_path_candidate_item_ids=("CFO-03",),
+    )
+    blind_a_b = pipeline_module.build_blind_ai_tasks(
+        component,
+        original,
+        ("A", "B"),
+    )
+    waiting_third = ClassificationDecision(
+        component_id=component.component_id,
+        system_item_id="",
+        system_item_name="",
+        normal_direction="net",
+        matched_rule_id="NO-BUSINESS-CANDIDATE",
+        reason="A、B不一致后等待第三份互盲判断",
+        evidence_level="invalid",
+        candidate_item_ids=(),
+        summary_candidate_item_ids=(),
+        account_path_candidate_item_ids=(),
+        decision_action="ai_third_review",
+        ai_review_policy="blank_low_majority",
+        resolved=False,
+    )
+
+    tasks = pipeline_module._build_pending_ai_followups(
+        (waiting_third,),
+        (component,),
+        blind_a_b,
+        (),
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0].candidate_item_ids == ("CFO-01", "CFO-03")
+    assert tasks[0].summary_candidate_item_ids == ("CFO-01", "CFO-03")
+    assert tasks[0].account_path_candidate_item_ids == ("CFO-03",)
+
+
 def test_overall_materiality_blank_score_90_ai_fill_is_not_forced_back_to_human() -> None:
     decision = ClassificationDecision(
         component_id="CMP-M3-90",

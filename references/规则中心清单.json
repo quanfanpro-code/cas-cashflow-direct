@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "rule_center_version": "2026-08-26-unified-v1",
+  "rule_files": [
+    {"key": "statement_items", "path": "一般企业正表项目.json", "category": "正表项目", "format": "json", "test_reference": "tests/test_statement.py"},
+    {"key": "field_semantics", "path": "字段语义词典.json", "category": "字段识别", "format": "json", "test_reference": "tests/test_structure_and_mapping.py"},
+    {"key": "account_semantics", "path": "科目语义词典.json", "category": "完整科目路径", "format": "json", "test_reference": "tests/test_account_dictionary.py"},
+    {"key": "summary_semantics", "path": "摘要语义规则.json", "category": "摘要语义", "format": "json", "test_reference": "tests/test_summary_semantics.py"},
+    {"key": "evidence_and_actions", "path": "证据评分与行动规则.json", "category": "证据评分与行动", "format": "json", "test_reference": "tests/test_decision_policy.py"},
+    {"key": "special_and_reconciliation", "path": "特殊业务与勾稽规则.json", "category": "特殊业务与勾稽", "format": "json", "test_reference": "tests/test_pending_cash_reconciliation.py"},
+    {"key": "workbook_output", "path": "工作簿输出规则.json", "category": "工作簿输出", "format": "json", "test_reference": "tests/test_workbook_output.py"},
+    {"key": "level1_baseline", "path": "标准一级科目并集去重表.md", "category": "一级科目基线", "format": "text", "test_reference": "tests/test_account_mapping.py"}
+  ],
+  "deprecated_actions": ["low_amount_human_batch", "human_batch"],
+  "required_categories": ["正表项目", "字段识别", "完整科目路径", "摘要语义", "证据评分与行动", "特殊业务与勾稽", "工作簿输出", "一级科目基线"]
+}

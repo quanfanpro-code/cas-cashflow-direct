@@ -13,5 +13,19 @@
     "direction": {"terms": ["发生额方向", "借贷方向", "方向"], "value_types": ["text"]},
     "flow_amount": {"terms": ["现金流量金额", "现流金额", "流量金额", "分配金额", "金额"], "value_types": ["money"]},
     "flow_item": {"terms": ["现金流量表项目", "现金流量项目", "现金流量表项", "现流项目", "主表项目"], "value_types": ["text"]}
-  }
+  },
+  "normalization_rules": [
+    {
+      "rule_id": "FIELD-COUNTERPART-MISSING-MARKER",
+      "name": "对方科目缺失占位提示",
+      "category": "字段取值清洗",
+      "priority": 10,
+      "reason": "占位提示不是会计科目，不得进入一级科目映射；原行仍须保留并留痕",
+      "status": "active",
+      "version": "1",
+      "field": "counterpart_name",
+      "markers": ["未找到匹配"],
+      "action": "treat_as_missing"
+    }
+  ]
 }

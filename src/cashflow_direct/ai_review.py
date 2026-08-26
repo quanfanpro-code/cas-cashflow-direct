@@ -18,6 +18,7 @@ from cashflow_direct.decision_policy import (
     OriginalItemState,
     combine_source_assessments,
     score_meets_change_threshold,
+    unresolved_after_ai_review_action,
     validate_automatic_change_threshold,
 )
 from cashflow_direct.evidence import split_account_levels
@@ -27,9 +28,18 @@ from cashflow_direct.models import (
     ClassificationDecision,
 )
 from cashflow_direct.money import stable_id
+from cashflow_direct.rule_registry import default_rule_registry
 
 
-ACTIVE_COMPANY_NOTE_STATUSES = frozenset({"采用", "长期采用", "仅本次采用"})
+_AI_RULES = default_rule_registry()
+ACTIVE_COMPANY_NOTE_STATUSES = frozenset(
+    _AI_RULES.special_policy["company_rule_inputs"]["active_statuses"]
+)
+_AI_OUTCOME_POLICY = _AI_RULES.evidence_policy["ai_review_outcomes"]
+_AI_UNRESOLVED_ACTION = unresolved_after_ai_review_action()
+_BLANK_SINGLE_MINIMUM_SCORES = dict(
+    _AI_OUTCOME_POLICY["blank_single_minimum_scores"]
+)
 
 
 def company_note_is_active(note: Mapping[str, object]) -> bool:
@@ -785,6 +795,7 @@ def _apply_ai_outcome(
         business_conflict=business_conflict,
         direction_status=direction_status,
         decision_action=action.value,
+        decision_rule_id=f"POLICY-AI-OUTCOME:{review_policy}:{action.value}",
         ai_review_policy=review_policy,
         original_item_state=original_state.value,
         candidate_status="available" if candidate_id else decision.candidate_status,
@@ -965,7 +976,7 @@ def resolve_structured_ai_results(
                 score = chosen_assessment.score
             else:
                 chosen_assessment = chosen_result = None
-                next_action = DecisionAction.HUMAN_DECISION
+                next_action = _AI_UNRESOLVED_ACTION
                 decision_source = "ai_review_pending_human"
                 candidate_id = decision.system_item_id
                 score = None
@@ -1005,7 +1016,7 @@ def resolve_structured_ai_results(
                     ),
                 )
             if not same_candidate:
-                next_action = DecisionAction.HUMAN_DECISION
+                next_action = _AI_UNRESOLVED_ACTION
                 candidate_id = decision.system_item_id
                 score = None
                 decision_source = "ai_review_pending_human"
@@ -1085,11 +1096,7 @@ def resolve_structured_ai_results(
                     ),
                 )
             if not same_candidate:
-                next_action = (
-                    DecisionAction.LOW_AMOUNT_HUMAN_BATCH
-                    if materiality is MaterialityLevel.M0
-                    else DecisionAction.HUMAN_DECISION
-                )
+                next_action = _AI_UNRESOLVED_ACTION
                 candidate_id = decision.system_item_id
                 score = None
                 decision_source = "ai_review_pending_human"
@@ -1117,7 +1124,7 @@ def resolve_structured_ai_results(
                 next_action = (
                     DecisionAction.AUTOMATIC_CHANGE
                     if can_change
-                    else DecisionAction.HUMAN_DECISION
+                    else _AI_UNRESOLVED_ACTION
                 )
                 candidate_id = (
                     chosen_assessment.candidate_item_id
@@ -1196,7 +1203,7 @@ def resolve_structured_ai_results(
                 next_action = (
                     DecisionAction.AUTOMATIC_FILL
                     if can_fill
-                    else DecisionAction.HUMAN_DECISION
+                    else _AI_UNRESOLVED_ACTION
                 )
                 candidate_id = (
                     chosen_assessment.candidate_item_id
@@ -1352,12 +1359,7 @@ def resolve_structured_ai_results(
                     else "ai_reviewed_original_kept"
                 )
             else:
-                minimum = {
-                    "blank_low_single": 0,
-                    "blank_55_single": 55,
-                    "blank_70_single": 70,
-                    "blank_90_single": 90,
-                }[review_policy]
+                minimum = _BLANK_SINGLE_MINIMUM_SCORES[review_policy]
                 can_fill = bool(
                     chosen_assessment is not None
                     and chosen_assessment.score is not None
@@ -1375,11 +1377,7 @@ def resolve_structured_ai_results(
                     decision_source = "ai_review_waiting_blind_double"
                     review_policy = "blank_low_majority"
                 else:
-                    next_action = (
-                        DecisionAction.LOW_AMOUNT_HUMAN_BATCH
-                        if materiality is MaterialityLevel.M0
-                        else DecisionAction.HUMAN_DECISION
-                    )
+                    next_action = _AI_UNRESOLVED_ACTION
                     candidate_id = decision.system_item_id
                     score = None
                     decision_source = "ai_review_pending_human"

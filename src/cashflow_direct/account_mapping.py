@@ -8,6 +8,7 @@ from typing import Mapping, Sequence
 
 from cashflow_direct.evidence import split_account_levels
 from cashflow_direct.models import CashflowComponent, NormalizedEntry
+from cashflow_direct.rule_registry import load_rule_registry
 
 
 _CODE_PREFIX = re.compile(r"^\s*\d+(?:\.\d+)*\s*")
@@ -44,9 +45,9 @@ def _split_values(value: str) -> tuple[str, ...]:
 
 
 def load_standard_accounts(project_root: Path) -> tuple[StandardAccount, ...]:
-    path = Path(project_root) / "references" / "标准一级科目并集去重表.md"
     accounts: list[StandardAccount] = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
+    baseline_text = load_rule_registry(Path(project_root)).level1_baseline_text
+    for line in baseline_text.splitlines():
         if not re.match(r"^\|\s*\d+\s*\|", line):
             continue
         columns = [part.strip() for part in line.strip().strip("|").split("|")]

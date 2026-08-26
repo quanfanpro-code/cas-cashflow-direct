@@ -7,8 +7,17 @@ from cashflow_direct.decision_policy import (
     MaterialityLevel,
     materiality_level,
 )
-from cashflow_direct.models import ReviewBatch, UnresolvedDecision
+from cashflow_direct.models import (
+    CashflowComponent,
+    ClassificationDecision,
+    ReviewBatch,
+    UnresolvedDecision,
+)
 from cashflow_direct.money import stable_id
+from cashflow_direct.rule_registry import default_rule_registry
+
+
+_DEPRECATED_ACTIONS = default_rule_registry().deprecated_actions
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,63 +126,50 @@ def partition_review_batches(
     performance_cent: int,
     all_leaf_item_ids: Sequence[str] = (),
 ) -> tuple[tuple[ReviewBatch, ...], tuple[ReviewBatch, ...]]:
-    """把逐项重要复核与可整批处理的低金额事项物理分开。"""
+    """只保留重要或明确人工事项；低金额空白原项目必须先完成系统兜底。"""
     low_items = tuple(
         item
         for item in unresolved
-        if item.decision_action == "low_amount_human_batch"
+        if item.decision_action in _DEPRECATED_ACTIONS
         and not item.mandatory
         and abs(item.cash_delta_cent) < performance_cent
     )
-    low_ids = {item.component_id for item in low_items}
-    important_items = tuple(
-        item for item in unresolved if item.component_id not in low_ids
-    )
+    if low_items:
+        raise ValueError("低于实际执行重要性的事项必须先完成系统兜底，不能进入低金额人工批次")
+    important_items = tuple(unresolved)
     important = build_review_batches(
         important_items,
         performance_cent,
         all_leaf_item_ids,
     )
 
-    grouped: dict[tuple[str, ...], list[UnresolvedDecision]] = {}
-    for item in low_items:
-        key = (
-            item.decision_action,
-            item.cash_direction,
-            item.system_candidate_signature,
-            item.account_path_signature,
-            item.summary_business_signature,
-            item.evidence_status,
-            item.forced_check_reason,
-        )
-        grouped.setdefault(key, []).append(item)
+    return important, ()
 
-    low_batches: list[ReviewBatch] = []
-    for members in grouped.values():
-        first = members[0]
-        component_ids = tuple(item.component_id for item in members)
-        low_batches.append(
-            ReviewBatch(
-                batch_id=stable_id("LOW", *component_ids),
-                component_ids=component_ids,
-                proposed_item_code=first.system_item_id,
-                alternative_item_codes=tuple(sorted(first.alternative_item_ids)),
-                worst_case_impact_cent=sum(abs(item.cash_delta_cent) for item in members),
-                reason="七项批次条件完全相同，可在批次主行一次选择并应用到全部明细",
-                baseline_statement_amount_cent=sum(
-                    item.system_statement_amount_cent for item in members
-                ),
-                cash_delta_cent=sum(item.cash_delta_cent for item in members),
-                representative_summary=first.summary_pattern,
-                counterpart_group=first.counterpart_group,
-                source_locations=tuple(
-                    dict.fromkeys(
-                        location
-                        for item in members
-                        for location in item.source_locations
-                    )
-                ),
-                baseline_item_code=first.baseline_item_code,
-            )
+
+def build_low_amount_fallback_batches(
+    components: Sequence[CashflowComponent],
+    decisions: Sequence[ClassificationDecision],
+) -> tuple[ReviewBatch, ...]:
+    """把已经生效的低金额系统兜底决定逐业务送入可抽查明细表。"""
+    component_by_id = {item.component_id: item for item in components}
+    return tuple(
+        ReviewBatch(
+            batch_id=stable_id("FALLBACK", decision.component_id),
+            component_ids=(decision.component_id,),
+            proposed_item_code=decision.system_item_id,
+            alternative_item_codes=(),
+            worst_case_impact_cent=abs(component_by_id[decision.component_id].cash_delta_cent),
+            reason=decision.reason,
+            baseline_statement_amount_cent=abs(component_by_id[decision.component_id].cash_delta_cent),
+            cash_delta_cent=component_by_id[decision.component_id].cash_delta_cent,
+            representative_summary=component_by_id[decision.component_id].summary,
+            counterpart_group="、".join(component_by_id[decision.component_id].counterpart_accounts),
+            baseline_item_code=decision.system_item_id,
+            fallback_source=decision.fallback_source,
+            fallback_step=decision.fallback_step,
         )
-    return important, tuple(low_batches)
+        for decision in decisions
+        if decision.decision_source == "system_low_amount_fallback"
+        and decision.resolved
+        and not decision.excluded
+    )

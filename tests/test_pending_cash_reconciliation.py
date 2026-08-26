@@ -128,7 +128,7 @@ def test_final_success_requires_pending_cash_to_be_zero() -> None:
     assert result.final_difference_cent == 0
 
 
-def test_unresolved_valid_original_item_stays_in_statement_baseline() -> None:
+def test_unresolved_valid_original_stays_in_baseline_but_blocks_final_success() -> None:
     current_component = component("C1", -100_000, "支付其他与经营活动有关的现金")
     current_decision = decision(
         "C1",
@@ -150,7 +150,33 @@ def test_unresolved_valid_original_item_stays_in_statement_baseline() -> None:
     assert statement.values["CFO-07"] == 100_000
     assert result.classified_net_cent == -100_000
     assert result.pending_net_cent == 0
-    assert result.status == "最终现金流量表勾稽成功"
+    assert result.status == "现金变动桥接相符、现金流量表尚待分类"
+    assert result.pending_component_ids == ("C1",)
+
+
+def test_offsetting_unresolved_cash_cannot_fake_final_success() -> None:
+    inflow = component("C-IN", 100_000)
+    outflow = component("C-OUT", -100_000)
+    decisions = (
+        decision("C-IN", resolved=False),
+        decision("C-OUT", resolved=False),
+    )
+    statement = aggregate_statement((inflow, outflow), decisions, RULES)
+
+    result = reconcile_cash(
+        statement,
+        1_000_000,
+        1_000_000,
+        0,
+        components=(inflow, outflow),
+        decisions=decisions,
+    )
+
+    assert result.pending_net_cent == 0
+    assert result.bridge_difference_cent == 0
+    assert result.final_difference_cent == 0
+    assert result.pending_component_ids == ("C-IN", "C-OUT")
+    assert result.status == "现金变动桥接相符、现金流量表尚待分类"
 
 
 def test_confirmed_adjustment_remains_in_cash_bridge() -> None:

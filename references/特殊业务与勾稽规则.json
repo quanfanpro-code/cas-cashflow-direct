@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "rule_metadata": [
+    {"rule_id": "SPECIAL-CASH-SCOPE", "name": "现金范围识别与排除", "category": "现金范围", "priority": 10, "reason": "现金范围逐账户确认，公司专属决定只在本次运行生效", "status": "active", "version": "1"},
+    {"rule_id": "SPECIAL-COMPONENT-PAYROLL", "name": "真实付款与同凭证非现金计提拆分", "category": "业务组成", "priority": 10, "reason": "唯一最精简同摘要金额闭合组合优先构成真实现金业务", "status": "active", "version": "1"},
+    {"rule_id": "SPECIAL-VAT-COMPANION", "name": "增值税附属项目", "category": "特殊业务", "priority": 10, "reason": "满足同凭证同方向和唯一基础交易时随基础项目", "status": "active", "version": "1"},
+    {"rule_id": "SPECIAL-CONTROLLED-EXCLUSION", "name": "真实现金受控排除", "category": "排除控制", "priority": 10, "reason": "自由文字不能删除真实现金金额", "status": "active", "version": "1"},
+    {"rule_id": "RECON-PENDING-CASH-BRIDGE", "name": "未决现金桥接", "category": "勾稽", "priority": 10, "reason": "未决现金参与现金变动桥接但不进入具体正表项目", "status": "active", "version": "1"},
+    {"rule_id": "RECON-FINAL-SUCCESS", "name": "最终勾稽成功", "category": "勾稽", "priority": 20, "reason": "未决为零、必做人工完成且最终差异为零", "status": "active", "version": "1"}
+  ],
+  "cash_scope": {
+    "cash_terms": ["库存现金", "银行存款", "其他货币资金", "现金等价物"],
+    "cash_equivalent_terms": ["定期存款", "短期债券", "三个月内到期", "交易性金融资产", "债权投资", "理财"],
+    "restricted_terms": ["受限", "冻结", "保证金", "质押", "监管"],
+    "period_change_terms": ["质押", "解除质押", "冻结", "解除冻结"]
+  },
+  "component_structure": {
+    "inflow_item_terms": ["收到", "收回", "取得借款", "吸收投资", "销售商品"],
+    "outflow_item_terms": ["支付", "购买", "购建", "偿还", "分配股利"],
+    "noncash_summary_terms": ["计提"],
+    "principal_account_terms": ["借款", "债务"],
+    "interest_account_terms": ["利息"],
+    "single_cash_same_summary_exact_match": true
+  },
+  "allowed_exclusion_types": ["internal_transfer", "non_cash", "zero_amount", "cash_scope_excluded", "confirmed_duplicate", "confirmed_adjustment"],
+  "company_rule_inputs": {
+    "active_statuses": ["采用", "长期采用", "仅本次采用"]
+  },
+  "difference_source_order": ["account_path", "summary"],
+  "reconciliation": {
+    "bridge_components": ["classified_net", "pending_net", "fx", "confirmed_adjustments"],
+    "process_success_requires_zero_bridge_difference": true,
+    "final_success_requires_zero_pending": true,
+    "final_success_requires_manual_completion": true,
+    "final_success_requires_zero_final_difference": true,
+    "status_labels": {
+      "incomplete": "现金流量表与货币资金变动的勾稽核对：未完成",
+      "legacy_match": "现金流量表与货币资金变动的勾稽核对：相符",
+      "legacy_difference": "现金流量表与货币资金变动的勾稽核对：存在差异",
+      "bridge_pending": "现金变动桥接相符、现金流量表尚待分类",
+      "final_success": "最终现金流量表勾稽成功",
+      "bridge_difference": "现金变动桥接存在无法解释差异"
+    }
+  }
+}

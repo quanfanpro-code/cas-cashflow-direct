@@ -100,7 +100,6 @@ def test_final_workbook_exposes_the_complete_decision_chain_per_effective_cashfl
                     "automatic_keep",
                     "automatic_change",
                     "human_decision",
-                    "low_amount_human_batch",
                 }
                 for row in range(2, trace.max_row + 1)
             )

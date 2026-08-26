@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -11,9 +10,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from cashflow_direct.workbook_structure import HeaderBand, SheetSnapshot, WorkbookSnapshot, find_header_bands
+from cashflow_direct.rule_registry import default_rule_registry
 
 
-DICTIONARY_PATH = Path(__file__).resolve().parents[2] / "references" / "字段语义词典.json"
 ALWAYS_REQUIRED_ROLES = ("summary",)
 
 
@@ -46,8 +45,7 @@ class MappingQuestion:
 
 
 def _dictionary() -> dict[str, dict[str, list[str]]]:
-    with DICTIONARY_PATH.open("r", encoding="utf-8-sig") as source:
-        return json.load(source)["roles"]
+    return default_rule_registry().field_semantics["roles"]
 
 
 def _merged_value(sheet: SheetSnapshot, row: int, column: int) -> object:

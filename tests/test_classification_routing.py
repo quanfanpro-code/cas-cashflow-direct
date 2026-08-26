@@ -257,7 +257,7 @@ def test_same_source_business_conflict_is_blocked_before_ai_tasks() -> None:
     assert all(item.business_conflict for item in result.decisions)
     assert {
         item.decision_action for item in result.decisions
-    } == {"low_amount_human_batch"}
+    } == {"human_decision"}
 
 
 def test_automatic_keep_restores_original_item_in_the_result() -> None:
@@ -785,8 +785,8 @@ def test_unknown_service_individual_tax_with_blank_original_uses_batch_then_blin
     )
     by_id = {item.component_id: item for item in result.decisions}
 
-    assert by_id["TAX-BLANK-M0"].decision_action == "low_amount_human_batch"
-    assert by_id["TAX-BLANK-M1"].decision_action == "human_batch"
+    assert by_id["TAX-BLANK-M0"].decision_action == "human_decision"
+    assert by_id["TAX-BLANK-M1"].decision_action == "human_decision"
     assert by_id["TAX-BLANK-M2"].decision_action == "double_ai_review"
     assert by_id["TAX-BLANK-M2"].ai_review_policy == "individual_tax_service"
     assert len(result.ai_tasks) == 2

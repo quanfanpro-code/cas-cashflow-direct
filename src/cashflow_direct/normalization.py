@@ -12,11 +12,29 @@ from openpyxl.utils.cell import range_boundaries
 
 from cashflow_direct.models import EvidenceProfile, NormalizedEntry, SourceLocator
 from cashflow_direct.money import stable_id, yuan_to_cent
+from cashflow_direct.rule_registry import default_rule_registry
 from cashflow_direct.semantic_mapping import DatasetMapping
 from cashflow_direct.workbook_structure import open_workbook_robust
 
 
 CASH_ACCOUNT_TERMS = ("库存现金", "银行存款", "其他货币资金", "现金等价物")
+
+
+def _missing_value_markers(field: str) -> frozenset[str]:
+    rules = default_rule_registry().field_semantics.get("normalization_rules", ())
+    return frozenset(
+        str(marker).strip()
+        for rule in rules
+        if isinstance(rule, dict)
+        and rule.get("status", "active") == "active"
+        and rule.get("field") == field
+        and rule.get("action") == "treat_as_missing"
+        for marker in rule.get("markers", ())
+        if str(marker).strip()
+    )
+
+
+_COUNTERPART_MISSING_MARKERS = _missing_value_markers("counterpart_name")
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,8 +234,28 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
 
             account = _text(_cell_value(tuple(row), mapping, "account_name"))
             account_code = _text(_cell_value(tuple(row), mapping, "account_code"))
-            counterpart = _text(_cell_value(tuple(row), mapping, "counterpart_name"))
+            counterpart_raw = _text(
+                _cell_value(tuple(row), mapping, "counterpart_name")
+            )
+            counterpart = (
+                "" if counterpart_raw in _COUNTERPART_MISSING_MARKERS else counterpart_raw
+            )
             input_issues: list[str] = []
+            if counterpart_raw and not counterpart:
+                counterpart_column = mapping.role_to_column.get("counterpart_name")
+                warnings.append(
+                    RowError(
+                        _error_locator(
+                            file_id,
+                            worksheet.title,
+                            row_number,
+                            1
+                            if counterpart_column is None
+                            else counterpart_column.column_index,
+                        ),
+                        f"对方科目“{counterpart_raw}”为缺失占位提示，已按缺失处理；原行保留并继续留痕",
+                    )
+                )
             if not summary:
                 input_issues.append("summary_empty")
                 summary_column = mapping.role_to_column.get("summary")

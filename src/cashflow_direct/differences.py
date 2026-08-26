@@ -9,21 +9,16 @@ from cashflow_direct.models import (
     ClassificationDecision,
     NormalizedEntry,
 )
+from cashflow_direct.rule_registry import default_rule_registry
 
 
+_DIFFERENCE_RULES = default_rule_registry()
+_SOURCE_ORDER = _DIFFERENCE_RULES.difference_source_order
 _QUALITY_TEXT = {
-    0: "无效证据0分",
-    10: "弱证据10分",
-    25: "中等证据25分",
-    45: "强证据45分",
+    int(score): label
+    for score, label in _DIFFERENCE_RULES.output_policy["quality_labels"]["difference"].items()
 }
-
-_MATERIALITY_TEXT = {
-    "M0": "低于明显微小错报临界值",
-    "M1": "达到明显微小错报临界值但低于实际执行重要性",
-    "M2": "达到实际执行重要性但低于整体重要性",
-    "M3": "达到整体重要性",
-}
+_MATERIALITY_TEXT = dict(_DIFFERENCE_RULES.output_policy["materiality_labels"])
 
 
 def _same_original_item(
@@ -49,21 +44,18 @@ def _independent_sources(
     component: CashflowComponent,
     decision: ClassificationDecision,
 ) -> tuple[str, str]:
-    if decision.decision_action == "vat_follow_base":
-        return (
-            "增值税附属关系：与基础组成"
-            f"{decision.vat_base_component_id}共用唯一现金来源",
-            f"基础项目决定：{decision.system_item_name or '明确排除'}",
-        )
-    account_path_source = (
+    sources = {
+        "account_path": (
         "完整对方科目路径“"
         + ("、".join(component.counterpart_accounts) or "路径为空")
         + f"”；{_QUALITY_TEXT[decision.account_path_quality]}"
-    )
-    summary_source = (
-        f"摘要“{entry.summary or '摘要为空'}”；{_QUALITY_TEXT[decision.summary_quality]}"
-    )
-    return account_path_source, summary_source
+        ),
+        "summary": (
+            f"摘要“{entry.summary or '摘要为空'}”；"
+            f"{_QUALITY_TEXT[decision.summary_quality]}"
+        ),
+    }
+    return tuple(sources[source] for source in _SOURCE_ORDER)  # type: ignore[return-value]
 
 
 def _score_description(decision: ClassificationDecision) -> str:

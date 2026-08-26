@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from cashflow_direct.evidence import (
     split_account_levels,
 )
 from cashflow_direct.models import CashflowComponent
+from cashflow_direct.rule_registry import load_rule_registry
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,11 +184,7 @@ def _from_payload(payload: dict, default_layer: str) -> AccountSemanticEntry:
 
 
 def load_account_semantic_rules(root: Path) -> AccountSemanticRules:
-    path = Path(root) / "references" / "科目语义词典.json"
-    if not path.is_file():
-        return AccountSemanticRules((), ())
-    with path.open("r", encoding="utf-8-sig") as source:
-        payload = json.load(source)
+    payload = load_rule_registry(Path(root)).account_semantics
     return AccountSemanticRules(
         tuple(dict(item) for item in payload.get("concepts", ())),
         tuple(dict(item) for item in payload.get("path_rules", ())),

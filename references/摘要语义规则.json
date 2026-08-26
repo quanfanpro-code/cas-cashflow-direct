@@ -1,5 +1,5 @@
 ﻿{
-  "schema_version": "1.3.0",
+  "schema_version": "1.5.0",
   "scope": "一般企业现金流量表直接法摘要语义",
   "noise_patterns": [
     {"slot": "noise_date", "pattern": "(?:20\\d{2}[年./-])?\\d{1,2}[月./-]\\d{0,2}日?"},
@@ -9,6 +9,45 @@
   "organization_suffix_pattern": "(?:有限责任公司|股份有限公司|有限公司|公司|银行|中心|事务所|合作社|工厂|研究所|研究院|设计院|学院|修理厂|人民法院|管理委员会|公证处)",
   "non_entity_organization_terms": ["子公司", "母公司", "本公司"],
   "organization_suffix_non_entity_follow": ["存款", "借款", "贷款", "利息", "账户", "手续费"],
+  "anchored_cash_actions": [
+    {
+      "rule_id": "SUMMARY-ANCHORED-RECEIPT",
+      "name": "句首单字收款动作",
+      "category": "摘要现金动作",
+      "priority": 10,
+      "reason": "句首或日期后的单字“收”表示本笔现金流入，不得因固定词典只列长词而遗漏",
+      "status": "active",
+      "version": "1",
+      "pattern": "^(?:\\d{1,4}(?:[./-]\\d{1,2}){1,2})?\\s*(收)",
+      "value": "inflow"
+    },
+    {
+      "rule_id": "SUMMARY-ANCHORED-PAYMENT",
+      "name": "句首单字付款动作",
+      "category": "摘要现金动作",
+      "priority": 20,
+      "reason": "句首或日期后的单字“付”表示本笔现金流出",
+      "status": "active",
+      "version": "1",
+      "pattern": "^(?:\\d{1,4}(?:[./-]\\d{1,2}){1,2})?\\s*(付)",
+      "value": "outflow"
+    }
+  ],
+  "action_conditioned_object_overrides": [
+    {
+      "rule_id": "SUMMARY-INFLOW-PROPERTY-SERVICE",
+      "name": "收取物业费按提供服务收款",
+      "category": "摘要业务对象",
+      "priority": 10,
+      "reason": "同一费用名称在收款与付款场景含义不同；实际收取物业费属于提供物业服务收到的现金，支付物业费仍属于其他经营支出",
+      "status": "active",
+      "version": "1",
+      "cash_action": "inflow",
+      "from_value": "operating_other",
+      "terms": ["物业费"],
+      "to_value": "service_revenue"
+    }
+  ],
   "lexicons": {
     "cash_actions": [
       {"slot": "cash_action", "value": "inflow", "terms": ["收到退回", "收到", "收取", "收款", "回款", "到账", "收回", "赎回", "取得"]},

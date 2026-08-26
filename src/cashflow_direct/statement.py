@@ -9,8 +9,13 @@ from cashflow_direct.classification import RulePack, standardize_flow_item
 from cashflow_direct.components import InternalTransferLeg, entry_cash_delta_cent
 from cashflow_direct.models import CashflowComponent, ClassificationDecision, NormalizedEntry
 from cashflow_direct.money import statement_amount_cent, yuan_to_cent
+from cashflow_direct.rule_registry import default_rule_registry
 from cashflow_direct.semantic_mapping import ColumnMapping, MappingQuestion
 from cashflow_direct.workbook_structure import open_workbook_robust
+
+
+_RECONCILIATION_POLICY = default_rule_registry().special_policy["reconciliation"]
+_RECONCILIATION_STATUS = _RECONCILIATION_POLICY["status_labels"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -810,7 +815,7 @@ def reconcile_cash(
 ) -> ReconciliationResult:
     if opening_cent is None or closing_cent is None or fx_cent is None:
         return ReconciliationResult(
-            "现金流量表与货币资金变动的勾稽核对：未完成", opening_cent, closing_cent, fx_cent, None, None
+            _RECONCILIATION_STATUS["incomplete"], opening_cent, closing_cent, fx_cent, None, None
         )
     classified_net = (
         statement.values["CFO-NET"]
@@ -818,17 +823,26 @@ def reconcile_cash(
         + statement.values["CFF-NET"]
     )
     decision_by_id = {item.component_id: item for item in decisions}
-    pending_components = tuple(
+    unresolved_components = tuple(
         component
         for component in components
         if (
             (decision := decision_by_id.get(component.component_id)) is not None
             and not decision.resolved
             and not decision.excluded
+        )
+    )
+    pending_bridge_components = tuple(
+        component
+        for component in unresolved_components
+        if (
+            (decision := decision_by_id.get(component.component_id)) is not None
             and not decision.original_standard_item_id
         )
     )
-    pending_net = sum(component.cash_delta_cent for component in pending_components)
+    pending_net = sum(
+        component.cash_delta_cent for component in pending_bridge_components
+    )
     final_difference = (
         closing_cent
         - opening_cent
@@ -839,16 +853,16 @@ def reconcile_cash(
     bridge_difference = final_difference - pending_net
     if not components and not decisions:
         status = (
-            "现金流量表与货币资金变动的勾稽核对：相符"
+            _RECONCILIATION_STATUS["legacy_match"]
             if final_difference == 0
-            else "现金流量表与货币资金变动的勾稽核对：存在差异"
+            else _RECONCILIATION_STATUS["legacy_difference"]
         )
-    elif bridge_difference == 0 and pending_net != 0:
-        status = "现金变动桥接相符、现金流量表尚待分类"
+    elif bridge_difference == 0 and unresolved_components:
+        status = _RECONCILIATION_STATUS["bridge_pending"]
     elif bridge_difference == 0 and final_difference == 0:
-        status = "最终现金流量表勾稽成功"
+        status = _RECONCILIATION_STATUS["final_success"]
     else:
-        status = "现金变动桥接存在无法解释差异"
+        status = _RECONCILIATION_STATUS["bridge_difference"]
     return ReconciliationResult(
         status,
         opening_cent,
@@ -861,5 +875,5 @@ def reconcile_cash(
         confirmed_adjustment_cent,
         bridge_difference,
         final_difference,
-        tuple(component.component_id for component in pending_components),
+        tuple(component.component_id for component in unresolved_components),
     )

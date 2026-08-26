@@ -262,6 +262,24 @@ class ComponentTests(unittest.TestCase):
         self.assertNotIn("E32", component.source_keys)
         self.assertNotIn("E33", component.source_keys)
 
+    def test_cash_payment_uses_unique_same_summary_amount_match_and_ignores_accrual_rows(self) -> None:
+        entries = (
+            _component_entry(34, "V-PAYROLL-MIXED", "1002 银行存款", credit_cent=18_567_466, retained_side="cash", summary="发放7月工资"),
+            _component_entry(35, "V-PAYROLL-MIXED", "应付职工薪酬_工资", debit_cent=18_567_466, retained_side="counterpart", summary="发放7月工资"),
+            _component_entry(36, "V-PAYROLL-MIXED", "应付职工薪酬_工资", debit_cent=20_000, retained_side="counterpart", summary="补计提7月工资"),
+            _component_entry(37, "V-PAYROLL-MIXED", "管理费用_工资", credit_cent=20_000, retained_side="counterpart", summary="补计提7月工资"),
+            _component_entry(38, "V-PAYROLL-MIXED", "应交税费_应交个人所得税", debit_cent=213_477, retained_side="counterpart", summary="结转个人所得税"),
+            _component_entry(39, "V-PAYROLL-MIXED", "应付职工薪酬_工资", credit_cent=213_477, retained_side="counterpart", summary="结转个人所得税"),
+        )
+        scope = confirm_cash_scope(discover_cash_scope(entries), {"1002": "include"})
+
+        component = build_cashflow_components(entries, scope).components[0]
+
+        self.assertEqual(-18_567_466, component.cash_delta_cent)
+        self.assertEqual("发放7月工资", component.summary)
+        self.assertEqual(("应付职工薪酬_工资",), component.counterpart_accounts)
+        self.assertEqual({"E34", "E35"}, set(component.source_keys))
+
     def test_component_uses_the_connected_business_row_summary(self) -> None:
         entries = (
             _component_entry(

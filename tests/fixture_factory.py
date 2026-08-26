@@ -534,6 +534,28 @@ def workbook_model(review_batches: int, duplicate_groups: int):
             "reason": decision.reason,
         }
         for component, decision in zip(case.components, case.decisions, strict=True)
+    ) + tuple(
+        {
+            "业务组成编号(技术)": batch.component_ids[0],
+            "日期": "2026-01-02",
+            "凭证字": "记",
+            "凭证号": str(index + 1),
+            "本行摘要": "匿名重大剩余事项",
+            "本行完整对方科目路径": "其他应付款_匿名对象",
+            "标准一级科目": "其他应付款",
+            "现金账户路径": "银行存款_一般户",
+            "借方": 0.0,
+            "贷方": abs(batch.cash_delta_cent) / 100,
+            "流量金额（原币）": abs(batch.cash_delta_cent) / 100,
+            "本行分配现金变化": batch.cash_delta_cent / 100,
+            "现金方向依据": "银行存款贷方",
+            "原项目标准化结果": "支付其他与经营活动有关的现金",
+            "系统候选项目": "支付其他与经营活动有关的现金",
+            "判断理由": batch.reason,
+            "单笔金额": abs(batch.cash_delta_cent) / 100,
+            "异常": "未发现异常",
+        }
+        for index, batch in enumerate(reviews)
     )
     return WorkbookModel(
         statement=statement,

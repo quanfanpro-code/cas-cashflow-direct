@@ -9,8 +9,12 @@ from pathlib import Path
 from cashflow_direct.components import ComponentSourceAllocation
 from cashflow_direct.decision_policy import DecisionAction
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
+from cashflow_direct.rule_registry import default_rule_registry
 from cashflow_direct.statement import StatementResult
 from cashflow_direct.workbook_output import WorkbookModel, validate_output_workbook
+
+
+_VALIDATION_RULES = default_rule_registry()
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,22 +53,8 @@ def validate_classification(
         errors.append("现金流业务组成编号不唯一")
     if set(component_ids) != set(decision_ids):
         errors.append("存在未取得唯一分类的现金流业务组成")
-    automatic_actions = {
-        DecisionAction.AUTOMATIC_KEEP.value,
-        DecisionAction.AUTOMATIC_FILL.value,
-        DecisionAction.AUTOMATIC_CHANGE.value,
-    }
-    pending_actions = {
-        DecisionAction.AI_REVIEW.value,
-        DecisionAction.DOUBLE_AI_REVIEW.value,
-        DecisionAction.AI_DOUBLE_FOLLOWUP_REVIEW.value,
-        DecisionAction.AI_THIRD_REVIEW.value,
-        DecisionAction.LOW_AMOUNT_HUMAN_BATCH.value,
-        DecisionAction.HUMAN_BATCH.value,
-        DecisionAction.HUMAN_DECISION.value,
-        DecisionAction.ISOLATE_INVALID_INPUT.value,
-        DecisionAction.CONFIRM_CASH_SCOPE.value,
-    }
+    automatic_actions = _VALIDATION_RULES.action_group("automatic")
+    pending_actions = _VALIDATION_RULES.action_group("all_pending")
     for item in decisions:
         if item.excluded:
             if not item.reason.strip():

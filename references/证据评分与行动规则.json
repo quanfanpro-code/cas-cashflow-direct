@@ -1,0 +1,119 @@
+{
+  "schema_version": "1.0",
+  "rule_metadata": [
+    {"rule_id": "POLICY-EVIDENCE-QUALITY", "name": "两项来源四档证据质量", "category": "证据评分", "priority": 10, "reason": "摘要和完整路径分别评价，不互相替代", "status": "active", "version": "1"},
+    {"rule_id": "POLICY-NORMAL-ACTION", "name": "原项目状态、分数和重要性行动表", "category": "行动路由", "priority": 10, "reason": "所有首次行动从同一张表取得", "status": "active", "version": "1"},
+    {"rule_id": "POLICY-FORCED-CHECK", "name": "强制检查行动表", "category": "强制检查", "priority": 10, "reason": "输入、现金范围和业务事实冲突优先于正常行动", "status": "active", "version": "1"},
+    {"rule_id": "POLICY-AI-OUTCOME", "name": "人工智能复核结果出口", "category": "人工智能复核", "priority": 10, "reason": "人工智能复核只解释证据，最终动作仍由统一行动中心限定", "status": "active", "version": "1"},
+    {"rule_id": "POLICY-LOW-AMOUNT-FALLBACK", "name": "空白原项目低金额系统兜底", "category": "系统兜底", "priority": 10, "reason": "低于实际执行重要性的真实现金不得继续未决", "status": "active", "version": "1"}
+  ],
+  "evidence_qualities": {"invalid": 0, "weak": 10, "medium": 25, "strong": 45},
+  "allowed_scores": [0, 10, 20, 25, 35, 45, 50, 55, 70, 90],
+  "automatic_change_score_options": [45, 50, 55, 70, 90],
+  "default_automatic_change_score": 70,
+  "active_actions": [
+    "automatic_keep", "automatic_fill", "automatic_change", "ai_review",
+    "double_ai_review", "ai_double_followup_review", "ai_third_review",
+    "human_decision", "isolate_invalid_input", "confirm_cash_scope",
+    "exclude", "manual_exclude", "manual_decision", "vat_follow_base"
+  ],
+  "action_display_labels": {
+    "automatic_keep": "自动保留原项目",
+    "automatic_fill": "自动补填原项目",
+    "automatic_change": "自动修改原项目",
+    "ai_review": "一次AI复核",
+    "double_ai_review": "两个AI独立复核",
+    "ai_double_followup_review": "首轮后再由两个AI独立复核",
+    "ai_third_review": "第三个AI独立复核并按多数结果处理",
+    "human_decision": "人工决定",
+    "isolate_invalid_input": "隔离非法输入",
+    "confirm_cash_scope": "确认现金范围",
+    "exclude": "明确排除",
+    "manual_exclude": "人工明确排除",
+    "manual_decision": "人工决定",
+    "vat_follow_base": "随基础项目"
+  },
+  "action_groups": {
+    "automatic": ["automatic_keep", "automatic_fill", "automatic_change"],
+    "ai_pending": ["ai_review", "double_ai_review", "ai_double_followup_review", "ai_third_review"],
+    "blind_multi_review": ["double_ai_review", "ai_double_followup_review"],
+    "human_pending": ["human_decision", "isolate_invalid_input", "confirm_cash_scope"],
+    "all_pending": ["ai_review", "double_ai_review", "ai_double_followup_review", "ai_third_review", "human_decision", "isolate_invalid_input", "confirm_cash_scope"]
+  },
+  "ai_review_outcomes": {
+    "unresolved_action": "human_decision",
+    "blank_single_minimum_scores": {
+      "blank_low_single": 0,
+      "blank_55_single": 55,
+      "blank_70_single": 70,
+      "blank_90_single": 90
+    }
+  },
+  "normal_action_matrix": {
+    "agrees": {
+      "0":  {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "10": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "20": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "25": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "35": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "45": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "50": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "55": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["automatic_keep", ""], "M3": ["human_decision", ""]},
+      "70": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["automatic_keep", ""], "M3": ["human_decision", ""]},
+      "90": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["automatic_keep", ""], "M3": ["human_decision", ""]}
+    },
+    "valid_original": {
+      "0":  {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "10": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "20": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "25": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "35": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "45": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "50": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "55": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_change"], "M3": ["human_decision", ""]},
+      "70": {"M0": ["automatic_change", ""], "M1": ["ai_review", "valid_original_change"], "M2": ["double_ai_review", "valid_original_change"], "M3": ["human_decision", ""]},
+      "90": {"M0": ["automatic_change", ""], "M1": ["ai_review", "valid_original_change"], "M2": ["double_ai_review", "valid_original_change"], "M3": ["human_decision", ""]}
+    },
+    "blank": {
+      "0":  {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "10": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "20": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "25": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "35": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "45": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "50": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]},
+      "55": {"M0": ["ai_review", "blank_55_single"], "M1": ["ai_review", "blank_55_single"], "M2": ["double_ai_review", "blank_55_double"], "M3": ["human_decision", ""]},
+      "70": {"M0": ["automatic_fill", ""], "M1": ["ai_review", "blank_70_single"], "M2": ["ai_review", "blank_70_single"], "M3": ["human_decision", ""]},
+      "90": {"M0": ["automatic_fill", ""], "M1": ["ai_review", "blank_90_single"], "M2": ["ai_review", "blank_90_single"], "M3": ["ai_review", "blank_90_single"]}
+    }
+  },
+  "forced_routes": {
+    "invalid_input": {"all": ["isolate_invalid_input", ""]},
+    "cash_scope": {"all": ["confirm_cash_scope", ""]},
+    "company_rule_conflict": {"all": ["human_decision", ""]},
+    "missing_net_or_vat": {
+      "valid_original": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["automatic_keep", ""], "M3": ["human_decision", ""]},
+      "blank": {"M0": ["human_decision", ""], "M1": ["human_decision", ""], "M2": ["human_decision", ""], "M3": ["human_decision", ""]}
+    },
+    "individual_tax_service": {
+      "valid_original": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["double_ai_review", "individual_tax_service"], "M3": ["human_decision", ""]},
+      "blank": {"M0": ["human_decision", ""], "M1": ["human_decision", ""], "M2": ["double_ai_review", "individual_tax_service"], "M3": ["human_decision", ""]}
+    },
+    "source_conflict": {
+      "valid_original": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["ai_review", "valid_original_retention"], "M3": ["human_decision", ""]},
+      "blank": {"M0": ["ai_review", "blank_low_single"], "M1": ["double_ai_review", "blank_low_majority"], "M2": ["double_ai_review", "blank_low_majority"], "M3": ["human_decision", ""]}
+    },
+    "business_conflict": {
+      "valid_original": {"M0": ["automatic_keep", ""], "M1": ["automatic_keep", ""], "M2": ["automatic_keep", ""], "M3": ["human_decision", ""]},
+      "blank": {"M0": ["human_decision", ""], "M1": ["human_decision", ""], "M2": ["human_decision", ""], "M3": ["human_decision", ""]}
+    }
+  },
+  "fallback": {
+    "eligible_original_states": ["blank", "unstandardizable"],
+    "eligible_unresolved_actions": ["human_decision", "isolate_invalid_input"],
+    "known_direction_statuses": ["compatible", "incompatible"],
+    "source_priority_on_tie": ["account_path", "summary"],
+    "candidate_priority": ["source_preferred", "existing_system_preferred", "statement_order", "direction_other_operating"],
+    "direction_default_items": {"inflow": "CFO-03", "outflow": "CFO-07"}
+  }
+}

@@ -169,7 +169,7 @@ def test_trace_names_direction_mismatch_as_an_anomaly_clue_only() -> None:
     assert row["异常"] == "现金方向与候选项目不相容（仅异常线索）"
 
 
-def test_trace_displays_m1_individual_tax_batch_as_general_human_batch() -> None:
+def test_trace_displays_m1_individual_tax_as_human_decision() -> None:
     cash = _entry(
         "E-CASH-TAX",
         18,
@@ -198,7 +198,7 @@ def test_trace_displays_m1_individual_tax_batch_as_general_human_batch() -> None
     decision = replace(
         _decision(component.component_id),
         resolved=False,
-        decision_action="human_batch",
+        decision_action="human_decision",
         individual_tax_fact_missing=True,
     )
 
@@ -213,7 +213,7 @@ def test_trace_displays_m1_individual_tax_batch_as_general_human_batch() -> None
         {"F1": "匿名序时账.xlsx"},
     )[0]
 
-    assert row["唯一动作"] == "人工批量决定"
+    assert row["唯一动作"] == "人工决定"
     assert row["强制检查"] == "个税服务对象不明"
     assert row["复核状态"] == "等待人工决定"
 

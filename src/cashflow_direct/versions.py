@@ -3,10 +3,12 @@
 import hashlib
 from pathlib import Path
 
+from cashflow_direct.rule_registry import load_rule_registry
 
-SCHEMA_VERSION = "4.4"
-SCORING_VERSION = "2026-08-24-vat-companion-single-strong-v16"
-ACTION_MATRIX_VERSION = "2026-08-24-minimum-change-threshold-v17"
+
+SCHEMA_VERSION = "4.5"
+SCORING_VERSION = "2026-08-26-unified-rule-center-v17"
+ACTION_MATRIX_VERSION = "2026-08-26-unified-rule-center-v18"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"
 COMPANY_NOTES_VERSION = "2026-08-22-scoped-versioned-notes-v2"
 SUMMARY_SEMANTICS_VERSION = "2026-08-24-unexplained-summary-v5"
@@ -25,6 +27,7 @@ def _combined_sha256(paths: tuple[Path, ...]) -> str:
 def current_versions(project_root: Path) -> dict[str, str]:
     root = Path(project_root)
     references = root / "references"
+    registry = load_rule_registry(root)
     return {
         "schema": SCHEMA_VERSION,
         "scoring": SCORING_VERSION,
@@ -34,6 +37,7 @@ def current_versions(project_root: Path) -> dict[str, str]:
         "summary_semantics": SUMMARY_SEMANTICS_VERSION,
         "materiality": MATERIALITY_VERSION,
         "forced_checks": FORCED_CHECKS_VERSION,
+        "rule_center": registry.fingerprint,
         "rule_pack": _combined_sha256(
             (
                 references / "一般企业正表项目.json",

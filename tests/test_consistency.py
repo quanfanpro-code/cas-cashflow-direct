@@ -142,12 +142,12 @@ def test_true_same_source_inconsistency_preserves_scores_and_uses_single_amount_
     assert {item.evidence_score for item in outcome.decisions} == {70, 45}
     assert all(item.business_conflict for item in outcome.decisions)
     assert {item.decision_action for item in outcome.decisions} == {
-        "low_amount_human_batch"
+        "human_decision"
     }
     assert all(not item.resolved for item in outcome.decisions)
 
 
-def test_m0_true_same_source_inconsistency_uses_low_amount_human_batch() -> None:
+def test_m0_true_same_source_inconsistency_uses_human_decision_before_fallback() -> None:
     components = (component("C1", 100_000), component("C2", -100_000))
     decisions = (decision("C1", "CFO-03"), decision("C2", "CFI-06", 45))
 
@@ -157,5 +157,5 @@ def test_m0_true_same_source_inconsistency_uses_low_amount_human_batch() -> None
     )
 
     assert {item.decision_action for item in outcome.decisions} == {
-        "low_amount_human_batch"
+        "human_decision"
     }

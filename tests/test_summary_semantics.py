@@ -37,6 +37,23 @@ class SummarySemanticsTests(unittest.TestCase):
             [span.text for span in result.spans if span.slot == "cash_action"],
         )
 
+    def test_sentence_initial_single_character_receipt_and_payment_are_symmetric(self):
+        cases = {
+            "收场地使用费": ("收", "inflow"),
+            "4.1付广告制作费": ("付", "outflow"),
+        }
+
+        for summary, expected in cases.items():
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+                actions = [
+                    span.text for span in result.spans if span.slot == "cash_action"
+                ]
+                self.assertIn(expected[0], actions)
+                task = build_summary_agent_task(result)
+                if task is not None:
+                    self.assertNotIn("cash_action", task["unresolved_slots"])
+
     def test_one_action_with_two_objects_stays_ambiguous(self):
         result = analyze_summary("支付货款及设备款", self.rules)
         self.assertEqual({"CFO-04", "CFI-06"}, set(result.candidate_item_ids))
@@ -226,6 +243,16 @@ class SummarySemanticsTests(unittest.TestCase):
                 self.assertEqual("rule_complete", result.status)
                 self.assertEqual(("CFO-07",), result.candidate_item_ids)
                 self.assertLess(result.quality.value, 45)
+
+    def test_property_fee_uses_cash_action_to_distinguish_receipt_from_payment(self):
+        receipt = analyze_summary(
+            "收3-6月物业费，四川东方农博酒店有限责任公司",
+            self.rules,
+        )
+        payment = analyze_summary("支付物业费", self.rules)
+
+        self.assertEqual(("CFO-01",), receipt.candidate_item_ids)
+        self.assertEqual(("CFO-07",), payment.candidate_item_ids)
 
     def test_employee_welfare_is_fixed_but_unclassified_rent_uses_the_agent(self):
         welfare = analyze_summary("支付员工福利", self.rules)
@@ -472,6 +499,20 @@ class SummarySemanticsTests(unittest.TestCase):
 
     def test_batch_accepts_source_insufficient_without_fixed_rule_spans(self):
         unresolved = analyze_summary("地下电动铲运机评估费", self.rules)
+        insufficient = merge_summary_agent_slots(
+            unresolved,
+            {"outcome": "source_insufficient", "spans": []},
+            self.rules,
+        )
+
+        validate_summary_batch((insufficient,), (insufficient.summary,))
+
+    def test_batch_accepts_source_insufficient_with_only_unresolved_clause_binding(self):
+        unresolved = analyze_summary("收预授权测试款，富友支付", self.rules)
+
+        self.assertEqual(("clause_binding",), unresolved.unresolved_slots)
+        self.assertEqual((), unresolved.unexplained_spans)
+
         insufficient = merge_summary_agent_slots(
             unresolved,
             {"outcome": "source_insufficient", "spans": []},

@@ -4,17 +4,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
+from cashflow_direct.rule_registry import default_rule_registry
 
 
 ALLOWED_EXCLUSION_TYPES = frozenset(
-    {
-        "internal_transfer",
-        "non_cash",
-        "zero_amount",
-        "cash_scope_excluded",
-        "confirmed_duplicate",
-        "confirmed_adjustment",
-    }
+    default_rule_registry().special_policy["allowed_exclusion_types"]
 )
 
 

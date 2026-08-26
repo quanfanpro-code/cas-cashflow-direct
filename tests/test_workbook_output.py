@@ -36,7 +36,7 @@ EXPECTED_SHEETS = [
     "现金流量表正表",
     "正表核对报告",
     "重要待复核事项",
-    "低金额批量处理",
+    "低金额系统兜底明细",
     "疑似重复事项",
     "AI复核记录",
     "原表与系统决定差异",
@@ -99,8 +99,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 headers = [cell.value for cell in review[1]]
                 manual_column = headers.index("人工确认项目") + 1
                 system_column = headers.index("系统项目(技术)") + 1
-                status_column = headers.index("人工处理状态") + 1
-                options_column = headers.index("人工可选标准项目") + 1
+                status_column = REVIEW_HEADERS.index("人工处理状态") + 1
                 base_choice = review.cell(2, manual_column)
                 vat_choice = review.cell(3, manual_column)
                 vat_status = review.cell(3, status_column)
@@ -118,10 +117,8 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertIn(base_choice.coordinate, validated_cells)
                 self.assertNotIn(vat_choice.coordinate, validated_cells)
                 self.assertTrue(vat_choice.protection.locked)
-                self.assertEqual(
-                    "随基础项目自动确定（无需重复选择）",
-                    review.cell(3, options_column).value,
-                )
+                self.assertNotIn("人工可选标准项目", headers)
+                self.assertNotIn("人工处理状态", headers)
             finally:
                 workbook.close()
             validation = validate_output_workbook(path, model)
@@ -188,10 +185,11 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertEqual("2026-01-01", review.cell(2, review_headers.index("日期") + 1).value)
                 self.assertNotIn("已决定项目", review_headers)
                 status_formula = review.cell(
-                    2, review_headers.index("人工处理状态") + 1
+                    2, REVIEW_HEADERS.index("人工处理状态") + 1
                 ).value
                 self.assertIn("人工确认项目", review_headers)
-                for optional in ("人工依据", "处理人", "处理时间", "明确排除原因"):
+                self.assertNotIn("明确排除原因", review_headers)
+                for optional in ("人工依据", "处理人", "处理时间"):
                     self.assertNotIn(
                         f"{get_column_letter(review_headers.index(optional) + 1)}2",
                         status_formula,
@@ -218,21 +216,22 @@ class WorkbookOutputTests(unittest.TestCase):
                     "原始完整科目路径", "中间层级", "末级明细", "映射状态",
                     "一级科目映射候选", "一级科目映射依据", "现金账户范围状态",
                     "原现流项目", "组成明细", "AI复核过程", "当前决定形成过程",
-                    "已决定项目",
+                    "已决定项目", "人工可选标准项目", "人工处理状态",
+                    "行类型", "批次最不利影响金额", "批次现金变化金额",
+                    "批次编号(技术)",
                 ):
                     self.assertNotIn(removed, headers)
                 for visible in (
                     "日期", "凭证号", "本行摘要", "本行完整对方科目路径",
                     "标准一级科目", "现金账户路径", "原项目标准化结果",
                     "系统候选项目", "判断理由", "单笔金额", "异常",
-                    "人工可选标准项目", "人工确认项目", "人工处理状态",
+                    "同一业务序号", "人工确认项目",
                 ):
                     self.assertIn(visible, headers)
                 for hidden in (
                     "摘要来源质量", "完整路径来源质量", "两个来源是否独立",
                     "证据质量说明", "证据得分", "单笔重要性层级",
-                    "强制检查", "唯一动作", "批次最不利影响金额",
-                    "批次现金变化金额", "明确排除原因", "人工依据", "外部资料位置",
+                    "强制检查", "唯一动作", "人工依据", "外部资料位置",
                     "处理人", "处理时间",
                 ):
                     index = headers.index(hidden) + 1
@@ -316,12 +315,11 @@ class WorkbookOutputTests(unittest.TestCase):
                     2, headers.index("最终决定项目") + 1
                 ).value
                 self.assertIn("重要待复核事项", formula)
-                self.assertIn("INDEX", formula)
-                self.assertIn("RC-1", formula)
+                self.assertIn("$AD2", formula)
                 review = workbook["重要待复核事项"]
                 review_headers = [cell.value for cell in review[1]]
                 self.assertEqual(
-                    "、RC-1、",
+                    "RC-1",
                     review.cell(
                         2, review_headers.index("业务组成编号(技术)") + 1
                     ).value,
@@ -570,9 +568,8 @@ class WorkbookOutputTests(unittest.TestCase):
                     "原项目标准化结果", "系统候选项目", "判断理由",
                     "证据质量说明", "证据得分", "单笔金额",
                     "单笔重要性层级", "强制检查", "异常",
-                    "人工可选标准项目", "人工确认项目", "明确排除原因",
+                    "同一业务序号", "人工确认项目",
                     "人工依据", "外部资料位置", "处理人", "处理时间",
-                    "人工处理状态",
                 )
                 for header in required:
                     self.assertIn(header, headers)
@@ -587,13 +584,8 @@ class WorkbookOutputTests(unittest.TestCase):
                     100.0,
                     sheet.cell(2, headers.index("贷方") + 1).value,
                 )
-                options = sheet.cell(
-                    2, headers.index("人工可选标准项目") + 1
-                ).value
-                self.assertNotIn(USE_SYSTEM_RECOMMENDATION, options)
-                self.assertIn("支付其他与经营活动有关的现金", options)
-                self.assertIn("支付其他与投资活动有关的现金", options)
-                self.assertNotIn("明确排除", options)
+                self.assertNotIn("人工可选标准项目", headers)
+                self.assertNotIn("人工处理状态", headers)
                 money_format = sheet.cell(
                     2, headers.index("单笔金额") + 1
                 ).number_format
@@ -620,14 +612,10 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 sheet = workbook["重要待复核事项"]
                 headers = [cell.value for cell in sheet[1]]
-                options_column = headers.index("人工可选标准项目") + 1
                 manual_column = headers.index("人工确认项目") + 1
+                self.assertNotIn("人工可选标准项目", headers)
                 validations = tuple(sheet.data_validations.dataValidation)
                 for row in (2, 3):
-                    self.assertNotIn(
-                        USE_SYSTEM_RECOMMENDATION,
-                        str(sheet.cell(row, options_column).value),
-                    )
                     coordinate = sheet.cell(row, manual_column).coordinate
                     validation = next(
                         item
@@ -678,7 +666,7 @@ class WorkbookOutputTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_review_sheet_keeps_component_total_numeric_without_repeating_allocation_detail(self) -> None:
+    def test_review_sheet_keeps_each_real_allocation_without_synthetic_total_row(self) -> None:
         trace_rows = (
             {
                 "业务组成编号(技术)": "RC-1",
@@ -699,9 +687,17 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 sheet = workbook["重要待复核事项"]
                 headers = [cell.value for cell in sheet[1]]
+                allocated_column = headers.index("本行分配现金变化") + 1
+                business_column = headers.index("同一业务序号") + 1
+                real_rows = [
+                    row
+                    for row in range(2, sheet.max_row + 1)
+                    if sheet.cell(row, business_column).value
+                ]
+                self.assertEqual(2, len(real_rows))
                 self.assertEqual(
-                    -100.0,
-                    sheet.cell(2, headers.index("本行分配现金变化") + 1).value,
+                    [-60.0, -40.0],
+                    [sheet.cell(row, allocated_column).value for row in real_rows],
                 )
                 self.assertNotIn("组成明细", headers)
             finally:
@@ -818,7 +814,7 @@ class WorkbookOutputTests(unittest.TestCase):
             base = workbook_model(review_batches=2, duplicate_groups=2)
             model = replace(
                 base,
-                trace_rows=(
+                trace_rows=(*base.trace_rows,
                     {
                         "业务组成编号(技术)": "DONE-1",
                         "本行分配现金变化": 100.0,
@@ -892,6 +888,18 @@ class WorkbookOutputTests(unittest.TestCase):
             base,
             review_batches=(pending_review,),
             duplicate_groups=(pending_group,),
+            trace_rows=(*base.trace_rows,
+                {
+                    "业务组成编号(技术)": pending_group.component_ids[0],
+                    "本行摘要": "待决定重复事项",
+                    "本行分配现金变化": 200.0,
+                },
+                {
+                    "业务组成编号(技术)": pending_group.component_ids[1],
+                    "本行摘要": "待决定重复事项",
+                    "本行分配现金变化": 200.0,
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -926,7 +934,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertFalse(any("无效选择" in formula for formula in review_formulas))
                 headers = [cell.value for cell in workbook["重要待复核事项"][1]]
                 status_formula = workbook["重要待复核事项"].cell(
-                    2, headers.index("人工处理状态") + 1
+                    2, REVIEW_HEADERS.index("人工处理状态") + 1
                 ).value
                 self.assertIn(get_column_letter(headers.index("人工确认项目") + 1), status_formula)
             finally:
@@ -991,21 +999,23 @@ class WorkbookOutputTests(unittest.TestCase):
                 review = workbook["重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 manual_column = headers.index("人工确认项目") + 1
-                option_column = headers.index("人工可选标准项目") + 1
                 amount_column = headers.index("单笔金额") + 1
                 credit_column = headers.index("贷方") + 1
                 allocated_column = headers.index("本行分配现金变化") + 1
-                status_column = headers.index("人工处理状态") + 1
+                status_column = REVIEW_HEADERS.index("人工处理状态") + 1
                 adjustment_column = headers.index("系统项目调整(技术)") + 1
                 helper_column = len(REVIEW_HEADERS) + 2
                 helper_letter = get_column_letter(helper_column)
                 manual_letter = get_column_letter(manual_column)
-                leaf_names = tuple(
-                    item.name for item in rules.statement_items if item.is_leaf)
+                outflow_names = tuple(
+                    item.name
+                    for item in rules.statement_items
+                    if item.is_leaf and item.normal_direction == "outflow"
+                )
                 expected_options = (
                     USE_SYSTEM_RECOMMENDATION,
                     "支付的各项税费",
-                    *(name for name in leaf_names if name != "支付的各项税费"),
+                    *(name for name in outflow_names if name != "支付的各项税费"),
                 )
                 written = tuple(
                     review.cell(row=row, column=helper_column).value
@@ -1015,9 +1025,8 @@ class WorkbookOutputTests(unittest.TestCase):
                     expected_options,
                     written,
                 )
-                visible_options = review.cell(2, option_column).value
-                self.assertNotIn(USE_SYSTEM_RECOMMENDATION, visible_options)
-                self.assertIn("支付的各项税费", visible_options)
+                self.assertNotIn("人工可选标准项目", headers)
+                self.assertNotIn("人工处理状态", headers)
                 self.assertEqual(1_000.0, review.cell(2, amount_column).value)
                 self.assertEqual("n", review.cell(2, amount_column).data_type)
                 self.assertEqual(
@@ -1052,6 +1061,68 @@ class WorkbookOutputTests(unittest.TestCase):
             self.assertFalse(check.valid)
             self.assertTrue(any("区域" in error for error in check.errors))
 
+    def test_mandatory_dropdown_validation_uses_expanded_detail_row_positions(self) -> None:
+        first = ReviewBatch(
+            "REV-FIRST",
+            ("C-FIRST",),
+            "CFO-07",
+            ("CFO-04",),
+            30_000,
+            "第一项业务含三行真实明细",
+            baseline_statement_amount_cent=30_000,
+            cash_delta_cent=-30_000,
+        )
+        mandatory = ReviewBatch(
+            "REV-MANDATORY-AFTER-DETAILS",
+            ("C-MANDATORY",),
+            "CFO-06",
+            ("CFO-07",),
+            100_000,
+            "达到财务报表整体重要性，强制人工复核",
+            baseline_statement_amount_cent=100_000,
+            cash_delta_cent=-100_000,
+            mandatory=True,
+            baseline_item_code="CFO-06",
+        )
+        trace_rows = (
+            {
+                "业务组成编号(技术)": "C-FIRST",
+                "贷方": 100.0,
+                "本行分配现金变化": -100.0,
+                "单笔金额": 100.0,
+            },
+            {
+                "业务组成编号(技术)": "C-FIRST",
+                "贷方": 200.0,
+                "本行分配现金变化": -200.0,
+                "单笔金额": 200.0,
+            },
+            {
+                "业务组成编号(技术)": "C-FIRST",
+                "贷方": 300.0,
+                "本行分配现金变化": -300.0,
+                "单笔金额": 300.0,
+            },
+            {
+                "业务组成编号(技术)": "C-MANDATORY",
+                "贷方": 1_000.0,
+                "本行分配现金变化": -1_000.0,
+                "单笔金额": 1_000.0,
+            },
+        )
+        model = replace(
+            workbook_model(0, 0),
+            review_batches=(first, mandatory),
+            trace_rows=trace_rows,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "展开明细后的强制复核.xlsx"
+            build_output_workbook(model, path)
+            check = validate_output_workbook(path, model)
+
+        self.assertTrue(check.valid, check.errors)
+
     def test_manual_batch_without_system_choice_keeps_control_option_but_blocks_completion(self) -> None:
         base = workbook_model(1, 0)
         pending = replace(
@@ -1067,16 +1138,13 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 review = workbook["重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
-                option_column = headers.index("人工可选标准项目") + 1
-                status_column = headers.index("人工处理状态") + 1
+                status_column = REVIEW_HEADERS.index("人工处理状态") + 1
                 validation = review.data_validations.dataValidation[0]
                 helper_range = str(validation.formula1).split("!")[-1].replace("'", "")
                 first_cell = helper_range.split(":", 1)[0].replace("$", "")
                 self.assertEqual(USE_SYSTEM_RECOMMENDATION, review[first_cell].value)
-                self.assertNotIn(
-                    USE_SYSTEM_RECOMMENDATION,
-                    str(review.cell(2, option_column).value),
-                )
+                self.assertNotIn("人工可选标准项目", headers)
+                self.assertNotIn("人工处理状态", headers)
                 self.assertIn("系统没有首选项目，请改选", review.cell(2, status_column).value)
             finally:
                 workbook.close()
@@ -1176,8 +1244,10 @@ class WorkbookOutputTests(unittest.TestCase):
 
 
     def test_human_sheets_show_names_and_hide_machine_columns(self) -> None:
+        base = workbook_model(1, 1)
         model = replace(
-            workbook_model(1, 1),
+            base,
+            review_batches=(replace(base.review_batches[0], component_ids=("C-1",)),),
             ai_records=(
                 {
                     "阶段": "首次复核",
@@ -1275,8 +1345,8 @@ class WorkbookOutputTests(unittest.TestCase):
                             review, review_headers.index(visible_header) + 1
                         )
                     )
+                self.assertNotIn("批次编号(技术)", review_headers)
                 for technical_header in (
-                    "批次编号(技术)",
                     "系统项目(技术)",
                     "业务组成编号(技术)",
                 ):
@@ -1292,7 +1362,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     _column_is_hidden(trace, headers.index("证据得分") + 1)
                 )
                 status_formula = review.cell(
-                    2, review_headers.index("人工处理状态") + 1
+                    2, REVIEW_HEADERS.index("人工处理状态") + 1
                 ).value
                 self.assertNotIn("OR(FALSE)", status_formula)
 

@@ -9,18 +9,15 @@ from cashflow_direct.models import (
     ClassificationDecision,
     MaterialityAmounts,
 )
+from cashflow_direct.rule_registry import default_rule_registry
 
 
-_ELIGIBLE_ORIGINAL_STATES = frozenset({"blank", "unstandardizable"})
-_KNOWN_DIRECTION_STATUSES = frozenset({"compatible", "incompatible"})
-_FINAL_UNRESOLVED_ACTIONS = frozenset(
-    {
-        "low_amount_human_batch",
-        "human_batch",
-        "human_decision",
-        "isolate_invalid_input",
-    }
-)
+_FALLBACK_POLICY = default_rule_registry().evidence_policy["fallback"]
+_ELIGIBLE_ORIGINAL_STATES = frozenset(_FALLBACK_POLICY["eligible_original_states"])
+_KNOWN_DIRECTION_STATUSES = frozenset(_FALLBACK_POLICY["known_direction_statuses"])
+_FINAL_UNRESOLVED_ACTIONS = frozenset(_FALLBACK_POLICY["eligible_unresolved_actions"])
+_SOURCE_PRIORITY = tuple(_FALLBACK_POLICY["source_priority_on_tie"])
+_DIRECTION_DEFAULT_ITEMS = dict(_FALLBACK_POLICY["direction_default_items"])
 
 
 def _first_in_statement_order(
@@ -54,10 +51,13 @@ def apply_blank_original_fallback(
         return decision
 
     actual_direction = "inflow" if component.cash_delta_cent > 0 else "outflow"
-    winning_source = (
-        "account_path"
-        if decision.account_path_quality >= decision.summary_quality
-        else "summary"
+    source_scores = {
+        "account_path": decision.account_path_quality,
+        "summary": decision.summary_quality,
+    }
+    winning_source = max(
+        _SOURCE_PRIORITY,
+        key=lambda source: (source_scores[source], -_SOURCE_PRIORITY.index(source)),
     )
     source_candidates = (
         decision.account_path_candidate_item_ids
@@ -92,7 +92,7 @@ def apply_blank_original_fallback(
 
     fallback_source = winning_source
     if not selected_item_id:
-        selected_item_id = "CFO-03" if actual_direction == "inflow" else "CFO-07"
+        selected_item_id = _DIRECTION_DEFAULT_ITEMS[actual_direction]
         fallback_source = "cash_direction"
         fallback_step = "direction_other_operating"
 

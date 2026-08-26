@@ -246,6 +246,60 @@ def test_cash_scope_is_created_only_after_all_level1_mappings_are_confirmed() ->
         }
 
 
+def test_counterpart_placeholder_is_traced_as_missing_instead_of_mapped() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "含对方科目占位提示的序时账.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "序时账"
+        sheet.append(
+            ["日期", "凭证号", "摘要", "科目名称", "借方发生额", "贷方发生额", "对方科目"]
+        )
+        sheet.append(
+            [
+                "2026-01-01",
+                "记-1",
+                "收到销售款",
+                "银行存款_一般户",
+                100,
+                None,
+                "主营业务收入",
+            ]
+        )
+        sheet.append(
+            [
+                "2026-01-02",
+                "记-2",
+                "一分钱异常",
+                "营业外支出_其他",
+                0.01,
+                None,
+                "未找到匹配",
+            ]
+        )
+        workbook.save(source)
+
+        preflight = run_preflight(
+            (source,), (250_000, 125_000, 25_000), root / "输出"
+        )
+        state_path = preflight.run_dir / "计算留痕数据" / "运行状态.json"
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+
+        assert preflight.status == "waiting_cash_scope"
+        assert "未找到匹配" not in {
+            item["original_level1"] for item in state["account_mapping_records"]
+        }
+        placeholder_entry = next(
+            item for item in state["entries"] if item["summary"] == "一分钱异常"
+        )
+        assert placeholder_entry["counterpart_name"] == ""
+        assert any(
+            issue["kind"] == "警告" and "未找到匹配" in issue["message"]
+            for issue in state["normalization_issues"]
+        )
+
+
 def test_cash_scope_keeps_subaccounts_distinct_after_level1_mapping_is_inherited() -> None:
     baseline = load_standard_accounts(PROJECT_ROOT)
     records = resolve_account_mappings(

@@ -30,8 +30,18 @@ def unresolved(component_id: str = "C1", **changes: object) -> UnresolvedDecisio
     return replace(current, **changes)
 
 
-def test_partition_separates_important_and_low_amount_batches() -> None:
+def test_low_amount_human_batch_is_rejected_because_system_fallback_must_run_first() -> None:
     low = unresolved("LOW")
+
+    with pytest.raises(ValueError, match="低于实际执行重要性的事项必须先完成系统兜底"):
+        partition_review_batches(
+            (low,),
+            performance_cent=100_000,
+            all_leaf_item_ids=("CFO-04", "CFO-07"),
+        )
+
+
+def test_partition_keeps_only_important_or_explicit_human_decisions() -> None:
     performance = unresolved(
         "PERF",
         cash_delta_cent=-100_000,
@@ -45,60 +55,10 @@ def test_partition_separates_important_and_low_amount_batches() -> None:
     )
 
     important, low_batches = partition_review_batches(
-        (low, performance, explicit),
+        (performance, explicit),
         performance_cent=100_000,
         all_leaf_item_ids=("CFO-04", "CFO-07"),
     )
 
     assert [batch.component_ids for batch in important] == [("PERF",), ("EXPLICIT",)]
-    assert [batch.component_ids for batch in low_batches] == [("LOW",)]
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("decision_action", "human_decision"),
-        ("cash_direction", "inflow"),
-        ("system_candidate_signature", "CFO-03"),
-        ("account_path_signature", "管理费用_办公费"),
-        ("summary_business_signature", "退押金"),
-        ("evidence_status", "路径25|摘要10"),
-        ("forced_check_reason", "业务组冲突"),
-    ),
-)
-def test_any_of_seven_batch_keys_changed_prevents_merging(
-    field: str,
-    value: str,
-) -> None:
-    first = unresolved("C1")
-    second = replace(unresolved("C2"), **{field: value})
-
-    important, low_batches = partition_review_batches(
-        (first, second),
-        performance_cent=100_000,
-        all_leaf_item_ids=("CFO-04", "CFO-07"),
-    )
-
-    if field == "decision_action":
-        assert len(important) == 1
-        assert len(low_batches) == 1
-    else:
-        assert not important
-        assert len(low_batches) == 2
-
-
-def test_same_seven_keys_merge_and_sum_cash_amount() -> None:
-    first = unresolved("C1", cash_delta_cent=-10_000, source_locations=("A2",))
-    second = unresolved("C2", cash_delta_cent=-20_000, source_locations=("A3",))
-
-    important, low_batches = partition_review_batches(
-        (first, second),
-        performance_cent=100_000,
-        all_leaf_item_ids=("CFO-04", "CFO-07"),
-    )
-
-    assert not important
-    assert len(low_batches) == 1
-    assert low_batches[0].component_ids == ("C1", "C2")
-    assert low_batches[0].cash_delta_cent == -30_000
-    assert low_batches[0].source_locations == ("A2", "A3")
+    assert low_batches == ()

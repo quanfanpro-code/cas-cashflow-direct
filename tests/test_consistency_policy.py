@@ -88,11 +88,11 @@ def test_true_same_source_inconsistency_uses_each_items_own_amount_level() -> No
     assert all(item.business_conflict for item in resolution.decisions)
     assert {
         item.decision_action for item in resolution.decisions
-    } == {"low_amount_human_batch"}
+    } == {"human_decision"}
     assert all(not item.resolved for item in resolution.decisions)
 
 
-def test_m0_true_inconsistency_uses_low_amount_human_batch() -> None:
+def test_m0_true_inconsistency_uses_human_decision_before_system_fallback() -> None:
     components = (
         _component("C-1", "其他应付款_同一对象", 100),
         _component("C-2", "其他应付款_同一对象", 100),
@@ -109,7 +109,7 @@ def test_m0_true_inconsistency_uses_low_amount_human_batch() -> None:
 
     assert {
         item.decision_action for item in resolution.decisions
-    } == {"low_amount_human_batch"}
+    } == {"human_decision"}
 
 
 def test_true_same_source_conflict_keeps_each_valid_original_below_overall() -> None:

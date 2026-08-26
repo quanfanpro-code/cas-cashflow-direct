@@ -8,23 +8,25 @@ from dataclasses import dataclass, replace
 
 from cashflow_direct.models import CashflowComponent, NormalizedEntry
 from cashflow_direct.money import stable_id
+from cashflow_direct.rule_registry import default_rule_registry
 
 
-CASH_TERMS = ("库存现金", "银行存款", "其他货币资金", "现金等价物")
-CASH_EQUIVALENT_TERMS = (
-    "定期存款",
-    "短期债券",
-    "三个月内到期",
-    "交易性金融资产",
-    "债权投资",
-    "理财",
-)
-RESTRICTED_TERMS = ("受限", "冻结", "保证金", "质押", "监管")
-PERIOD_CHANGE_TERMS = ("质押", "解除质押", "冻结", "解除冻结")
-INFLOW_ITEM_TERMS = ("收到", "收回", "取得借款", "吸收投资", "销售商品")
-OUTFLOW_ITEM_TERMS = ("支付", "购买", "购建", "偿还", "分配股利")
+_SPECIAL_POLICY = default_rule_registry().special_policy
+_CASH_SCOPE_POLICY = _SPECIAL_POLICY["cash_scope"]
+_COMPONENT_POLICY = _SPECIAL_POLICY["component_structure"]
+CASH_TERMS = tuple(_CASH_SCOPE_POLICY["cash_terms"])
+CASH_EQUIVALENT_TERMS = tuple(_CASH_SCOPE_POLICY["cash_equivalent_terms"])
+RESTRICTED_TERMS = tuple(_CASH_SCOPE_POLICY["restricted_terms"])
+PERIOD_CHANGE_TERMS = tuple(_CASH_SCOPE_POLICY["period_change_terms"])
+INFLOW_ITEM_TERMS = tuple(_COMPONENT_POLICY["inflow_item_terms"])
+OUTFLOW_ITEM_TERMS = tuple(_COMPONENT_POLICY["outflow_item_terms"])
 # 非现金事项判定词条（保守：拿不准的不标 non_cash，宁可进 AI 复核）
-NONCASH_SUMMARY_TERMS = ("计提",)
+NONCASH_SUMMARY_TERMS = tuple(_COMPONENT_POLICY["noncash_summary_terms"])
+PRINCIPAL_ACCOUNT_TERMS = tuple(_COMPONENT_POLICY["principal_account_terms"])
+INTEREST_ACCOUNT_TERMS = tuple(_COMPONENT_POLICY["interest_account_terms"])
+SINGLE_CASH_SAME_SUMMARY_EXACT_MATCH = bool(
+    _COMPONENT_POLICY["single_cash_same_summary_exact_match"]
+)
 MAX_AMOUNT_COMBINATION_ROWS = 64
 MAX_AMOUNT_COMBINATION_STATES = 50_000
 
@@ -740,6 +742,74 @@ def _voucher_components(
                 evidence_strength="weak",
             )
         return components, excluded
+
+    has_principal_and_interest = (
+        any(
+            any(term in entry.account_name for term in PRINCIPAL_ACCOUNT_TERMS)
+            for entry in noncash
+        )
+        and any(
+            any(term in entry.account_name for term in INTEREST_ACCOUNT_TERMS)
+            for entry in noncash
+        )
+    )
+    if (
+        SINGLE_CASH_SAME_SUMMARY_EXACT_MATCH
+        and len(cash_entries) == 1
+        and cash_entries[0].summary
+        and not labeled
+        and not has_principal_and_interest
+    ):
+        cash_entry = cash_entries[0]
+        same_summary_rows = tuple(
+            entry for entry in noncash if entry.summary == cash_entry.summary
+        )
+        same_summary_combinations = _minimum_amount_row_combinations(
+            same_summary_rows,
+            cash_delta,
+        )
+        selected_combination: tuple[NormalizedEntry, ...] = ()
+        if selected_entry_ids:
+            selected = tuple(
+                entry for entry in same_summary_rows if entry.entry_id in selected_entry_ids
+            )
+            if tuple(entry.entry_id for entry in selected) in {
+                tuple(entry.entry_id for entry in combination)
+                for combination in same_summary_combinations
+            }:
+                selected_combination = selected
+        elif len(same_summary_combinations) == 1 and len(same_summary_combinations[0]) == 1:
+            selected_combination = same_summary_combinations[0]
+        if selected_combination:
+            remaining, excluded = _match_internal_transfers(
+                voucher_key, cash_entries, (cash_delta,)
+            )
+            return [
+                _component(
+                    voucher_key,
+                    1,
+                    cash_delta,
+                    cash_entry.summary,
+                    tuple(
+                        dict.fromkeys(
+                            entry.account_name
+                            for entry in selected_combination
+                            if entry.account_name
+                        )
+                    ),
+                    next(
+                        (
+                            entry.original_flow_item
+                            for entry in selected_combination
+                            if entry.original_flow_item
+                        ),
+                        "",
+                    ),
+                    (cash_entry.entry_id, *(entry.entry_id for entry in selected_combination)),
+                    base_anomalies,
+                    "strong",
+                )
+            ], excluded
 
     amount_combinations = _minimum_amount_row_combinations(labeled, cash_delta)
     if selected_entry_ids:

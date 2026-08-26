@@ -3,12 +3,17 @@
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 
+from cashflow_direct.rule_registry import default_rule_registry
+
+
+_RULE_REGISTRY = default_rule_registry()
+
 
 class EvidenceQuality(IntEnum):
-    INVALID = 0
-    WEAK = 10
-    MEDIUM = 25
-    STRONG = 45
+    INVALID = int(_RULE_REGISTRY.evidence_policy["evidence_qualities"]["invalid"])
+    WEAK = int(_RULE_REGISTRY.evidence_policy["evidence_qualities"]["weak"])
+    MEDIUM = int(_RULE_REGISTRY.evidence_policy["evidence_qualities"]["medium"])
+    STRONG = int(_RULE_REGISTRY.evidence_policy["evidence_qualities"]["strong"])
 
 
 class EvidenceSource(StrEnum):
@@ -45,8 +50,6 @@ class DecisionAction(StrEnum):
     DOUBLE_AI_REVIEW = "double_ai_review"
     AI_DOUBLE_FOLLOWUP_REVIEW = "ai_double_followup_review"
     AI_THIRD_REVIEW = "ai_third_review"
-    LOW_AMOUNT_HUMAN_BATCH = "low_amount_human_batch"
-    HUMAN_BATCH = "human_batch"
     HUMAN_DECISION = "human_decision"
     ISOLATE_INVALID_INPUT = "isolate_invalid_input"
     CONFIRM_CASH_SCOPE = "confirm_cash_scope"
@@ -106,95 +109,13 @@ class DecisionRoute:
     allowed_operations: frozenset[DecisionOperation]
     forced_check: str = ""
     review_policy: str = ""
+    rule_id: str = ""
 
 
 _GENERIC_FACT_PREFIXES = ("cash_direction:",)
-_ALLOWED_SCORES = frozenset({0, 10, 20, 25, 35, 45, 50, 55, 70, 90})
-AUTOMATIC_CHANGE_SCORE_OPTIONS = (45, 50, 55, 70, 90)
-DEFAULT_AUTOMATIC_CHANGE_SCORE = 70
-_LEVEL_INDEX = {
-    MaterialityLevel.M0: 0,
-    MaterialityLevel.M1: 1,
-    MaterialityLevel.M2: 2,
-    MaterialityLevel.M3: 3,
-}
-
-_AGREEMENT_ACTIONS = {
-    score: (
-        DecisionAction.AUTOMATIC_KEEP,
-        DecisionAction.AUTOMATIC_KEEP,
-        (
-            DecisionAction.AI_REVIEW
-            if score in {0, 10, 20, 25, 35, 45, 50}
-            else DecisionAction.AUTOMATIC_KEEP
-        ),
-        DecisionAction.HUMAN_DECISION,
-    )
-    for score in _ALLOWED_SCORES
-}
-
-_OTHER_ACTIONS = {
-    score: (
-        DecisionAction.AI_REVIEW,
-        DecisionAction.DOUBLE_AI_REVIEW,
-        DecisionAction.DOUBLE_AI_REVIEW,
-        DecisionAction.HUMAN_DECISION,
-    )
-    for score in {0, 10, 20, 25, 35, 45, 50}
-}
-_OTHER_ACTIONS.update(
-    {
-        55: (
-            DecisionAction.AI_REVIEW,
-            DecisionAction.AI_REVIEW,
-            DecisionAction.DOUBLE_AI_REVIEW,
-            DecisionAction.HUMAN_DECISION,
-        ),
-        70: (
-            DecisionAction.AUTOMATIC_FILL,
-            DecisionAction.AI_REVIEW,
-            DecisionAction.AI_REVIEW,
-            DecisionAction.HUMAN_DECISION,
-        ),
-        90: (
-            DecisionAction.AUTOMATIC_FILL,
-            DecisionAction.AI_REVIEW,
-            DecisionAction.AI_REVIEW,
-            DecisionAction.AI_REVIEW,
-        ),
-    }
-)
-
-_VALID_ORIGINAL_CHANGE_ACTIONS = {
-    score: (
-        DecisionAction.AUTOMATIC_KEEP,
-        DecisionAction.AUTOMATIC_KEEP,
-        (
-            DecisionAction.AI_REVIEW
-            if score in {0, 10, 20, 25, 35, 45, 50}
-            else DecisionAction.AUTOMATIC_KEEP
-        ),
-        DecisionAction.HUMAN_DECISION,
-    )
-    for score in {0, 10, 20, 25, 35, 45, 50, 55}
-}
-_VALID_ORIGINAL_CHANGE_ACTIONS[55] = (
-    DecisionAction.AUTOMATIC_KEEP,
-    DecisionAction.AUTOMATIC_KEEP,
-    DecisionAction.AI_REVIEW,
-    DecisionAction.HUMAN_DECISION,
-)
-_VALID_ORIGINAL_CHANGE_ACTIONS.update(
-    {
-        score: (
-            DecisionAction.AUTOMATIC_CHANGE,
-            DecisionAction.AI_REVIEW,
-            DecisionAction.DOUBLE_AI_REVIEW,
-            DecisionAction.HUMAN_DECISION,
-        )
-        for score in {70, 90}
-    }
-)
+_ALLOWED_SCORES = frozenset(_RULE_REGISTRY.allowed_scores)
+AUTOMATIC_CHANGE_SCORE_OPTIONS = _RULE_REGISTRY.automatic_change_score_options
+DEFAULT_AUTOMATIC_CHANGE_SCORE = _RULE_REGISTRY.default_automatic_change_score
 
 _VALID_ORIGINAL_STATES = frozenset(
     {
@@ -203,6 +124,36 @@ _VALID_ORIGINAL_STATES = frozenset(
         OriginalItemState.PENDING_COMPARISON,
     }
 )
+
+
+def _original_group(original_state: OriginalItemState) -> str:
+    if original_state is OriginalItemState.AGREES:
+        return "agrees"
+    if original_state in _VALID_ORIGINAL_STATES:
+        return "valid_original"
+    return "blank"
+
+
+def _route_from_cell(
+    cell: dict[str, str],
+    *,
+    forced_check: str = "",
+    allowed_operations: frozenset[DecisionOperation] = frozenset(),
+) -> DecisionRoute:
+    return DecisionRoute(
+        DecisionAction(cell["action"]),
+        allowed_operations,
+        forced_check=forced_check,
+        review_policy=cell["review_policy"],
+        rule_id=cell["rule_id"],
+    )
+
+
+def unresolved_after_ai_review_action() -> DecisionAction:
+    """人工智能复核仍无法形成唯一结果时的唯一出口。"""
+    return DecisionAction(
+        _RULE_REGISTRY.evidence_policy["ai_review_outcomes"]["unresolved_action"]
+    )
 
 
 def validate_automatic_change_threshold(value: int) -> int:
@@ -364,9 +315,9 @@ def _allowed_operations(
         account_path_quality,
     ):
         return frozenset(DecisionOperation)
-    if score in {45, 50, 55}:
+    if score in AUTOMATIC_CHANGE_SCORE_OPTIONS and score < DEFAULT_AUTOMATIC_CHANGE_SCORE:
         return frozenset({DecisionOperation.KEEP})
-    if score in {70, 90}:
+    if score in AUTOMATIC_CHANGE_SCORE_OPTIONS:
         return frozenset(DecisionOperation)
     return frozenset()
 
@@ -387,13 +338,10 @@ def route_normal_decision(
         raise ValueError(f"不允许的证据分数：{score}")
 
     agrees = original_state is OriginalItemState.AGREES
-    if agrees:
-        table = _AGREEMENT_ACTIONS
-    elif original_state in _VALID_ORIGINAL_STATES:
-        table = _VALID_ORIGINAL_CHANGE_ACTIONS
-    else:
-        table = _OTHER_ACTIONS
-    action = table[score][_LEVEL_INDEX[materiality]]
+    cell = _RULE_REGISTRY.normal_action_cell(
+        _original_group(original_state), score, materiality.value
+    )
+    action = DecisionAction(cell["action"])
     if not agrees and original_state in _VALID_ORIGINAL_STATES:
         threshold_met = score_meets_change_threshold(
             score,
@@ -416,34 +364,16 @@ def route_normal_decision(
     if action is DecisionAction.AUTOMATIC_FILL and original_state is OriginalItemState.CONFLICTS:
         action = DecisionAction.AUTOMATIC_CHANGE
 
-    review_policy = ""
-    if original_state in _VALID_ORIGINAL_STATES:
-        if materiality is MaterialityLevel.M2 and score <= 50:
-            review_policy = "valid_original_retention"
-        elif action in {DecisionAction.AI_REVIEW, DecisionAction.DOUBLE_AI_REVIEW}:
-            review_policy = "valid_original_change"
-    elif score <= 50:
-        review_policy = (
-            "blank_low_single"
-            if materiality is MaterialityLevel.M0
-            else "blank_low_majority"
-        )
-    elif score == 55:
-        review_policy = (
-            "blank_55_double"
-            if materiality is MaterialityLevel.M2
-            else "blank_55_single"
-        )
-    elif score == 70 and action in {
-        DecisionAction.AI_REVIEW,
-        DecisionAction.DOUBLE_AI_REVIEW,
-    }:
-        review_policy = "blank_70_single"
-    elif score == 90 and action in {
-        DecisionAction.AI_REVIEW,
-        DecisionAction.DOUBLE_AI_REVIEW,
-    }:
-        review_policy = "blank_90_single"
+    review_policy = cell["review_policy"]
+    if not agrees and original_state in _VALID_ORIGINAL_STATES:
+        if materiality is MaterialityLevel.M0:
+            review_policy = ""
+        elif materiality is MaterialityLevel.M1:
+            review_policy = (
+                "valid_original_change"
+                if action is DecisionAction.AI_REVIEW
+                else ""
+            )
     allowed_operations = _allowed_operations(
         score,
         automatic_change_threshold,
@@ -460,6 +390,7 @@ def route_normal_decision(
         action,
         allowed_operations,
         review_policy=review_policy,
+        rule_id=cell["rule_id"],
     )
 
 
@@ -484,25 +415,29 @@ def route_decision(
     automatic_change_threshold = validate_automatic_change_threshold(
         automatic_change_threshold
     )
+    has_valid_original = original_state in _VALID_ORIGINAL_STATES
+    forced_original_group = "valid_original" if has_valid_original else "blank"
     if invalid_input:
-        return DecisionRoute(
-            DecisionAction.ISOLATE_INVALID_INPUT,
-            frozenset(),
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "invalid_input", forced_original_group, materiality.value
+            ),
             forced_check="invalid_input",
         )
     if not cash_scope_confirmed:
-        return DecisionRoute(
-            DecisionAction.CONFIRM_CASH_SCOPE,
-            frozenset(),
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "cash_scope", forced_original_group, materiality.value
+            ),
             forced_check="cash_scope",
         )
     if company_rule_conflict:
-        return DecisionRoute(
-            DecisionAction.HUMAN_DECISION,
-            frozenset(),
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "company_rule_conflict", forced_original_group, materiality.value
+            ),
             forced_check="company_rule_conflict",
         )
-    has_valid_original = original_state in _VALID_ORIGINAL_STATES
     missing_fact_kind = (
         "vat_base_missing"
         if vat_base_missing
@@ -511,85 +446,33 @@ def route_decision(
         else ""
     )
     if missing_fact_kind:
-        if has_valid_original and materiality is not MaterialityLevel.M3:
-            action = DecisionAction.AUTOMATIC_KEEP
-        elif not has_valid_original and materiality is MaterialityLevel.M0:
-            action = DecisionAction.LOW_AMOUNT_HUMAN_BATCH
-        else:
-            action = DecisionAction.HUMAN_DECISION
-        return DecisionRoute(action, frozenset(), forced_check=missing_fact_kind)
-    if individual_tax_fact_missing:
-        if materiality is MaterialityLevel.M3:
-            action = DecisionAction.HUMAN_DECISION
-        elif materiality is MaterialityLevel.M2:
-            action = DecisionAction.DOUBLE_AI_REVIEW
-        elif has_valid_original:
-            action = DecisionAction.AUTOMATIC_KEEP
-        elif materiality is MaterialityLevel.M0:
-            action = DecisionAction.LOW_AMOUNT_HUMAN_BATCH
-        else:
-            action = DecisionAction.HUMAN_BATCH
-        return DecisionRoute(
-            action,
-            frozenset(),
-            forced_check="individual_tax_service",
-            review_policy=(
-                "individual_tax_service"
-                if action is DecisionAction.DOUBLE_AI_REVIEW
-                else ""
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "missing_net_or_vat", forced_original_group, materiality.value
             ),
+            forced_check=missing_fact_kind,
         )
-    if source_conflict and has_valid_original:
-        if materiality is MaterialityLevel.M3:
-            action = DecisionAction.HUMAN_DECISION
-        elif materiality is MaterialityLevel.M2:
-            action = DecisionAction.AI_REVIEW
-        else:
-            action = DecisionAction.AUTOMATIC_KEEP
-        return DecisionRoute(
-            action,
-            frozenset(),
-            forced_check="source_conflict",
-            review_policy=(
-                "valid_original_retention"
-                if action is DecisionAction.AI_REVIEW
-                else ""
+    if individual_tax_fact_missing:
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "individual_tax_service", forced_original_group, materiality.value
             ),
+            forced_check="individual_tax_service",
         )
     if source_conflict:
-        action = (
-            DecisionAction.AI_REVIEW
-            if materiality is MaterialityLevel.M0
-            else DecisionAction.DOUBLE_AI_REVIEW
-            if materiality in {MaterialityLevel.M1, MaterialityLevel.M2}
-            else DecisionAction.HUMAN_DECISION
-        )
-        return DecisionRoute(
-            action,
-            frozenset(),
-            forced_check="source_conflict",
-            review_policy=(
-                "blank_low_single"
-                if materiality is MaterialityLevel.M0
-                else "blank_low_majority"
-                if materiality in {MaterialityLevel.M1, MaterialityLevel.M2}
-                else ""
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "source_conflict", forced_original_group, materiality.value
             ),
+            forced_check="source_conflict",
         )
-    if business_conflict and has_valid_original:
-        action = (
-            DecisionAction.HUMAN_DECISION
-            if materiality is MaterialityLevel.M3
-            else DecisionAction.AUTOMATIC_KEEP
-        )
-        return DecisionRoute(action, frozenset(), forced_check="business_conflict")
     if business_conflict:
-        action = (
-            DecisionAction.LOW_AMOUNT_HUMAN_BATCH
-            if materiality is MaterialityLevel.M0
-            else DecisionAction.HUMAN_DECISION
+        return _route_from_cell(
+            _RULE_REGISTRY.forced_route_cell(
+                "business_conflict", forced_original_group, materiality.value
+            ),
+            forced_check="business_conflict",
         )
-        return DecisionRoute(action, frozenset(), forced_check="business_conflict")
     if direction_status not in {"compatible", "incompatible"}:
         raise ValueError(f"不允许的现金方向状态：{direction_status}")
     if score is None:

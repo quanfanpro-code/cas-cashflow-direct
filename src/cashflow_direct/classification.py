@@ -29,6 +29,7 @@ from cashflow_direct.materiality import (
 )
 from cashflow_direct.models import CashflowComponent, ClassificationDecision
 from cashflow_direct.money import stable_id
+from cashflow_direct.rule_registry import default_rule_registry, load_rule_registry
 from cashflow_direct.summary_semantics import SummarySemanticResult
 from cashflow_direct.vat_companion import (
     apply_vat_companion_relations,
@@ -40,6 +41,10 @@ _SOURCE_CN = {
     SOURCE_SUMMARY: "摘要",
     SOURCE_ACCOUNT_PATH: "完整对方科目路径",
 }
+_AUTOMATIC_ACTIONS = frozenset(
+    DecisionAction(value)
+    for value in default_rule_registry().action_group("automatic")
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +80,7 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def load_rule_pack(root: Path) -> RulePack:
-    reference_root = Path(root) / "references"
-    item_payload = _read_json(reference_root / "一般企业正表项目.json")
+    item_payload = load_rule_registry(Path(root)).statement_policy
     items = tuple(
         StatementItem(
             item_id=item["item_id"],
@@ -518,11 +522,7 @@ def route_classification_decisions(
     assessment_by_id = {item.record_id: item for item in assessments}
     routed: list[ClassificationDecision] = []
     tasks = []
-    automatic_actions = {
-        DecisionAction.AUTOMATIC_KEEP,
-        DecisionAction.AUTOMATIC_FILL,
-        DecisionAction.AUTOMATIC_CHANGE,
-    }
+    automatic_actions = _AUTOMATIC_ACTIONS
     for component in components:
         decision = decision_by_id[component.component_id]
         if decision.excluded:
@@ -654,6 +654,7 @@ def route_classification_decisions(
                 "system_automatic" if is_automatic else decision.decision_source
             ),
             decision_action=route.action.value,
+            decision_rule_id=route.rule_id,
             ai_review_policy=route.review_policy,
             materiality_level=routing_level.value,
             single_materiality_level=assessment.single_level.value,

@@ -49,7 +49,10 @@ class ProjectContractTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8-sig")
             current_text = text.split("## 🗓️ 更新记录", 1)[0]
             self.assertIn("十三张", current_text, path.name)
-            self.assertIn("低金额批量处理", current_text, path.name)
+            self.assertIn("低金额系统兜底明细", current_text, path.name)
+            self.assertNotIn("低金额人工批量", current_text, path.name)
+            self.assertNotIn("固定包含十二张", current_text, path.name)
+            self.assertNotIn("工作簿恰有十二张", current_text, path.name)
             self.assertIn("原表与系统决定差异", text, path.name)
             self.assertNotIn("可靠同类组批量处理", current_text, path.name)
             self.assertNotIn("原表与自动判定差异", text, path.name)
@@ -62,6 +65,26 @@ class ProjectContractTests(unittest.TestCase):
             self.assertIn("修改原项目", text, path.name)
             self.assertIn("采用系统首选项目", text, path.name)
             self.assertIn("原项目有效且低于整体重要性", current_text, path.name)
+
+    def test_runtime_rule_files_are_loaded_through_the_registry(self) -> None:
+        architecture = ROOT / "docs" / "architecture" / "2026-08-26-统一规则中心.md"
+        self.assertTrue(architecture.is_file())
+        self.assertIn("唯一入口", architecture.read_text(encoding="utf-8-sig"))
+
+        direct_rule_names = (
+            "一般企业正表项目.json",
+            "字段语义词典.json",
+            "科目语义词典.json",
+            "摘要语义规则.json",
+            "标准一级科目并集去重表.md",
+        )
+        allowed = {"rule_registry.py", "versions.py"}
+        for path in (ROOT / "src" / "cashflow_direct").glob("*.py"):
+            if path.name in allowed:
+                continue
+            text = path.read_text(encoding="utf-8-sig")
+            for rule_name in direct_rule_names:
+                self.assertNotIn(rule_name, text, path.name)
 
 
 if __name__ == "__main__":

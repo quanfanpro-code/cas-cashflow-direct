@@ -34,3 +34,8 @@ docs/superpowers/*
 !docs/superpowers/plans/
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-08-23-cas-cashflow-direct全面复核问题修复实施计划.md
+
+# 统一规则中心架构说明（通用规则，不含客户资料）
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/2026-08-26-统一规则中心.md

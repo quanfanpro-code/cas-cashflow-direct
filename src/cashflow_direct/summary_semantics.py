@@ -1,13 +1,13 @@
 ﻿from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from cashflow_direct.decision_policy import EvidenceQuality
+from cashflow_direct.rule_registry import load_rule_registry
 
 
 _LEXICON_SECTIONS = (
@@ -67,24 +67,17 @@ class _Fact:
         return SummarySpan(self.slot, self.text, self.start, self.end, self.source)
 
 
-def _read_json(path: Path) -> dict[str, object]:
-    with path.open("r", encoding="utf-8-sig") as source:
-        payload = json.load(source)
-    if not isinstance(payload, dict):
-        raise ValueError(f"规则文件顶层必须是对象：{path}")
-    return payload
-
-
 def load_summary_rules(project_root: Path) -> dict[str, object]:
     root = Path(project_root)
-    rules = _read_json(root / "references" / "摘要语义规则.json")
+    registry = load_rule_registry(root)
+    rules = registry.summary_semantics
     lexicons = rules.get("lexicons")
     if not isinstance(lexicons, dict) or tuple(lexicons) != _LEXICON_SECTIONS:
         raise ValueError("摘要语义规则必须按约定包含七个词典分区")
     if not rules.get("schema_version") or not isinstance(rules.get("candidate_rules"), list):
         raise ValueError("摘要语义规则缺少版本或候选组合规则")
 
-    statement = _read_json(root / "references" / "一般企业正表项目.json")
+    statement = registry.statement_policy
     leaf_ids = {
         item["item_id"]
         for item in statement.get("statement_items", [])
@@ -231,17 +224,32 @@ def _lexicon_facts(
     return facts
 
 
-def _anchored_payment_fact(summary: str, facts: Sequence[_Fact]) -> _Fact | None:
-    match = re.match(r"^(?:\d{1,4}(?:[./-]\d{1,2}){1,2})?\s*(付)", summary)
-    if match is None:
-        return None
-    start, end = match.span(1)
-    if any(
-        fact.slot == "cash_action" and _overlaps(start, end, ((fact.start, fact.end),))
-        for fact in facts
-    ):
-        return None
-    return _Fact("cash_action", "outflow", match.group(1), start, end)
+def _anchored_cash_action_fact(
+    summary: str,
+    facts: Sequence[_Fact],
+    rules: Mapping[str, object],
+) -> _Fact | None:
+    for specification in rules.get("anchored_cash_actions", ()):
+        if not isinstance(specification, Mapping):
+            continue
+        match = re.match(str(specification.get("pattern", "")), summary)
+        if match is None:
+            continue
+        start, end = match.span(1)
+        if any(
+            fact.slot == "cash_action"
+            and _overlaps(start, end, ((fact.start, fact.end),))
+            for fact in facts
+        ):
+            return None
+        return _Fact(
+            "cash_action",
+            str(specification.get("value", "")),
+            match.group(1),
+            start,
+            end,
+        )
+    return None
 
 
 def _inside_parentheses(summary: str, position: int) -> bool:
@@ -250,8 +258,51 @@ def _inside_parentheses(summary: str, position: int) -> bool:
     return left > right
 
 
-def _normalize_nested_actions(summary: str, facts: Sequence[_Fact]) -> list[_Fact]:
-    anchored = _anchored_payment_fact(summary, facts)
+def _apply_action_conditioned_object_overrides(
+    facts: Sequence[_Fact],
+    rules: Mapping[str, object],
+) -> list[_Fact]:
+    actions = {
+        fact.value for fact in facts if fact.slot == "cash_action"
+    }
+    normalized = list(facts)
+    for specification in sorted(
+        (
+            item
+            for item in rules.get("action_conditioned_object_overrides", ())
+            if isinstance(item, Mapping) and item.get("status", "active") == "active"
+        ),
+        key=lambda item: int(item.get("priority", 0)),
+    ):
+        if str(specification.get("cash_action", "")) not in actions:
+            continue
+        source_value = str(specification.get("from_value", ""))
+        target_value = str(specification.get("to_value", ""))
+        terms = {str(term) for term in specification.get("terms", ())}
+        normalized = [
+            _Fact(
+                fact.slot,
+                target_value,
+                fact.text,
+                fact.start,
+                fact.end,
+                fact.source,
+            )
+            if fact.slot == "business_object"
+            and fact.value == source_value
+            and fact.text in terms
+            else fact
+            for fact in normalized
+        ]
+    return normalized
+
+
+def _normalize_nested_actions(
+    summary: str,
+    facts: Sequence[_Fact],
+    rules: Mapping[str, object],
+) -> list[_Fact]:
+    anchored = _anchored_cash_action_fact(summary, facts, rules)
     if anchored is not None:
         facts = (*facts, anchored)
     actions = sorted((fact for fact in facts if fact.slot == "cash_action"), key=lambda fact: fact.start)
@@ -585,7 +636,12 @@ def _analyze(
             and summary[max(0, fact.start - 1) : fact.start] == "招"
         )
     ]
-    facts = _normalize_nested_actions(summary, (*noise, *entities, *lexical, *agent_facts))
+    facts = _normalize_nested_actions(
+        summary,
+        (*noise, *entities, *lexical, *agent_facts),
+        rules,
+    )
+    facts = _apply_action_conditioned_object_overrides(facts, rules)
     facts = _normalize_business_relations(summary, facts)
     unexplained = _unexplained_business_spans(summary, facts, rules)
     unresolved = _unresolved_slots(facts, unexplained)
@@ -735,5 +791,9 @@ def validate_summary_batch(
             and not result.spans
         ):
             raise ValueError("整批摘要语义退化：完成状态没有形成有效语义证据")
-        if result.status == "agent_insufficient" and not result.unexplained_spans:
-            raise ValueError("摘要原文不足终态必须保留未解释业务内容")
+        if (
+            result.status == "agent_insufficient"
+            and not result.unresolved_slots
+            and not result.unexplained_spans
+        ):
+            raise ValueError("摘要原文不足终态必须保留未决语言槽位或未解释业务内容")

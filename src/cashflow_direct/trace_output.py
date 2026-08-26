@@ -16,35 +16,20 @@ from cashflow_direct.models import (
     ClassificationDecision,
     NormalizedEntry,
 )
+from cashflow_direct.rule_registry import default_rule_registry
 
 
+_TRACE_RULES = default_rule_registry()
 _QUALITY_TEXT = {
-    0: "无效（0分）",
-    10: "弱（10分）",
-    25: "中（25分）",
-    45: "强（45分）",
+    int(score): label
+    for score, label in _TRACE_RULES.output_policy["quality_labels"]["trace"].items()
 }
 
-_ACTION_TEXT = {
-    "automatic_keep": "自动保留原项目",
-    "automatic_change": "自动补填或修改原项目",
-    "ai_review": "一次AI复核",
-    "dual_ai_review": "两个AI独立复核",
-    "double_ai_review": "两个AI独立复核",
-    "ai_double_followup_review": "首轮后再由两个AI独立复核",
-    "ai_third_review": "第三个AI独立复核并按多数结果处理",
-    "human_decision": "人工决定",
-    "human_batch": "人工批量决定",
-    "low_amount_human_batch": "低金额人工批量",
-    "exclude": "明确排除",
-}
+_ACTION_TEXT = dict(
+    _TRACE_RULES.evidence_policy["action_display_labels"]
+)
 
-_MATERIALITY_TEXT = {
-    "M0": "低于明显微小错报临界值",
-    "M1": "达到明显微小错报临界值但低于实际执行重要性",
-    "M2": "达到实际执行重要性但低于整体重要性",
-    "M3": "达到整体重要性",
-}
+_MATERIALITY_TEXT = dict(_TRACE_RULES.output_policy["materiality_labels"])
 
 _ANOMALY_TEXT = {
     "summary_empty": "摘要为空，输入非法",
@@ -289,8 +274,7 @@ def build_trace_rows(
             if primary_decision is not None and primary_decision.resolved
             else "等待人工决定"
             if primary_decision is not None
-            and primary_decision.decision_action
-            in {"human_decision", "human_batch", "low_amount_human_batch"}
+            and primary_decision.decision_action == "human_decision"
             else "等待人工复核"
         )
         component_allocations = tuple(allocations_by_component.get(component.component_id, ()))
@@ -505,6 +489,12 @@ def build_trace_rows(
                 ),
                 "评分版本": str(versions.get("scoring", "未记录")),
                 "动作表版本": str(versions.get("action_matrix", "未记录")),
+                "决策规则编号(技术)": (
+                    primary_decision.decision_rule_id
+                    if primary_decision is not None
+                    else "未记录"
+                ),
+                "规则中心版本": str(versions.get("rule_center", "未记录")),
                 "AI复核记录(技术)": (
                     json.dumps(ai_records, ensure_ascii=False) if ai_records else ""
                 ),

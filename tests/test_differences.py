@@ -332,9 +332,12 @@ class OriginalAutoDifferenceTests(unittest.TestCase):
             "不适用：增值税组成随同一现金业务的唯一基础项目确定，不单独参加修改评分。",
             row["打分逻辑描述及打分结果"],
         )
-        self.assertEqual("增值税附属关系：与基础组成BASE共用唯一现金来源", row["独立来源1"])
         self.assertEqual(
-            "基础项目决定：支付给职工以及为职工支付的现金",
+            "完整对方科目路径“路径为空”；无效证据0分",
+            row["独立来源1"],
+        )
+        self.assertEqual(
+            "摘要“匿名业务”；无效证据0分",
             row["独立来源2"],
         )
 

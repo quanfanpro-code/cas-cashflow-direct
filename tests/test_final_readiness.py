@@ -48,7 +48,7 @@ def test_classification_allows_explicit_pending_action_but_not_silent_blank() ->
         system_item_name="",
         resolved=False,
         evidence_score=0,
-        decision_action="low_amount_human_batch",
+        decision_action="human_decision",
     )
     silent = replace(pending, decision_action="")
 

@@ -117,6 +117,7 @@ class ClassificationDecision:
     single_materiality_level: str = ""
     vat_base_component_id: str = ""
     vat_relation_status: str = ""
+    decision_rule_id: str = ""
 
     @property
     def item_code(self) -> str:
@@ -155,6 +156,8 @@ class ReviewBatch:
     mandatory: bool = False
     baseline_item_code: str = ""
     follows_component_id: str = ""
+    fallback_source: str = ""
+    fallback_step: str = ""
 
     @property
     def alternative_item_code(self) -> str:

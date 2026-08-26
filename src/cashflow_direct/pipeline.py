@@ -95,8 +95,12 @@ from cashflow_direct.models import (
     SourceLocator,
     UnresolvedDecision,
 )
-from cashflow_direct.materiality import partition_review_batches
+from cashflow_direct.materiality import (
+    build_low_amount_fallback_batches,
+    partition_review_batches,
+)
 from cashflow_direct.money import stable_id, statement_amount_cent, yuan_to_cent
+from cashflow_direct.rule_registry import default_rule_registry
 from cashflow_direct.normalization import (
     infer_evidence_profile,
     normalize_dataset,
@@ -141,6 +145,11 @@ from cashflow_direct.vat_companion import (
     apply_vat_companion_relations,
     build_vat_companion_relations,
 )
+
+
+_PIPELINE_RULES = default_rule_registry()
+_AI_PENDING_ACTIONS = _PIPELINE_RULES.action_group("ai_pending")
+_BLIND_MULTI_REVIEW_ACTIONS = _PIPELINE_RULES.action_group("blind_multi_review")
 from cashflow_direct.workbook_output import WorkbookModel, build_output_workbook
 from cashflow_direct.workbook_structure import open_workbook_robust, scan_workbook
 
@@ -2858,8 +2867,7 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     has_pending_human = any(
         not item.resolved
         and not item.excluded
-        and item.decision_action
-        not in {"ai_review", "double_ai_review"}
+        and item.decision_action not in _AI_PENDING_ACTIONS
         for item in decisions
     )
     classification_status = (
@@ -3019,10 +3027,7 @@ def _build_pending_ai_followups(
         if component is None:
             raise RuntimeError(f"AI后续复核缺少业务组成：{decision.component_id}")
         current_tasks = tasks_by_component.get(decision.component_id, ())
-        if decision.decision_action in {
-            "double_ai_review",
-            "ai_double_followup_review",
-        }:
+        if decision.decision_action in _BLIND_MULTI_REVIEW_ACTIONS:
             existing_slots = {
                 slot
                 for slot in ("A", "B")
@@ -3041,10 +3046,32 @@ def _build_pending_ai_followups(
         elif decision.decision_action == "ai_third_review" and not any(
             "；独立复核C：" in task.context for task in current_tasks
         ):
+            original_task = next(
+                (
+                    task
+                    for task in current_tasks
+                    if "；独立复核A：" in task.context
+                    or "；独立复核B：" in task.context
+                ),
+                None,
+            )
+            task_decision = (
+                replace(
+                    decision,
+                    system_item_id=original_task.system_item_id,
+                    candidate_item_ids=original_task.candidate_item_ids,
+                    summary_candidate_item_ids=original_task.summary_candidate_item_ids,
+                    account_path_candidate_item_ids=(
+                        original_task.account_path_candidate_item_ids
+                    ),
+                )
+                if original_task is not None
+                else decision
+            )
             followups.extend(
                 build_blind_ai_tasks(
                     component,
-                    decision,
+                    task_decision,
                     ("C",),
                     company_notes,
                 )
@@ -3608,14 +3635,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         for decision in decisions
         if not decision.resolved
         and not decision.excluded
-        and decision.decision_action
-        in {
-            "ai_review",
-            "dual_ai_review",
-            "double_ai_review",
-            "ai_double_followup_review",
-            "ai_third_review",
-        }
+        and decision.decision_action in _AI_PENDING_ACTIONS
     )
     if unfinished_ai:
         raise RuntimeError(
@@ -3959,16 +3979,21 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             )
         )
     unresolved = tuple(unresolved_list)
-    review_batches, low_amount_review_batches = partition_review_batches(
+    review_batches, _obsolete_low_amount_batches = partition_review_batches(
         unresolved,
         _materiality_from_state(state).performance_cent,
         all_leaf_item_ids=leaf_item_ids,
     )
     state["review_batches"] = [asdict(item) for item in review_batches]
     state["important_review_batches"] = [asdict(item) for item in review_batches]
-    state["low_amount_review_batches"] = [
-        asdict(item) for item in low_amount_review_batches
+    low_amount_fallback_batches = build_low_amount_fallback_batches(
+        components,
+        decisions,
+    )
+    state["low_amount_fallback_batches"] = [
+        asdict(item) for item in low_amount_fallback_batches
     ]
+    state.pop("low_amount_review_batches", None)
     consistency_group_by_component: dict[str, Mapping[str, object]] = {}
     for group in state.get("consistency_groups", ()):
         for component_id in group.get("component_ids", ()):
@@ -3977,12 +4002,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         str(item["group_id"]): item
         for item in state.get("consistency_resolution", {}).get("statuses", ())
     }
-    tier_names = {
-        "M0": "低于明显微小错报临界值",
-        "M1": "达到明显微小错报临界值但低于实际执行重要性",
-        "M2": "达到实际执行重要性但低于整体重要性",
-        "M3": "达到整体重要性",
-    }
+    tier_names = dict(_PIPELINE_RULES.output_policy["materiality_labels"])
     trace_rows_list: list[dict[str, object]] = []
     for component, decision in zip(components, decisions, strict=True):
         source_entries = tuple(
@@ -4140,7 +4160,6 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         status = "诊断材料，不可作为最终表"
     elif (
         review_batches
-        or low_amount_review_batches
         or any(group.blocks_manual_completion for group in duplicate_groups)
     ):
         status = "待完成人工确认"
@@ -4261,7 +4280,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         rules=rules,
         comparison=comparison,
         review_batches=review_batches,
-        low_amount_review_batches=low_amount_review_batches,
+        low_amount_fallback_batches=low_amount_fallback_batches,
         duplicate_groups=duplicate_groups,
         ai_records=_ai_records_from_state(state),
         cash_scope_rows=(
@@ -4317,7 +4336,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             "INSERT OR REPLACE INTO review_batch(record_id, payload_json) VALUES (?, ?)",
             (
                 (item.batch_id, json.dumps(asdict(item), ensure_ascii=False))
-                for item in (*review_batches, *low_amount_review_batches)
+                for item in review_batches
             ),
         )
         connection.executemany(
