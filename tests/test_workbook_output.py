@@ -36,6 +36,7 @@ EXPECTED_SHEETS = [
     "现金流量表正表",
     "正表核对报告",
     "重要待复核事项",
+    "低金额批量处理",
     "疑似重复事项",
     "AI复核记录",
     "原表与系统决定差异",
@@ -592,7 +593,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertNotIn(USE_SYSTEM_RECOMMENDATION, options)
                 self.assertIn("支付其他与经营活动有关的现金", options)
                 self.assertIn("支付其他与投资活动有关的现金", options)
-                self.assertIn("明确排除", options)
+                self.assertNotIn("明确排除", options)
                 money_format = sheet.cell(
                     2, headers.index("单笔金额") + 1
                 ).number_format
@@ -607,7 +608,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     for cell in row
                     if isinstance(cell.value, str)
                 }
-                self.assertIn("明确排除", helper_values)
+                self.assertNotIn("明确排除", helper_values)
             finally:
                 workbook.close()
 
@@ -639,7 +640,7 @@ class WorkbookOutputTests(unittest.TestCase):
                         USE_SYSTEM_RECOMMENDATION,
                         sheet[start].value,
                     )
-                    self.assertEqual("明确排除", sheet[end].value)
+                    self.assertNotEqual("明确排除", sheet[end].value)
             finally:
                 workbook.close()
 
@@ -1005,7 +1006,6 @@ class WorkbookOutputTests(unittest.TestCase):
                     USE_SYSTEM_RECOMMENDATION,
                     "支付的各项税费",
                     *(name for name in leaf_names if name != "支付的各项税费"),
-                    "明确排除",
                 )
                 written = tuple(
                     review.cell(row=row, column=helper_column).value
@@ -1124,7 +1124,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     "支付其他与投资活动有关的现金",
                     review.cell(3, helper_column).value,
                 )
-                self.assertEqual("明确排除", review.cell(4, helper_column).value)
+                self.assertIsNone(review.cell(4, helper_column).value)
                 self.assertNotIn("CFI-09", validation)
                 self.assertNotIn("CFO-01", validation)
                 self.assertTrue(review.protection.sheet)
@@ -1159,11 +1159,11 @@ class WorkbookOutputTests(unittest.TestCase):
                 cash_sheet = workbook["现金范围与现金流量表与货币资金变动的勾稽核对"]
                 net_row = next(
                     row for row in range(2, cash_sheet.max_row + 1)
-                    if cash_sheet.cell(row, 1).value == "本期现金净增加额"
+                    if cash_sheet.cell(row, 1).value == "已分类现金流量表净额"
                 )
                 difference_row = next(
                     row for row in range(2, cash_sheet.max_row + 1)
-                    if cash_sheet.cell(row, 1).value == "勾稽差异"
+                    if cash_sheet.cell(row, 1).value == "现金变动桥接差异"
                 )
                 self.assertIn("现金流量表正表", cash_sheet.cell(net_row, 3).value)
                 self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))

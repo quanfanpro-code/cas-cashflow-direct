@@ -46,6 +46,7 @@ from cashflow_direct.ai_review import (
     validate_basis_text,
     write_ai_tasks_jsonl,
 )
+from cashflow_direct.blank_original_fallback import apply_blank_original_fallback
 from cashflow_direct.classification import (
     classify_all,
     load_rule_pack,
@@ -82,6 +83,7 @@ from cashflow_direct.decision_policy import (
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
 from cashflow_direct.differences import build_original_auto_differences
 from cashflow_direct.excel_recalculation import recalculate_workbook_with_excel
+from cashflow_direct.exclusion_policy import authorize_exclusion
 from cashflow_direct.intake import register_inputs, validate_materiality
 from cashflow_direct.models import (
     CashflowComponent,
@@ -93,7 +95,7 @@ from cashflow_direct.models import (
     SourceLocator,
     UnresolvedDecision,
 )
-from cashflow_direct.materiality import build_review_batches
+from cashflow_direct.materiality import partition_review_batches
 from cashflow_direct.money import stable_id, statement_amount_cent, yuan_to_cent
 from cashflow_direct.normalization import (
     infer_evidence_profile,
@@ -115,6 +117,7 @@ from cashflow_direct.statement import (
     parse_existing_statement,
     reconcile_cash,
 )
+from cashflow_direct.state_integrity import assert_decision_store_consistent
 from cashflow_direct.summary_semantics import (
     SummarySemanticResult,
     SummarySpan,
@@ -306,7 +309,13 @@ def _decision_from_dict(payload: Mapping[str, object]) -> ClassificationDecision
     raw_score = data.get("evidence_score", 0)
     data["evidence_score"] = None if raw_score is None else int(raw_score)
     data["evidence_sources"] = tuple(data.get("evidence_sources", ()))
-    data["candidate_item_ids"] = tuple(data.get("candidate_item_ids", ()))
+    for key in (
+        "candidate_item_ids",
+        "summary_candidate_item_ids",
+        "account_path_candidate_item_ids",
+    ):
+        if data.get(key) is not None:
+            data[key] = tuple(data.get(key, ()))
     return ClassificationDecision(**data)
 
 
@@ -3091,6 +3100,7 @@ def _register_ai_technical_attempts(
 def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
+    assert_decision_store_consistent(run_dir, state)
     payloads = []
     with Path(result_path).open("r", encoding="utf-8-sig") as source:
         for line in source:
@@ -3172,6 +3182,32 @@ def import_ai_results(run_dir: Path, result_path: Path) -> AIStageResult:
                 automatic_change_threshold=int(
                     state["automatic_change_threshold"]
                 ),
+            )
+            components = tuple(
+                _component_from_dict(payload)
+                for payload in state.get("components", ())
+            )
+            component_by_id = {
+                component.component_id: component for component in components
+            }
+            ordered_leaf_item_ids = tuple(
+                item.item_id for item in rules.statement_items if item.is_leaf
+            )
+            item_directions = {
+                item.item_id: item.normal_direction
+                for item in rules.statement_items
+                if item.is_leaf
+            }
+            materiality = _materiality_from_state(state)
+            resolved = tuple(
+                apply_blank_original_fallback(
+                    component_by_id[item.component_id],
+                    item,
+                    materiality,
+                    ordered_leaf_item_ids,
+                    item_directions,
+                )
+                for item in resolved
             )
             resolved = _refresh_vat_companion_decisions(state, resolved)
             state["decisions"] = [asdict(item) for item in resolved]
@@ -3291,6 +3327,7 @@ def confirm_manual_decisions(
 ) -> StageResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
+    assert_decision_store_consistent(run_dir, state)
     if "classification_summary" not in state:
         raise RuntimeError("请先完成分类并形成待人工决定事项")
     rules = load_rule_pack(PROJECT_ROOT)
@@ -3301,6 +3338,12 @@ def confirm_manual_decisions(
         _decision_from_dict(item) for item in state.get("decisions", ())
     )
     decision_by_id = {item.component_id: item for item in decisions}
+    component_by_id = {
+        item.component_id: item
+        for item in (
+            _component_from_dict(payload) for payload in state.get("components", ())
+        )
+    }
     seen: set[str] = set()
     replacements: dict[str, ClassificationDecision] = {}
     records: list[dict[str, object]] = []
@@ -3324,6 +3367,13 @@ def confirm_manual_decisions(
         if item_id and item_id not in leaf_items:
             raise ValueError(f"人工选择的正表项目无效：{item_id}")
         if excluded:
+            exclusion_type = str(entry.get("exclusion_type", "")).strip()
+            authorization = authorize_exclusion(
+                component_by_id[component_id],
+                original,
+                exclusion_type,
+                {**state, "requested_exclusion": dict(entry)},
+            )
             current = replace(
                 original,
                 system_item_id="",
@@ -3337,6 +3387,8 @@ def confirm_manual_decisions(
                 excluded=True,
                 decision_source="manual",
                 decision_action="manual_exclude",
+                exclusion_type=authorization.exclusion_type,
+                confirmed_adjustment_cent=authorization.confirmed_adjustment_cent,
             )
         else:
             item = leaf_items[item_id]
@@ -3360,6 +3412,9 @@ def confirm_manual_decisions(
                 "component_id": component_id,
                 "item_id": item_id,
                 "excluded": excluded,
+                "exclusion_type": current.exclusion_type,
+                "confirmed_adjustment_cent": current.confirmed_adjustment_cent,
+                "adjustment_type": str(entry.get("adjustment_type", "")).strip(),
                 "basis": basis,
                 "external_source": str(entry.get("external_source", "")).strip(),
                 "operator": operator,
@@ -3457,6 +3512,11 @@ def _assert_agent_gates_closed(state: Mapping[str, object]) -> None:
 def finalize_run(run_dir: Path) -> FinalizeResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
+    assert_decision_store_consistent(
+        run_dir,
+        state,
+        allow_finalized_recovery=True,
+    )
     _assert_agent_gates_closed(state)
     if state.get("overall_status") and state.get("workbook_path"):
         existing_output = Path(str(state["workbook_path"]))
@@ -3649,6 +3709,11 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         balances.get("opening_cent"),
         balances.get("closing_cent"),
         balances.get("fx_cent"),
+        components=components,
+        decisions=decisions,
+        confirmed_adjustment_cent=sum(
+            decision.confirmed_adjustment_cent for decision in decisions
+        ),
     )
     duplicate_groups = assign_duplicate_items(
         find_suspected_duplicates(
@@ -3660,6 +3725,30 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     file_name_by_id = {
         str(item["file_id"]): Path(str(item["path"])).name for item in state["files"]
     }
+
+    def evidence_status(decision: ClassificationDecision) -> str:
+        return "|".join(
+            (
+                f"总分:{decision.evidence_score}",
+                f"路径:{decision.account_path_quality}",
+                f"摘要:{decision.summary_quality}",
+                f"来源冲突:{decision.source_conflict}",
+                f"业务冲突:{decision.business_conflict}",
+            )
+        )
+
+    def forced_check_reason(decision: ClassificationDecision) -> str:
+        return "|".join(
+            name
+            for name, active in (
+                ("公司规则冲突", decision.company_rule_conflict),
+                ("增值税基础业务缺失", decision.vat_base_missing),
+                ("净额资料缺失", decision.net_item_facts_missing),
+                ("个税对象不明", decision.individual_tax_fact_missing),
+                ("方向不相容", decision.direction_status == "incompatible"),
+            )
+            if active
+        )
     consistency_unresolved = tuple(
         state.get("consistency_resolution", {}).get("unresolved", ())
     )
@@ -3721,6 +3810,17 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                 if decision.decision_action == "vat_follow_base"
                 else ""
             ),
+            decision_action=decision.decision_action,
+            system_candidate_signature="|".join(decision.candidate_item_ids),
+            account_path_signature="|".join(
+                component_by_id[decision.component_id].counterpart_accounts
+            ),
+            summary_business_signature=(
+                "|".join(filter(None, (decision.business_object, decision.purpose)))
+                or _review_text_pattern(component_by_id[decision.component_id].summary)
+            ),
+            evidence_status=evidence_status(decision),
+            forced_check_reason=forced_check_reason(decision),
         )
         for decision in decisions
         if (
@@ -3784,6 +3884,17 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                         if decision.decision_action == "vat_follow_base"
                         else ""
                     ),
+                    decision_action=decision.decision_action,
+                    system_candidate_signature="|".join(decision.candidate_item_ids),
+                    account_path_signature="|".join(component.counterpart_accounts),
+                    summary_business_signature=(
+                        "|".join(filter(None, (decision.business_object, decision.purpose)))
+                        or _review_text_pattern(component.summary)
+                    ),
+                    evidence_status=evidence_status(decision),
+                    forced_check_reason=(
+                        forced_check_reason(decision) or str(payload["reason"])
+                    ),
                 )
             )
     unresolved = tuple(unresolved_list)
@@ -3836,15 +3947,28 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
                     if decision.decision_action == "vat_follow_base"
                     else ""
                 ),
+                decision_action="human_decision",
+                system_candidate_signature="|".join(decision.candidate_item_ids),
+                account_path_signature="|".join(component.counterpart_accounts),
+                summary_business_signature=(
+                    "|".join(filter(None, (decision.business_object, decision.purpose)))
+                    or _review_text_pattern(component.summary)
+                ),
+                evidence_status=evidence_status(decision),
+                forced_check_reason="达到财务报表整体重要性，强制人工复核",
             )
         )
     unresolved = tuple(unresolved_list)
-    review_batches = build_review_batches(
+    review_batches, low_amount_review_batches = partition_review_batches(
         unresolved,
         _materiality_from_state(state).performance_cent,
         all_leaf_item_ids=leaf_item_ids,
     )
     state["review_batches"] = [asdict(item) for item in review_batches]
+    state["important_review_batches"] = [asdict(item) for item in review_batches]
+    state["low_amount_review_batches"] = [
+        asdict(item) for item in low_amount_review_batches
+    ]
     consistency_group_by_component: dict[str, Mapping[str, object]] = {}
     for group in state.get("consistency_groups", ()):
         for component_id in group.get("component_ids", ()):
@@ -4016,10 +4140,11 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         status = "诊断材料，不可作为最终表"
     elif (
         review_batches
+        or low_amount_review_batches
         or any(group.blocks_manual_completion for group in duplicate_groups)
     ):
         status = "待完成人工确认"
-    elif reconciliation.status != "现金流量表与货币资金变动的勾稽核对：相符":
+    elif reconciliation.status != "最终现金流量表勾稽成功":
         status = "草稿：现金流量表与货币资金变动的勾稽核对未完成或存在差异"
     else:
         status = "最终可使用"
@@ -4136,6 +4261,7 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         rules=rules,
         comparison=comparison,
         review_batches=review_batches,
+        low_amount_review_batches=low_amount_review_batches,
         duplicate_groups=duplicate_groups,
         ai_records=_ai_records_from_state(state),
         cash_scope_rows=(
@@ -4189,7 +4315,10 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         )
         connection.executemany(
             "INSERT OR REPLACE INTO review_batch(record_id, payload_json) VALUES (?, ?)",
-            ((item.batch_id, json.dumps(asdict(item), ensure_ascii=False)) for item in review_batches),
+            (
+                (item.batch_id, json.dumps(asdict(item), ensure_ascii=False))
+                for item in (*review_batches, *low_amount_review_batches)
+            ),
         )
         connection.executemany(
             "INSERT OR REPLACE INTO duplicate_group(record_id, payload_json) VALUES (?, ?)",

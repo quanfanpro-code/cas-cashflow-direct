@@ -197,6 +197,13 @@ def classify_component(
     if component.cash_delta_cent == 0 or any(
         marker in component.anomalies for marker in ("internal_transfer", "non_cash")
     ):
+        exclusion_type = (
+            "zero_amount"
+            if component.cash_delta_cent == 0
+            else "internal_transfer"
+            if "internal_transfer" in component.anomalies
+            else "non_cash"
+        )
         return ClassificationDecision(
             component.component_id,
             "",
@@ -208,6 +215,7 @@ def classify_component(
             excluded=True,
             evidence_score=None,
             decision_action="exclude",
+            exclusion_type=exclusion_type,
         )
 
     evidence_component = component

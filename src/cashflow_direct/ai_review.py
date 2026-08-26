@@ -718,10 +718,18 @@ def _apply_ai_outcome(
         account_quality = decision.account_path_quality
         independent = False
         evidence_sources = decision.evidence_sources
+        summary_candidates = decision.summary_candidate_item_ids or ()
+        account_path_candidates = decision.account_path_candidate_item_ids or ()
+        summary_preferred = decision.summary_preferred_item_id
+        account_path_preferred = decision.account_path_preferred_item_id
     else:
         summary_quality = selected_result.summary.quality.value
         account_quality = selected_result.account_path.quality.value
         independent = selected_assessment.sources_independent
+        summary_candidates = selected_result.summary.candidate_item_ids
+        account_path_candidates = selected_result.account_path.candidate_item_ids
+        summary_preferred = selected_result.summary.candidate_item_id
+        account_path_preferred = selected_result.account_path.candidate_item_id
         evidence_sources = tuple(
             source.value
             for source, quality in (
@@ -763,6 +771,13 @@ def _apply_ai_outcome(
         decision_source=decision_source,
         evidence_score=score,
         evidence_sources=evidence_sources,
+        candidate_item_ids=tuple(
+            dict.fromkeys((*summary_candidates, *account_path_candidates))
+        ),
+        summary_candidate_item_ids=summary_candidates,
+        account_path_candidate_item_ids=account_path_candidates,
+        summary_preferred_item_id=summary_preferred,
+        account_path_preferred_item_id=account_path_preferred,
         summary_quality=summary_quality,
         account_path_quality=account_quality,
         sources_independent=independent,

@@ -220,13 +220,16 @@ def test_trace_displays_m1_individual_tax_batch_as_general_human_batch() -> None
 
 def test_trace_keeps_only_effective_cashflow_segment_and_uses_component_original_item() -> None:
     entries = (
-        _entry(
-            "E-CASH",
-            10,
-            "1002 银行存款_基本户",
-            summary="资金划转",
-            credit_cent=10_000,
-            retained_side="cash",
+        replace(
+            _entry(
+                "E-CASH",
+                10,
+                "1002 银行存款_基本户",
+                summary="资金划转",
+                credit_cent=10_000,
+                retained_side="cash",
+            ),
+            counterpart_name="1012 其他货币资金",
         ),
         _entry(
             "E-BUSINESS",
@@ -271,6 +274,7 @@ def test_trace_keeps_only_effective_cashflow_segment_and_uses_component_original
     assert rows[0]["本行摘要"] == "资金划转"
     assert rows[0]["原始完整科目路径"] == "1002 银行存款_基本户"
     assert rows[0]["本行完整对方科目路径"] == "1012 其他货币资金_保证金户"
+    assert isinstance(rows[0]["单笔金额"], (int, float))
     assert rows[0]["原现流项目"] == ITEM_NAME
     assert rows[0]["本行分配现金变化"] == -100
 

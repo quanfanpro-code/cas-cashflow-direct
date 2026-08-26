@@ -382,6 +382,26 @@ def test_inventory_and_cost_paths_identify_external_operating_inputs(
 @pytest.mark.parametrize(
     "account_path",
     (
+        "周转材料_低值易耗品",
+        "周转材料_包装物",
+        "材料采购_原材料",
+        "委托加工物资_低值易耗品",
+    ),
+)
+def test_direct_inventory_entry_does_not_require_repeated_purchase_wording(
+    account_path: str,
+) -> None:
+    result = analyze_account_path(account_path, load_account_semantic_rules(ROOT))
+
+    assert result.outflow_candidate_item_ids == ("CFO-04",)
+    assert result.quality.value == 45
+    assert not result.unresolved_slots
+    _assert_every_path_node_has_an_explicit_role(result)
+
+
+@pytest.mark.parametrize(
+    "account_path",
+    (
         "生产成本_设备折旧",
         "周转材料_摊销",
         "库存商品_完工结转",

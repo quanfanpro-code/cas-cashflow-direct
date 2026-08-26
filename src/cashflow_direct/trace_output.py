@@ -389,10 +389,10 @@ def build_trace_rows(
             )
             if representative is None:
                 row_counterpart_path = "完整对方科目路径为空"
+            elif representative.retained_side == "cash" and component.counterpart_accounts:
+                row_counterpart_path = counterpart_path
             elif representative.counterpart_name.strip():
                 row_counterpart_path = representative.counterpart_name
-            elif representative.retained_side == "cash":
-                row_counterpart_path = counterpart_path
             else:
                 row_counterpart_path = cash_account or "完整对方科目路径为空"
             source_debit = _source_amount(
@@ -477,10 +477,10 @@ def build_trace_rows(
                         for decision in related_decisions
                     )
                 ),
-                "单笔金额": _unique_text(
-                    (int(assessment.get("single_amount_cent", 0)) / 100,)
+                "单笔金额": (
+                    int(assessment.get("single_amount_cent", 0)) / 100
                     if assessment
-                    else ()
+                    else ""
                 ),
                 "单笔重要性层级": _MATERIALITY_TEXT.get(
                     primary_decision.single_materiality_level,

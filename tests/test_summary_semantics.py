@@ -462,6 +462,14 @@ class SummarySemanticsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "整批摘要语义退化"):
             validate_summary_batch((empty,), ("摘要甲",))
 
+    def test_batch_accepts_rule_complete_invalid_result_with_real_rule_spans(self):
+        limited = analyze_summary("招聘员工点咖啡", self.rules)
+
+        self.assertEqual("rule_complete", limited.status)
+        self.assertEqual(EvidenceQuality.INVALID, limited.quality)
+        self.assertTrue(limited.spans)
+        validate_summary_batch((limited,), (limited.summary,))
+
     def test_batch_accepts_source_insufficient_without_fixed_rule_spans(self):
         unresolved = analyze_summary("地下电动铲运机评估费", self.rules)
         insufficient = merge_summary_agent_slots(

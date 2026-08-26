@@ -129,11 +129,68 @@ class OriginalAutoDifferenceTests(unittest.TestCase):
             "证据得分70分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
             row["差异形成原因"],
         )
-        self.assertEqual("摘要“匿名业务”；强证据45分", row["独立来源1"])
         self.assertEqual(
             "完整对方科目路径“路径为空”；中等证据25分",
-            row["独立来源2"],
+            row["独立来源1"],
         )
+        self.assertEqual("摘要“匿名业务”；强证据45分", row["独立来源2"])
+
+    def test_source_columns_keep_fixed_meaning_when_only_summary_is_valid(self) -> None:
+        source = entry("E1", "支付的各项税费")
+        current = component("C1", source.original_flow_item, ("E1",))
+        automatic = replace(
+            decision("C1", "CFO-07", "支付其他与经营活动有关的现金"),
+            evidence_score=45,
+            account_path_quality=0,
+        )
+
+        row = self.build((source,), (current,), (automatic,))[0]
+
+        self.assertEqual(
+            "完整对方科目路径“路径为空”；无效证据0分",
+            row["独立来源1"],
+        )
+        self.assertEqual("摘要“匿名业务”；强证据45分", row["独立来源2"])
+
+    def test_source_columns_keep_fixed_meaning_when_only_path_is_valid(self) -> None:
+        source = replace(entry("E1", "支付的各项税费"), summary="")
+        current = replace(
+            component("C1", source.original_flow_item, ("E1",)),
+            counterpart_accounts=("周转材料", "低值易耗品"),
+        )
+        automatic = replace(
+            decision("C1", "CFO-07", "支付其他与经营活动有关的现金"),
+            evidence_score=25,
+            summary_quality=0,
+        )
+
+        row = self.build((source,), (current,), (automatic,))[0]
+
+        self.assertEqual(
+            "完整对方科目路径“周转材料、低值易耗品”；中等证据25分",
+            row["独立来源1"],
+        )
+        self.assertEqual("摘要“摘要为空”；无效证据0分", row["独立来源2"])
+
+    def test_source_columns_keep_fixed_meaning_when_sources_conflict(self) -> None:
+        source = entry("E1", "支付的各项税费")
+        current = replace(
+            component("C1", source.original_flow_item, ("E1",)),
+            counterpart_accounts=("周转材料", "低值易耗品"),
+        )
+        automatic = replace(
+            decision("C1", "CFO-07", "支付其他与经营活动有关的现金"),
+            evidence_score=None,
+            source_conflict=True,
+        )
+
+        row = self.build((source,), (current,), (automatic,))[0]
+
+        self.assertEqual(
+            "完整对方科目路径“周转材料、低值易耗品”；中等证据25分",
+            row["独立来源1"],
+        )
+        self.assertEqual("摘要“匿名业务”；强证据45分", row["独立来源2"])
 
     def test_unstandardized_and_internal_transfer_rows_are_visible(self) -> None:
         custom = entry("E1", "客户自定义项目")

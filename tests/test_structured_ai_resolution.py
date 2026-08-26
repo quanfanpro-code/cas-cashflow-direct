@@ -121,6 +121,27 @@ def test_single_ai_can_change_only_when_recalculated_score_reaches_70() -> None:
     assert resolved.decision_source == "ai_reviewed_system_decision"
 
 
+def test_ai_resolution_keeps_each_source_candidates_and_preferred_item() -> None:
+    current = _decision(
+        original_state="blank",
+        materiality="M0",
+        action="ai_review",
+    )
+
+    resolved = resolve_structured_ai_results(
+        (current,),
+        (_task("AI-1"),),
+        (_result("AI-1"),),
+        ITEM_NAMES,
+        ITEM_DIRECTIONS,
+    )[0]
+
+    assert resolved.summary_candidate_item_ids == ("CFO-01",)
+    assert resolved.account_path_candidate_item_ids == ("CFO-01",)
+    assert resolved.summary_preferred_item_id == "CFO-01"
+    assert resolved.account_path_preferred_item_id == "CFO-01"
+
+
 def test_single_ai_score_70_keeps_original_when_customer_selected_90() -> None:
     decision = _decision(
         original_state="conflicts",

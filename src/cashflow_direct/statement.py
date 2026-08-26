@@ -82,6 +82,12 @@ class ReconciliationResult:
     fx_cent: int | None
     net_cash_cent: int | None
     difference_cent: int | None
+    classified_net_cent: int = 0
+    pending_net_cent: int = 0
+    confirmed_adjustment_cent: int = 0
+    bridge_difference_cent: int | None = None
+    final_difference_cent: int | None = None
+    pending_component_ids: tuple[str, ...] = ()
 
 
 def _migrate_negative_net(
@@ -122,10 +128,17 @@ def aggregate_statement(
     support: dict[str, list[str]] = {item.item_id: [] for item in rules.statement_items}
     component_by_id = {item.component_id: item for item in components}
     for decision in decisions:
-        if decision.excluded or not decision.resolved:
+        if decision.excluded:
             continue
         component = component_by_id[decision.component_id]
-        item = item_by_id[decision.system_item_id]
+        item_id = (
+            decision.system_item_id
+            if decision.resolved
+            else decision.original_standard_item_id
+        )
+        item = item_by_id.get(item_id)
+        if item is None:
+            continue
         if not item.is_leaf:
             raise ValueError(f"业务组成不能直接分类到汇总行：{item.item_id}")
         values[item.item_id] += statement_amount_cent(
@@ -790,19 +803,63 @@ def reconcile_cash(
     opening_cent: int | None,
     closing_cent: int | None,
     fx_cent: int | None,
+    *,
+    components: Sequence[CashflowComponent] = (),
+    decisions: Sequence[ClassificationDecision] = (),
+    confirmed_adjustment_cent: int = 0,
 ) -> ReconciliationResult:
     if opening_cent is None or closing_cent is None or fx_cent is None:
         return ReconciliationResult(
             "现金流量表与货币资金变动的勾稽核对：未完成", opening_cent, closing_cent, fx_cent, None, None
         )
-    net_cash = (
+    classified_net = (
         statement.values["CFO-NET"]
         + statement.values["CFI-NET"]
         + statement.values["CFF-NET"]
-        + fx_cent
     )
-    difference = closing_cent - opening_cent - net_cash
-    status = "现金流量表与货币资金变动的勾稽核对：相符" if difference == 0 else "现金流量表与货币资金变动的勾稽核对：存在差异"
+    decision_by_id = {item.component_id: item for item in decisions}
+    pending_components = tuple(
+        component
+        for component in components
+        if (
+            (decision := decision_by_id.get(component.component_id)) is not None
+            and not decision.resolved
+            and not decision.excluded
+            and not decision.original_standard_item_id
+        )
+    )
+    pending_net = sum(component.cash_delta_cent for component in pending_components)
+    final_difference = (
+        closing_cent
+        - opening_cent
+        - classified_net
+        - fx_cent
+        - confirmed_adjustment_cent
+    )
+    bridge_difference = final_difference - pending_net
+    if not components and not decisions:
+        status = (
+            "现金流量表与货币资金变动的勾稽核对：相符"
+            if final_difference == 0
+            else "现金流量表与货币资金变动的勾稽核对：存在差异"
+        )
+    elif bridge_difference == 0 and pending_net != 0:
+        status = "现金变动桥接相符、现金流量表尚待分类"
+    elif bridge_difference == 0 and final_difference == 0:
+        status = "最终现金流量表勾稽成功"
+    else:
+        status = "现金变动桥接存在无法解释差异"
     return ReconciliationResult(
-        status, opening_cent, closing_cent, fx_cent, net_cash, difference
+        status,
+        opening_cent,
+        closing_cent,
+        fx_cent,
+        classified_net + fx_cent,
+        final_difference,
+        classified_net,
+        pending_net,
+        confirmed_adjustment_cent,
+        bridge_difference,
+        final_difference,
+        tuple(component.component_id for component in pending_components),
     )

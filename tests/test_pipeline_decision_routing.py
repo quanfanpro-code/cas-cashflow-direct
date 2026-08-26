@@ -14,6 +14,7 @@ from cashflow_direct.component_structure_ai import build_structure_ai_tasks
 from cashflow_direct.versions import current_versions
 from cashflow_direct.pipeline import (
     confirm_cash_scope,
+    confirm_manual_decisions,
     finalize_run,
     import_ai_results,
     run_classification,
@@ -1007,6 +1008,37 @@ def test_illegal_blank_summary_enters_the_same_workbook_for_user_decision() -> N
         assert "summary_empty" in state["components"][0]["anomalies"]
         assert state["decisions"][0]["decision_action"] == "isolate_invalid_input"
         assert state["decisions"][0]["resolved"] is False
+
+
+def test_real_cash_invalid_input_cannot_be_excluded_by_free_text() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        preflight = run_preflight(
+            [_write_illegal_summary_case(root)],
+            ("100000", "50000", "5000"),
+            output_parent=root,
+        )
+        confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+        mark_dictionary_complete(preflight.run_dir)
+        run_classification(preflight.run_dir)
+        state = json.loads(
+            (
+                preflight.run_dir / "计算留痕数据" / "运行状态.json"
+            ).read_text(encoding="utf-8-sig")
+        )
+        component_id = state["decisions"][0]["component_id"]
+
+        with pytest.raises(ValueError, match="不是排除依据"):
+            confirm_manual_decisions(
+                preflight.run_dir,
+                [
+                    {
+                        "component_id": component_id,
+                        "exclude": True,
+                        "basis": "无效输入",
+                    }
+                ],
+            )
         assert state["ai_tasks"] == []
         assert any(
             issue["kind"] == "警告" and "摘要为空" in issue["message"]

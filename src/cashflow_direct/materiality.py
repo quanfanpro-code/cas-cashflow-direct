@@ -110,3 +110,70 @@ def build_review_batches(
             )
         )
     return tuple(batches)
+
+
+def partition_review_batches(
+    unresolved: Sequence[UnresolvedDecision],
+    performance_cent: int,
+    all_leaf_item_ids: Sequence[str] = (),
+) -> tuple[tuple[ReviewBatch, ...], tuple[ReviewBatch, ...]]:
+    """把逐项重要复核与可整批处理的低金额事项物理分开。"""
+    low_items = tuple(
+        item
+        for item in unresolved
+        if item.decision_action == "low_amount_human_batch"
+        and not item.mandatory
+        and abs(item.cash_delta_cent) < performance_cent
+    )
+    low_ids = {item.component_id for item in low_items}
+    important_items = tuple(
+        item for item in unresolved if item.component_id not in low_ids
+    )
+    important = build_review_batches(
+        important_items,
+        performance_cent,
+        all_leaf_item_ids,
+    )
+
+    grouped: dict[tuple[str, ...], list[UnresolvedDecision]] = {}
+    for item in low_items:
+        key = (
+            item.decision_action,
+            item.cash_direction,
+            item.system_candidate_signature,
+            item.account_path_signature,
+            item.summary_business_signature,
+            item.evidence_status,
+            item.forced_check_reason,
+        )
+        grouped.setdefault(key, []).append(item)
+
+    low_batches: list[ReviewBatch] = []
+    for members in grouped.values():
+        first = members[0]
+        component_ids = tuple(item.component_id for item in members)
+        low_batches.append(
+            ReviewBatch(
+                batch_id=stable_id("LOW", *component_ids),
+                component_ids=component_ids,
+                proposed_item_code=first.system_item_id,
+                alternative_item_codes=tuple(sorted(first.alternative_item_ids)),
+                worst_case_impact_cent=sum(abs(item.cash_delta_cent) for item in members),
+                reason="七项批次条件完全相同，可在批次主行一次选择并应用到全部明细",
+                baseline_statement_amount_cent=sum(
+                    item.system_statement_amount_cent for item in members
+                ),
+                cash_delta_cent=sum(item.cash_delta_cent for item in members),
+                representative_summary=first.summary_pattern,
+                counterpart_group=first.counterpart_group,
+                source_locations=tuple(
+                    dict.fromkeys(
+                        location
+                        for item in members
+                        for location in item.source_locations
+                    )
+                ),
+                baseline_item_code=first.baseline_item_code,
+            )
+        )
+    return important, tuple(low_batches)

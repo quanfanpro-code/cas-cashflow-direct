@@ -29,6 +29,7 @@ SHEET_NAMES = (
     "现金流量表正表",
     "正表核对报告",
     "重要待复核事项",
+    "低金额批量处理",
     "疑似重复事项",
     "AI复核记录",
     "原表与系统决定差异",
@@ -89,6 +90,7 @@ REVIEW_HEADERS = (
     "异常",
     "批次最不利影响金额",
     "批次现金变化金额",
+    "行类型",
     "人工可选标准项目",
     "人工确认项目",
     "明确排除原因",
@@ -154,6 +156,7 @@ class WorkbookModel:
     dictionary_rows: tuple[Mapping[str, object], ...] = ()
     consistency_rows: tuple[Mapping[str, object], ...] = ()
     manual_adjustments: Mapping[str, int] = field(default_factory=dict)
+    low_amount_review_batches: tuple[ReviewBatch, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,9 +170,11 @@ def manual_adjustment_formula(
     review_last_row: int,
     duplicate_last_row: int,
     base_amount: float = 0,
+    low_amount_last_row: int = 2,
 ) -> str:
     review_end = max(2, review_last_row)
     duplicate_end = max(2, duplicate_last_row)
+    low_end = max(2, low_amount_last_row)
     system_adjustment = _review_col("系统项目调整(技术)", absolute=True)
     baseline_item = _review_col("原基线项目(技术)", absolute=True)
     system_item = _review_col("系统项目(技术)", absolute=True)
@@ -180,6 +185,9 @@ def manual_adjustment_formula(
         f'+SUMIFS(\'重要待复核事项\'!{system_adjustment}$2:{system_adjustment}${review_end},\'重要待复核事项\'!{baseline_item}$2:{baseline_item}${review_end},"{item_name}")'
         f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{item_name}")'
         f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{system_item}$2:{system_item}${review_end},"{item_name}",\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{USE_SYSTEM_RECOMMENDATION}")'
+        f'+SUMIFS(\'低金额批量处理\'!{system_adjustment}$2:{system_adjustment}${low_end},\'低金额批量处理\'!{baseline_item}$2:{baseline_item}${low_end},"{item_name}")'
+        f'+SUMIFS(\'低金额批量处理\'!{target_amount}$2:{target_amount}${low_end},\'低金额批量处理\'!{manual_item}$2:{manual_item}${low_end},"{item_name}")'
+        f'+SUMIFS(\'低金额批量处理\'!{target_amount}$2:{target_amount}${low_end},\'低金额批量处理\'!{system_item}$2:{system_item}${low_end},"{item_name}",\'低金额批量处理\'!{manual_item}$2:{manual_item}${low_end},"{USE_SYSTEM_RECOMMENDATION}")'
         f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_name}")'
     )
 
@@ -340,6 +348,179 @@ def _write_difference_rows(
     _configure_sheet(sheet, len(DIFFERENCE_HEADERS), len(rows) + 1)
 
 
+def _write_low_amount_review_sheet(
+    sheet,
+    model: WorkbookModel,
+    formats: Mapping[str, object],
+    item_name_by_id: Mapping[str, str],
+) -> int:
+    """低金额批次主行只判断一次，后续逐行展示现金分配明细。"""
+    for column, header in enumerate(REVIEW_HEADERS):
+        sheet.write(0, column, header, formats["header"])
+    batches = model.low_amount_review_batches
+    if not batches:
+        sheet.write(1, 0, "本期无低金额人工批量事项。", formats["note"])
+        _configure_sheet(sheet, len(REVIEW_HEADERS), 2)
+        return 2
+
+    trace_by_component: defaultdict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for trace_row in model.trace_rows:
+        component_id = str(
+            trace_row.get("业务组成编号(技术)")
+            or trace_row.get("component_id")
+            or ""
+        )
+        if component_id:
+            trace_by_component[component_id].append(trace_row)
+
+    helper_column = len(REVIEW_HEADERS) + 1
+    helper_column_name = xl_col_to_name(helper_column)
+    helper_row = 0
+    current_row = 1
+    numeric_headers = {
+        "借方",
+        "贷方",
+        "流量金额（原币）",
+        "本行分配现金变化",
+        "单笔金额",
+    }
+    for batch in batches:
+        master_row = current_row
+        excel_master_row = master_row + 1
+        selectable_ids = tuple(
+            dict.fromkeys(
+                item_id
+                for item_id in (batch.proposed_item_code, *batch.alternative_item_codes)
+                if item_id
+            )
+        )
+        selectable_names = tuple(item_name_by_id[item_id] for item_id in selectable_ids)
+        options = (USE_SYSTEM_RECOMMENDATION, *selectable_names)
+        option_start = helper_row + 1
+        for option in options:
+            sheet.write(helper_row, helper_column, option, formats["text"])
+            helper_row += 1
+        list_range = f"${helper_column_name}${option_start}:${helper_column_name}${helper_row}"
+        proposed_name = item_name_by_id.get(batch.proposed_item_code, "尚未形成系统候选")
+        master_values = {
+            "本行摘要": batch.representative_summary or "批次汇总",
+            "本行完整对方科目路径": batch.counterpart_group or "见下方明细",
+            "本行分配现金变化": batch.cash_delta_cent / 100,
+            "单笔金额": abs(batch.cash_delta_cent) / 100,
+            "批次最不利影响金额": batch.worst_case_impact_cent / 100,
+            "批次现金变化金额": batch.cash_delta_cent / 100,
+            "行类型": "批次判断",
+            "系统候选项目": proposed_name,
+            "判断理由": batch.reason,
+            "人工可选标准项目": "、".join(selectable_names),
+            "批次编号(技术)": batch.batch_id,
+            "系统项目(技术)": proposed_name,
+            "系统基线金额(技术)": batch.baseline_statement_amount_cent / 100,
+            "包含笔数(技术)": len(batch.component_ids),
+            "业务组成编号(技术)": "、" + "、".join(batch.component_ids) + "、",
+            "原基线项目(技术)": item_name_by_id.get(batch.baseline_item_code, ""),
+        }
+        money_headers = numeric_headers | {
+            "批次最不利影响金额",
+            "批次现金变化金额",
+            "系统基线金额(技术)",
+        }
+        for header, value in master_values.items():
+            sheet.write(
+                master_row,
+                REVIEW_HEADERS.index(header),
+                value,
+                formats["money"] if header in money_headers else formats["text"],
+            )
+        sheet.write_blank(master_row, REVIEW_HEADERS.index("人工确认项目"), None, formats["input"])
+        sheet.data_validation(
+            master_row,
+            REVIEW_HEADERS.index("人工确认项目"),
+            master_row,
+            REVIEW_HEADERS.index("人工确认项目"),
+            {"validate": "list", "source": f"='低金额批量处理'!{list_range}"},
+        )
+        manual_col = _review_col("人工确认项目")
+        system_col = _review_col("系统项目(技术)")
+        baseline_col = _review_col("系统基线金额(技术)")
+        baseline_item_col = _review_col("原基线项目(技术)")
+        cash_change_col = _review_col("批次现金变化金额")
+        effective_item = (
+            f'IF({manual_col}{excel_master_row}="{USE_SYSTEM_RECOMMENDATION}",'
+            f'{system_col}{excel_master_row},{manual_col}{excel_master_row})'
+        )
+        sheet.write_formula(
+            master_row,
+            REVIEW_HEADERS.index("系统项目调整(技术)"),
+            f'=IF(OR({manual_col}{excel_master_row}="",{baseline_item_col}{excel_master_row}=""),0,'
+            f'IF({effective_item}<>{baseline_item_col}{excel_master_row},-{baseline_col}{excel_master_row},0))',
+            formats["money"],
+            0,
+        )
+        target_formula = "0"
+        for item_id, item_name in reversed(tuple(zip(selectable_ids, selectable_names, strict=True))):
+            direction = model.rules.item_by_id[item_id].normal_direction
+            amount = f"{cash_change_col}{excel_master_row}" if direction == "inflow" else f"-{cash_change_col}{excel_master_row}"
+            target_formula = f'IF({manual_col}{excel_master_row}="{item_name}",{amount},{target_formula})'
+        if batch.proposed_item_code:
+            proposed_direction = model.rules.item_by_id[batch.proposed_item_code].normal_direction
+            proposed_amount = f"{cash_change_col}{excel_master_row}" if proposed_direction == "inflow" else f"-{cash_change_col}{excel_master_row}"
+            target_formula = f'IF({manual_col}{excel_master_row}="{USE_SYSTEM_RECOMMENDATION}",{proposed_amount},{target_formula})'
+        sheet.write_formula(master_row, REVIEW_HEADERS.index("目标项目金额(技术)"), f"={target_formula}", formats["money"], 0)
+        sheet.write_formula(
+            master_row,
+            REVIEW_HEADERS.index("人工处理状态"),
+            f'=IF({manual_col}{excel_master_row}="","等待人工处理","人工处理完成")',
+            formats["pending"],
+            "等待人工处理",
+        )
+        current_row += 1
+
+        for component_id in batch.component_ids:
+            for trace_row in trace_by_component.get(component_id, ()):
+                detail_values = {
+                    header: trace_row.get(header, "")
+                    for header in REVIEW_HEADERS
+                    if header in trace_row
+                }
+                detail_values.update(
+                    {
+                        "行类型": "现金分配明细",
+                        "批次编号(技术)": batch.batch_id,
+                        "业务组成编号(技术)": component_id,
+                    }
+                )
+                for header, value in detail_values.items():
+                    if header in numeric_headers and not isinstance(value, (int, float)):
+                        value = ""
+                    sheet.write(
+                        current_row,
+                        REVIEW_HEADERS.index(header),
+                        _display_value(header, value),
+                        formats["money"] if header in numeric_headers and isinstance(value, (int, float)) else formats["text"],
+                    )
+                sheet.write_formula(
+                    current_row,
+                    REVIEW_HEADERS.index("人工确认项目"),
+                    f"={manual_col}{excel_master_row}",
+                    formats["text"],
+                    "",
+                )
+                sheet.write(current_row, REVIEW_HEADERS.index("人工处理状态"), "明细随批次主行生效", formats["text"])
+                current_row += 1
+
+    sheet.autofilter(0, 0, current_row - 1, len(REVIEW_HEADERS) - 1)
+    for column, header in enumerate(REVIEW_HEADERS):
+        if header.endswith("(技术)"):
+            sheet.set_column(column, column, 20, None, {"hidden": True})
+    sheet.set_column(helper_column, helper_column, None, None, {"hidden": True})
+    sheet.set_column("A:D", 20)
+    sheet.set_column("E:AF", 22)
+    _configure_sheet(sheet, len(REVIEW_HEADERS), current_row)
+    sheet.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
+    return max(2, current_row)
+
+
 def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     target = Path(output_path)
     if target.exists():
@@ -384,6 +565,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     )
     trace_last = max(2, len(trace_rows) + 1)
     try:
+        low_amount_last = _write_low_amount_review_sheet(
+            sheets["低金额批量处理"],
+            model,
+            formats,
+            item_name_by_id,
+        )
         status = sheets["使用说明与状态"]
         status.set_default_row(18)
         status.set_row(0, 24)
@@ -415,6 +602,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             status.write("B3", model.overall_status, formats["error"])
         elif (
             model.review_batches
+            or model.low_amount_review_batches
             or model.duplicate_groups
             or reconciliation_complete
         ):
@@ -426,6 +614,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 pending_terms.append(
                     f'COUNTIF(\'重要待复核事项\'!{review_status_col}2:{review_status_col}{review_end},"等待人工处理")'
                 )
+            if model.low_amount_review_batches:
+                low_status_col = _review_col("人工处理状态")
+                pending_terms.append(
+                    f'COUNTIF(\'低金额批量处理\'!{low_status_col}2:{low_status_col}{low_amount_last},"等待人工处理")'
+                )
             if model.duplicate_groups:
                 pending_terms.append(
                     f'COUNTIF(\'疑似重复事项\'!H2:H{duplicate_end},"无效选择")'
@@ -436,10 +629,10 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 )
             completed_value = '"最终可使用"'
             if reconciliation_complete:
-                difference_row = len(model.cash_scope_rows) + 6
+                bridge_row = len(model.cash_scope_rows) + 7
                 completed_value = (
-                    f'IF(\'现金范围与现金流量表与货币资金变动的勾稽核对\'!C{difference_row}=0,'
-                    '"最终可使用","草稿：现金流量表与货币资金变动的勾稽核对存在差异")'
+                    f'IF(\'现金范围与现金流量表与货币资金变动的勾稽核对\'!B{bridge_row}="最终现金流量表勾稽成功",'
+                    '"最终可使用","草稿：现金流量表尚待分类或现金变动桥接存在差异")'
                 )
             condition = "+".join(pending_terms) or "0"
             status.write_formula(
@@ -466,6 +659,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         status.print_area("A1:D20")
 
         review = sheets["重要待复核事项"]
+        review_detail_count = 0
         for column, header in enumerate(REVIEW_HEADERS):
             review.write(0, column, header, formats["header"])
         helper_column = len(REVIEW_HEADERS) + 1
@@ -525,7 +719,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 )
                 selectable_names = tuple(item_name_by_id[item_id] for item_id in selectable_ids)
                 recommendation_option = (USE_SYSTEM_RECOMMENDATION,)
-                options = (*recommendation_option, *selectable_names, "明确排除")
+                options = (*recommendation_option, *selectable_names)
                 if options in helper_ranges:
                     continue
                 start_row = helper_row + 1
@@ -549,7 +743,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 selectable_names = tuple(item_name_by_id[item_id] for item_id in selectable_ids)
                 recommendation_option = (USE_SYSTEM_RECOMMENDATION,)
                 list_range, choice_range = helper_ranges[
-                    (*recommendation_option, *selectable_names, "明确排除")
+                    (*recommendation_option, *selectable_names)
                 ]
                 source_fallbacks = tuple(
                     location.split("|", 2)
@@ -586,23 +780,28 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "强制检查": review_fact(batch, "强制检查"),
                     "唯一动作": review_fact(batch, "唯一动作"),
                     "异常": review_fact(batch, "异常"),
+                    "行类型": "批次判断",
                     "人工可选标准项目": (
                         "随基础项目自动确定（无需重复选择）"
                         if batch.follows_component_id
-                        else "、".join((*selectable_names, "明确排除"))
+                        else "、".join(selectable_names)
                     ),
                 }
                 for header, value in facts.items():
+                    numeric_fact_headers = {
+                        "借方",
+                        "贷方",
+                        "流量金额（原币）",
+                        "本行分配现金变化",
+                        "单笔金额",
+                    }
+                    if header in numeric_fact_headers and not isinstance(
+                        value, (int, float)
+                    ):
+                        value = ""
                     cell_format = (
                         formats["money"]
-                        if header
-                        in {
-                            "借方",
-                            "贷方",
-                            "流量金额（原币）",
-                            "本行分配现金变化",
-                            "单笔金额",
-                        }
+                        if header in numeric_fact_headers
                         and isinstance(value, (int, float))
                         else formats["text"]
                     )
@@ -764,7 +963,64 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                             "source": f"='重要待复核事项'!{list_range}",
                         },
                     )
-            review.autofilter(0, 0, len(model.review_batches), len(REVIEW_HEADERS) - 1)
+            detail_row_index = len(model.review_batches) + 1
+            detail_numeric_headers = {
+                "借方",
+                "贷方",
+                "流量金额（原币）",
+                "本行分配现金变化",
+                "单笔金额",
+            }
+            for master_excel_row, batch in enumerate(model.review_batches, 2):
+                for component_id in batch.component_ids:
+                    for trace_row in trace_by_component.get(component_id, ()):
+                        detail_values = {
+                            header: trace_row.get(header, "")
+                            for header in REVIEW_HEADERS
+                            if header in trace_row
+                        }
+                        detail_values.update(
+                            {
+                                "行类型": "现金分配明细",
+                                "批次编号(技术)": batch.batch_id,
+                                "业务组成编号(技术)": component_id,
+                            }
+                        )
+                        for header, value in detail_values.items():
+                            if header in detail_numeric_headers and not isinstance(
+                                value, (int, float)
+                            ):
+                                value = ""
+                            review.write(
+                                detail_row_index,
+                                REVIEW_HEADERS.index(header),
+                                _display_value(header, value),
+                                formats["money"]
+                                if header in detail_numeric_headers
+                                and isinstance(value, (int, float))
+                                else formats["text"],
+                            )
+                        review.write_formula(
+                            detail_row_index,
+                            REVIEW_HEADERS.index("人工确认项目"),
+                            f"={_review_col('人工确认项目')}{master_excel_row}",
+                            formats["text"],
+                            "",
+                        )
+                        review.write(
+                            detail_row_index,
+                            REVIEW_HEADERS.index("人工处理状态"),
+                            "明细随批次主行生效",
+                            formats["text"],
+                        )
+                        detail_row_index += 1
+                        review_detail_count += 1
+            review.autofilter(
+                0,
+                0,
+                len(model.review_batches) + review_detail_count,
+                len(REVIEW_HEADERS) - 1,
+            )
         else:
             review.write(1, 0, "本期无重大剩余不确定事项，无需人工复核。", formats["note"])
         review.set_column("A:D", 20)
@@ -794,7 +1050,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             if header.endswith("(技术)") or header in hidden_review_headers:
                 review.set_column(column, column, 20, None, {"hidden": True})
         review.set_column(helper_column, helper_column, None, None, {"hidden": True})
-        _configure_sheet(review, len(REVIEW_HEADERS), len(model.review_batches) + 1)
+        _configure_sheet(
+            review,
+            len(REVIEW_HEADERS),
+            len(model.review_batches) + review_detail_count + 1,
+        )
         review.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
         duplicate = sheets["疑似重复事项"]
@@ -906,6 +1166,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         review_last,
                         duplicate_last,
                         model.manual_adjustments.get(item.item_id, 0) / 100,
+                        low_amount_last,
                     )
                     + trace_manual_adjustment_terms(
                         item.name,
@@ -1047,12 +1308,40 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
 
         cash_rows = list(model.cash_scope_rows)
         if model.reconciliation is not None:
+            legacy_reconciliation = model.reconciliation.bridge_difference_cent is None
+            classified_net_cent = (
+                int(model.reconciliation.net_cash_cent or 0)
+                - int(model.reconciliation.fx_cent or 0)
+                if legacy_reconciliation
+                else model.reconciliation.classified_net_cent
+            )
+            pending_net_cent = (
+                0 if legacy_reconciliation else model.reconciliation.pending_net_cent
+            )
+            confirmed_adjustment_cent = (
+                0
+                if legacy_reconciliation
+                else model.reconciliation.confirmed_adjustment_cent
+            )
+            bridge_difference_cent = (
+                model.reconciliation.difference_cent
+                if legacy_reconciliation
+                else model.reconciliation.bridge_difference_cent
+            )
+            final_difference_cent = (
+                model.reconciliation.difference_cent
+                if legacy_reconciliation
+                else model.reconciliation.final_difference_cent
+            )
             for project, amount in (
                 ("期初现金及现金等价物余额", model.reconciliation.opening_cent),
+                ("已分类现金流量表净额", classified_net_cent),
+                ("尚待分类现金净额", pending_net_cent),
                 ("汇率变动影响", model.reconciliation.fx_cent),
-                ("本期现金净增加额", model.reconciliation.net_cash_cent),
+                ("已确认调整", confirmed_adjustment_cent),
+                ("现金变动桥接差异", bridge_difference_cent),
+                ("现金流量表最终差异", final_difference_cent),
                 ("期末现金及现金等价物余额", model.reconciliation.closing_cent),
-                ("勾稽差异", model.reconciliation.difference_cent),
             ):
                 cash_rows.append(
                     {
@@ -1065,27 +1354,58 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         _write_dict_rows(cash_sheet, tuple(cash_rows), formats, "现金范围尚未确认。")
         if reconciliation_complete:
             opening_row = len(model.cash_scope_rows) + 2
-            net_row = len(model.cash_scope_rows) + 4
-            closing_row = len(model.cash_scope_rows) + 5
-            difference_row = len(model.cash_scope_rows) + 6
+            classified_row = len(model.cash_scope_rows) + 3
+            pending_row = len(model.cash_scope_rows) + 4
+            fx_row = len(model.cash_scope_rows) + 5
+            adjustment_row = len(model.cash_scope_rows) + 6
+            bridge_row = len(model.cash_scope_rows) + 7
+            final_row = len(model.cash_scope_rows) + 8
+            closing_row = len(model.cash_scope_rows) + 9
             cash_sheet.write_formula(
-                net_row - 1,
+                classified_row - 1,
                 2,
-                f"='现金流量表正表'!F{excel_row_by_id['NET-CASH']}",
+                f"='现金流量表正表'!F{excel_row_by_id['NET-CASH']}-'现金流量表正表'!F{excel_row_by_id['FX']}",
                 formats["money"],
-                model.reconciliation.net_cash_cent / 100,
+                classified_net_cent / 100,
+            )
+            review_cash_change = _review_col("批次现金变化金额", absolute=True)
+            review_status = _review_col("人工处理状态", absolute=True)
+            review_baseline = _review_col("原基线项目(技术)", absolute=True)
+            review_end = max(2, len(model.review_batches) + 1)
+            low_end = max(2, low_amount_last)
+            pending_formula = (
+                f'=SUMIFS(\'重要待复核事项\'!{review_cash_change}$2:{review_cash_change}${review_end},'
+                f'\'重要待复核事项\'!{review_baseline}$2:{review_baseline}${review_end},"",'
+                f'\'重要待复核事项\'!{review_status}$2:{review_status}${review_end},"等待人工处理")'
+                f'+SUMIFS(\'低金额批量处理\'!{review_cash_change}$2:{review_cash_change}${low_end},'
+                f'\'低金额批量处理\'!{review_baseline}$2:{review_baseline}${low_end},"",'
+                f'\'低金额批量处理\'!{review_status}$2:{review_status}${low_end},"等待人工处理")'
             )
             cash_sheet.write_formula(
-                difference_row - 1,
+                pending_row - 1,
                 2,
-                f'=ROUND(C{closing_row}-C{opening_row}-C{net_row},2)',
+                pending_formula,
                 formats["money"],
-                model.reconciliation.difference_cent / 100,
+                pending_net_cent / 100,
             )
             cash_sheet.write_formula(
-                difference_row - 1,
+                bridge_row - 1,
+                2,
+                f'=ROUND(C{closing_row}-C{opening_row}-C{classified_row}-C{pending_row}-C{fx_row}-C{adjustment_row},2)',
+                formats["money"],
+                int(bridge_difference_cent or 0) / 100,
+            )
+            cash_sheet.write_formula(
+                final_row - 1,
+                2,
+                f'=ROUND(C{closing_row}-C{opening_row}-C{classified_row}-C{fx_row}-C{adjustment_row},2)',
+                formats["money"],
+                int(final_difference_cent or 0) / 100,
+            )
+            cash_sheet.write_formula(
+                bridge_row - 1,
                 1,
-                f'=IF(C{difference_row}=0,"现金流量表与货币资金变动的勾稽核对：相符","现金流量表与货币资金变动的勾稽核对：存在差异")',
+                f'=IF(C{bridge_row}<>0,"现金变动桥接存在无法解释差异",IF(C{final_row}=0,"最终现金流量表勾稽成功","现金变动桥接相符、现金流量表尚待分类"))',
                 formats["pending"],
                 model.reconciliation.status,
             )

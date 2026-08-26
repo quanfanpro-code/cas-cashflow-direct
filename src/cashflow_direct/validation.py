@@ -69,6 +69,13 @@ def validate_classification(
         if item.excluded:
             if not item.reason.strip():
                 errors.append(f"排除业务缺少排除原因：{item.component_id}")
+            if not item.exclusion_type:
+                errors.append(f"排除业务缺少受控排除类型：{item.component_id}")
+            if (
+                item.exclusion_type == "confirmed_adjustment"
+                and item.confirmed_adjustment_cent == 0
+            ):
+                errors.append(f"确认调整缺少调整桥金额：{item.component_id}")
             continue
         if item.resolved and not item.system_item_id:
             errors.append(f"已决定业务缺少正表项目：{item.component_id}")

@@ -90,6 +90,12 @@ class ClassificationDecision:
     candidate_item_ids: tuple[str, ...] = ()
     summary_candidate_item_ids: tuple[str, ...] | None = None
     account_path_candidate_item_ids: tuple[str, ...] | None = None
+    summary_preferred_item_id: str = ""
+    account_path_preferred_item_id: str = ""
+    fallback_source: str = ""
+    fallback_step: str = ""
+    exclusion_type: str = ""
+    confirmed_adjustment_cent: int = 0
     original_item_state: str = ""
     summary_quality: int = 0
     account_path_quality: int = 0
@@ -186,6 +192,12 @@ class UnresolvedDecision:
     mandatory: bool = False
     baseline_item_code: str = ""
     follows_component_id: str = ""
+    decision_action: str = "human_decision"
+    system_candidate_signature: str = ""
+    account_path_signature: str = ""
+    summary_business_signature: str = ""
+    evidence_status: str = ""
+    forced_check_reason: str = ""
 
 
 def validate_materiality_order(amounts: MaterialityAmounts) -> MaterialityAmounts:

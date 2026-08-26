@@ -732,6 +732,7 @@ def validate_summary_batch(
         if (
             result.status in {"rule_complete", "agent_complete"}
             and result.quality is EvidenceQuality.INVALID
+            and not result.spans
         ):
             raise ValueError("整批摘要语义退化：完成状态没有形成有效语义证据")
         if result.status == "agent_insufficient" and not result.unexplained_spans:

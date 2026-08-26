@@ -50,10 +50,11 @@ def validate() -> tuple[str, ...]:
     for path in runtime_files:
         if path.suffix.lower() in TEXT_SUFFIXES:
             content = path.read_bytes()
-            if not content.startswith(bytes.fromhex("EFBBBF")):
-                errors.append(f"中文文本缺少 UTF-8 BOM：{path.relative_to(ROOT)}")
+            try:
+                text = content.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                errors.append(f"文本不是有效 UTF-8：{path.relative_to(ROOT)}：{exc}")
                 continue
-            text = content.decode("utf-8-sig")
             if "\ufffd" in text:
                 errors.append(f"存在 Unicode 替换字符：{path.relative_to(ROOT)}")
             for token in FORBIDDEN_TEXT:

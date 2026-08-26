@@ -55,24 +55,15 @@ def _independent_sources(
             f"{decision.vat_base_component_id}共用唯一现金来源",
             f"基础项目决定：{decision.system_item_name or '明确排除'}",
         )
-    sources: list[str] = []
-    if decision.summary_quality > 0:
-        sources.append(
-            f"摘要“{entry.summary or '摘要为空'}”；{_QUALITY_TEXT[decision.summary_quality]}"
-        )
-    if decision.account_path_quality > 0 and (
-        not sources or decision.sources_independent
-    ):
-        sources.append(
-            "完整对方科目路径“"
-            + ("、".join(component.counterpart_accounts) or "路径为空")
-            + f"”；{_QUALITY_TEXT[decision.account_path_quality]}"
-        )
-    if not sources:
-        return "无有效证据", "无"
-    if len(sources) == 1:
-        return sources[0], "无"
-    return sources[0], sources[1]
+    account_path_source = (
+        "完整对方科目路径“"
+        + ("、".join(component.counterpart_accounts) or "路径为空")
+        + f"”；{_QUALITY_TEXT[decision.account_path_quality]}"
+    )
+    summary_source = (
+        f"摘要“{entry.summary or '摘要为空'}”；{_QUALITY_TEXT[decision.summary_quality]}"
+    )
+    return account_path_source, summary_source
 
 
 def _score_description(decision: ClassificationDecision) -> str:
