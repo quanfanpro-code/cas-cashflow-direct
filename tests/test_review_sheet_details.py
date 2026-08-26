@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 
 from cashflow_direct.models import ReviewBatch
 from cashflow_direct.workbook_output import (
+    REVIEW_HEADERS,
     USE_SYSTEM_FALLBACK,
     build_output_workbook,
     calculate_manual_adjustments,
@@ -18,7 +19,7 @@ from tests.fixture_factory import workbook_model
 def trace_rows() -> tuple[dict[str, object], ...]:
     common = {
         "业务组成编号(技术)": "RC-1",
-        "日期": "2025-03-22",
+        "日期": "2025-03-22T00:00:00",
         "凭证字": "记",
         "凭证号": "146",
         "本行完整对方科目路径": "主营业务收入",
@@ -96,6 +97,16 @@ def test_fallback_default_is_valid_and_one_business_choice_updates_all_real_rows
         try:
             sheet = workbook["低金额系统兜底明细"]
             headers = [cell.value for cell in sheet[1]]
+            assert [sheet.cell(row, 1).value for row in (2, 3)] == ["2025-03-22", "2025-03-22"]
+            hidden_ranges = tuple(
+                (dimension.min, dimension.max)
+                for dimension in sheet.column_dimensions.values()
+                if dimension.hidden
+            )
+            for column in range(1, len(REVIEW_HEADERS) + 1):
+                if sheet.cell(1, column).value is None:
+                    assert any(start <= column <= end for start, end in hidden_ranges)
+            assert sheet.max_column == len(REVIEW_HEADERS) + 1
             choice_col = headers.index("人工改选项目") + 1
             final_col = headers.index("最终采用项目") + 1
             first_choice = sheet.cell(2, choice_col)

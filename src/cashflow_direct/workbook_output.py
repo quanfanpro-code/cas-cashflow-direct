@@ -378,6 +378,11 @@ def _write_low_amount_review_sheet(
     """逐行展示低金额系统兜底真实明细，并允许按同一业务一次改选。"""
     for column, header in enumerate(FALLBACK_HEADERS):
         sheet.write(0, column, header, formats["header"])
+    sheet.set_column("A:D", 20)
+    sheet.set_column("E:AF", 22)
+    for column, (header, displayed_header) in enumerate(zip(REVIEW_HEADERS, FALLBACK_HEADERS, strict=True)):
+        if header.endswith("(技术)") or displayed_header is None:
+            sheet.set_column(column, column, 20, None, {"hidden": True})
     batches = model.low_amount_fallback_batches
     if not batches:
         sheet.write(1, 0, "本期无低金额系统兜底事项。", formats["note"])
@@ -394,7 +399,7 @@ def _write_low_amount_review_sheet(
         if component_id:
             trace_by_component[component_id].append(trace_row)
 
-    helper_column = len(REVIEW_HEADERS) + 1
+    helper_column = len(REVIEW_HEADERS)
     helper_column_name = xl_col_to_name(helper_column)
     helper_row = 0
     current_row = 1
@@ -464,7 +469,7 @@ def _write_low_amount_review_sheet(
             sheet.write(
                 master_row,
                 REVIEW_HEADERS.index(header),
-                value,
+                _display_value(header, value),
                 formats["money"] if header in money_headers else formats["text"],
             )
         sheet.write(master_row, REVIEW_HEADERS.index("人工确认项目"), USE_SYSTEM_FALLBACK, formats["input"])
@@ -546,12 +551,7 @@ def _write_low_amount_review_sheet(
             current_row += 1
 
     sheet.autofilter(0, 0, current_row - 1, len(REVIEW_HEADERS) - 1)
-    for column, (header, displayed_header) in enumerate(zip(REVIEW_HEADERS, FALLBACK_HEADERS, strict=True)):
-        if header.endswith("(技术)") or displayed_header is None:
-            sheet.set_column(column, column, 20, None, {"hidden": True})
     sheet.set_column(helper_column, helper_column, None, None, {"hidden": True})
-    sheet.set_column("A:D", 20)
-    sheet.set_column("E:AF", 22)
     _configure_sheet(sheet, len(REVIEW_HEADERS), current_row)
     sheet.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
     return max(2, current_row)
