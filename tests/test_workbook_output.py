@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
@@ -44,6 +44,7 @@ EXPECTED_SHEETS = [
     "全量分类留痕",
     "科目语义词典",
     "同类检查",
+    "分类汇总视图",
     "输入识别与字段映射",
 ]
 

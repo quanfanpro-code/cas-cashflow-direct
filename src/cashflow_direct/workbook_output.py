@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -109,6 +109,9 @@ IMPORTANT_REVIEW_HEADERS = tuple(
     for header in REVIEW_HEADERS
 )
 _FALLBACK_HEADER_RENAMES = dict(_OUTPUT_POLICY["fallback_header_renames"])
+_FALLBACK_DEFAULT_HIDDEN_HEADERS = frozenset(
+    _OUTPUT_POLICY["fallback_default_hidden_headers"]
+)
 FALLBACK_HEADERS = tuple(
     _FALLBACK_HEADER_RENAMES.get(header, None if header in _REMOVED_REVIEW_HEADERS else header)
     for header in REVIEW_HEADERS
@@ -369,6 +372,119 @@ def _write_difference_rows(
     _configure_sheet(sheet, len(DIFFERENCE_HEADERS), len(rows) + 1)
 
 
+def _escape_excel_criteria(text: str) -> str:
+    return text.replace("~", "~~").replace("*", "~*").replace("?", "~?")
+
+
+_SUMMARY_VIEW = _OUTPUT_POLICY["summary_view"]
+
+
+def _write_summary_view_sheet(
+    sheet,
+    model: WorkbookModel,
+    formats: Mapping[str, object],
+    trace_headers: Sequence[str],
+    trace_row_count: int,
+) -> None:
+    """分类汇总视图：按 项目×标准一级科目×方向 汇总全量留痕，纯展示，不产生门禁。"""
+    source = _SUMMARY_VIEW["source_columns"]
+    # 生产链路 build_trace_rows 无条件写入三列；只有极简合成模型才会缺列，此时输出空视图。
+    has_source_columns = bool(trace_row_count) and all(
+        header in trace_headers for header in source.values()
+    )
+    leaf_items = sorted(
+        (item for item in model.rules.statement_items if item.is_leaf),
+        key=lambda item: item.display_order,
+    )
+    leaf_names = {item.name for item in leaf_items}
+    combos: dict[tuple[str, str, str], list[float]] = {}
+    for trace_row in model.trace_rows if has_source_columns else ():
+        item_name = str(trace_row.get(source["item"]) or "")
+        amount = trace_row.get(source["amount"])
+        if item_name not in leaf_names or not isinstance(amount, (int, float)) or amount == 0:
+            continue
+        account = str(trace_row.get(source["account"]) or "")
+        direction = "流入" if amount > 0 else "流出"
+        bucket = combos.setdefault((item_name, account, direction), [0, 0.0])
+        bucket[0] += 1
+        bucket[1] += amount
+
+    sheet.write(0, 0, "分类汇总视图", formats["title"])
+    sheet.write(
+        1,
+        0,
+        "本表纯展示：按 现流项目×标准一级科目×现金方向 汇总全量分类留痕的笔数与合计现金变化，"
+        "不产生复核义务、动作、门禁或状态影响。每个项目末尾的校验行＝全量留痕按项目独立合计−本表组合小计，"
+        "差额为零即视图无漏行；人工改选后自动联动，组合排序为出表时预排，不随联动重排。",
+        formats["note"],
+    )
+    headers = tuple(_SUMMARY_VIEW["columns"])
+    for column, header in enumerate(headers):
+        sheet.write(2, column, header, formats["header"])
+
+    current_row = 3
+    if has_source_columns:
+        item_col = xl_col_to_name(trace_headers.index(source["item"]))
+        account_col = xl_col_to_name(trace_headers.index(source["account"]))
+        amount_col = xl_col_to_name(trace_headers.index(source["amount"]))
+        last = trace_row_count + 1
+        item_range = f"'全量分类留痕'!${item_col}$2:${item_col}${last}"
+        account_range = f"'全量分类留痕'!${account_col}$2:${account_col}${last}"
+        amount_range = f"'全量分类留痕'!${amount_col}$2:${amount_col}${last}"
+    for item in leaf_items:
+        project_combos = sorted(
+            ((key, value) for key, value in combos.items() if key[0] == item.name),
+            key=lambda pair: (-abs(pair[1][1]), pair[0][1], pair[0][2]),
+        )
+        block_start = current_row
+        for (item_name, account, direction), (count, total) in project_combos:
+            sign_criteria = ">0" if direction == "流入" else "<0"
+            criteria = (
+                f'{item_range},"{_escape_excel_criteria(item_name)}",'
+                f'{account_range},"{_escape_excel_criteria(account)}",'
+                f'{amount_range},"{sign_criteria}"'
+            )
+            sheet.write(current_row, 0, item_name, formats["text"])
+            sheet.write(current_row, 1, account, formats["text"])
+            sheet.write(current_row, 2, direction, formats["text"])
+            sheet.write_formula(
+                current_row, 3, f"=COUNTIFS({criteria})", formats["text"], count
+            )
+            sheet.write_formula(
+                current_row,
+                4,
+                f"=SUMIFS({amount_range},{criteria})",
+                formats["money"],
+                round(total, 2),
+            )
+            current_row += 1
+        block_end = current_row - 1
+        subtotal = f"SUM(E{block_start + 1}:E{block_end + 1})" if project_combos else "0"
+        sheet.write(current_row, 0, item.name, formats["text"])
+        sheet.write(current_row, 1, "校验：与留痕按项目合计差额", formats["text"])
+        if has_source_columns:
+            escaped_name = _escape_excel_criteria(item.name)
+            sheet.write_formula(
+                current_row,
+                4,
+                f'=ROUND(SUMIFS({amount_range},{item_range},"{escaped_name}")-{subtotal},2)',
+                formats["money"],
+                0,
+            )
+        else:
+            sheet.write_number(current_row, 4, 0, formats["money"])
+        current_row += 1
+
+    sheet.set_column("A:A", 34)
+    sheet.set_column("B:B", 30)
+    sheet.set_column("C:C", 10)
+    sheet.set_column("D:E", 18)
+    sheet.autofilter(2, 0, max(3, current_row - 1), len(headers) - 1)
+    _configure_sheet(sheet, len(headers), current_row)
+    sheet.freeze_panes(3, 0)
+    sheet.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
+
+
 def _write_low_amount_review_sheet(
     sheet,
     model: WorkbookModel,
@@ -381,7 +497,7 @@ def _write_low_amount_review_sheet(
     sheet.set_column("A:D", 20)
     sheet.set_column("E:AF", 22)
     for column, (header, displayed_header) in enumerate(zip(REVIEW_HEADERS, FALLBACK_HEADERS, strict=True)):
-        if header.endswith("(技术)") or displayed_header is None:
+        if header.endswith("(技术)") or displayed_header is None or header in _FALLBACK_DEFAULT_HIDDEN_HEADERS:
             sheet.set_column(column, column, 20, None, {"hidden": True})
     batches = model.low_amount_fallback_batches
     if not batches:
@@ -1675,6 +1791,13 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             model.consistency_rows,
             formats,
             "本期未发现相同原始来源却形成不同项目的事项。",
+        )
+        _write_summary_view_sheet(
+            sheets["分类汇总视图"],
+            model,
+            formats,
+            trace_headers,
+            len(trace_rows),
         )
         _write_dict_rows(sheets["输入识别与字段映射"], model.mapping_rows, formats, "没有字段映射记录。")
         sheets["输入识别与字段映射"].hide()

@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from cashflow_direct.models import ReviewBatch
 from cashflow_direct.workbook_output import (
@@ -65,7 +66,7 @@ def test_manual_sheets_only_show_real_rows_and_each_amount_is_numeric() -> None:
         build_output_workbook(model, path)
         workbook = load_workbook(path, data_only=False)
         try:
-            assert len(workbook.sheetnames) == 13
+            assert len(workbook.sheetnames) == 14
             assert "低金额系统兜底明细" in workbook.sheetnames
             assert "低金额批量处理" not in workbook.sheetnames
             for sheet_name in ("重要待复核事项", "低金额系统兜底明细"):
@@ -118,6 +119,54 @@ def test_fallback_default_is_valid_and_one_business_choice_updates_all_real_rows
             assert sheet.cell(2, final_col).data_type == "f"
             assert sheet.cell(3, final_col).data_type == "f"
             assert sheet.data_validations.dataValidation
+        finally:
+            workbook.close()
+
+
+def test_fallback_sheet_hides_advisor_and_technical_columns_by_default() -> None:
+    model = replace(
+        workbook_model(0, 0),
+        low_amount_fallback_batches=(fallback_batch(),),
+        trace_rows=trace_rows(),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "兜底隐藏列.xlsx"
+        build_output_workbook(model, path)
+        workbook = load_workbook(path)
+        try:
+            sheet = workbook["低金额系统兜底明细"]
+            headers = [cell.value for cell in sheet[1]]
+            hidden_ranges = tuple(
+                (dimension.min, dimension.max)
+                for dimension in sheet.column_dimensions.values()
+                if dimension.hidden
+            )
+
+            def is_hidden(column: int) -> bool:
+                return any(start <= column <= end for start, end in hidden_ranges)
+
+            expected_hidden = (
+                "人工依据",
+                "外部资料位置",
+                "处理人",
+                "处理时间",
+                "系统项目(技术)",
+                "系统基线金额(技术)",
+                "系统项目调整(技术)",
+                "目标项目金额(技术)",
+                "包含笔数(技术)",
+                "业务组成编号(技术)",
+                "原基线项目(技术)",
+            )
+            for header in expected_hidden:
+                assert header in headers
+                assert is_hidden(headers.index(header) + 1), f"{header} 应默认隐藏"
+            removed_index = REVIEW_HEADERS.index("批次编号(技术)")
+            assert headers[removed_index] is None
+            assert is_hidden(removed_index + 1), "批次编号(技术) 应默认隐藏"
+            for visible in ("人工改选项目", "最终采用项目", "系统兜底项目"):
+                assert not is_hidden(headers.index(visible) + 1), f"{visible} 不应隐藏"
         finally:
             workbook.close()
 

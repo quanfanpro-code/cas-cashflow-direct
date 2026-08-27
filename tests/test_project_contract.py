@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import subprocess
@@ -48,7 +48,8 @@ class ProjectContractTests(unittest.TestCase):
         for path in documents:
             text = path.read_text(encoding="utf-8-sig")
             current_text = text.split("## 🗓️ 更新记录", 1)[0]
-            self.assertIn("十三张", current_text, path.name)
+            self.assertIn("十四张", current_text, path.name)
+            self.assertIn("分类汇总视图", current_text, path.name)
             self.assertIn("低金额系统兜底明细", current_text, path.name)
             self.assertNotIn("低金额人工批量", current_text, path.name)
             self.assertNotIn("固定包含十二张", current_text, path.name)

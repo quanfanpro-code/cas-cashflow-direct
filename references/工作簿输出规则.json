@@ -1,15 +1,18 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "rule_metadata": [
-    {"rule_id": "OUTPUT-THIRTEEN-SHEETS", "name": "最终工作簿十三张工作表", "category": "工作簿结构", "priority": 10, "reason": "固定交付结构", "status": "active", "version": "1"},
+    {"rule_id": "OUTPUT-THIRTEEN-SHEETS", "name": "最终工作簿十三张工作表", "category": "工作簿结构", "priority": 10, "reason": "固定交付结构；2026-08-26 起被十四张取代", "status": "deprecated", "version": "1"},
+    {"rule_id": "OUTPUT-FOURTEEN-SHEETS", "name": "最终工作簿十四张工作表", "category": "工作簿结构", "priority": 20, "reason": "固定交付结构；第十三张为分类汇总视图", "status": "active", "version": "1"},
+    {"rule_id": "OUTPUT-SUMMARY-VIEW", "name": "分类汇总视图纯展示无门禁", "category": "工作簿结构", "priority": 30, "reason": "汇总视图只解决看不见，不产生复核义务、动作、门禁或状态影响", "status": "active", "version": "1"},
     {"rule_id": "OUTPUT-REAL-DETAIL-ROWS", "name": "可处理工作表只展示真实明细", "category": "工作簿明细", "priority": 10, "reason": "不得生成不存在于原始资料的人造主行", "status": "active", "version": "1"},
+    {"rule_id": "OUTPUT-FALLBACK-HIDDEN", "name": "兜底明细表人工依据等四列默认隐藏", "category": "工作簿明细", "priority": 20, "reason": "人工依据、外部资料位置、处理人、处理时间默认隐藏，是否填写由人工自行决定", "status": "active", "version": "1"},
     {"rule_id": "OUTPUT-DIRECTION-DROPDOWN", "name": "人工下拉限制现金方向", "category": "工作簿人工改选", "priority": 10, "reason": "现金流入和流出项目不得互选", "status": "active", "version": "1"}
   ],
   "sheet_names": [
     "使用说明与状态", "现金流量表正表", "正表核对报告", "重要待复核事项",
     "低金额系统兜底明细", "疑似重复事项", "AI复核记录", "原表与系统决定差异",
     "现金范围与现金流量表与货币资金变动的勾稽核对", "全量分类留痕", "科目语义词典",
-    "同类检查", "输入识别与字段映射"
+    "同类检查", "分类汇总视图", "输入识别与字段映射"
   ],
   "choice_labels": {
     "important_use_system": "采用系统首选项目",
@@ -30,6 +33,7 @@
     "行类型", "批次最不利影响金额", "批次现金变化金额", "人工可选标准项目",
     "明确排除原因", "人工处理状态", "批次编号(技术)"
   ],
+  "fallback_default_hidden_headers": ["人工依据", "外部资料位置", "处理人", "处理时间"],
   "fallback_header_renames": {
     "本行分配现金变化": "本行金额",
     "现金方向依据": "现金方向",
@@ -42,5 +46,12 @@
     "行类型": "同一业务序号",
     "人工确认项目": "人工改选项目",
     "人工处理状态": "最终采用项目"
+  },
+  "summary_view": {
+    "sheet_name": "分类汇总视图",
+    "columns": ["现流项目", "标准一级科目", "现金方向", "笔数", "合计现金变化（元）"],
+    "check_row_rule": "每个正表叶子项目一行校验：全量分类留痕按项目独立合计减去本视图该项目组合小计，差额为零即视图无漏行",
+    "source_columns": {"item": "最终决定项目", "account": "标准一级科目", "amount": "本行分配现金变化"},
+    "presentation": "纯展示，不产生复核义务、动作、门禁或状态影响；不提供输入区和下拉"
   }
 }

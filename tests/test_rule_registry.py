@@ -33,8 +33,24 @@ def test_rule_registry_loads_every_current_rule_category_from_one_entry() -> Non
     }
     assert len(registry.statement_item_ids) == 35
     assert registry.output_sheet_names[4] == "低金额系统兜底明细"
-    assert len(registry.output_sheet_names) == 13
+    assert len(registry.output_sheet_names) == 14
+    assert registry.output_sheet_names[12] == "分类汇总视图"
+    assert registry.output_sheet_names[13] == "输入识别与字段映射"
     assert registry.difference_source_order == ("account_path", "summary")
+    summary_view = registry.output_policy["summary_view"]
+    assert summary_view["columns"] == [
+        "现流项目",
+        "标准一级科目",
+        "现金方向",
+        "笔数",
+        "合计现金变化（元）",
+    ]
+    assert registry.output_policy["fallback_default_hidden_headers"] == [
+        "人工依据",
+        "外部资料位置",
+        "处理人",
+        "处理时间",
+    ]
 
 
 def test_deprecated_low_amount_actions_are_not_active_or_routable() -> None:
