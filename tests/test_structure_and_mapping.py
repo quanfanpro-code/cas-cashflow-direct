@@ -24,6 +24,57 @@ from tests.fixture_factory import (
 
 
 class StructureAndMappingTests(unittest.TestCase):
+    def test_short_flow_item_header_and_combined_voucher_number_are_recognized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "简称表头.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证字号", "摘要", "科目名称", "借方", "贷方", "现金流量"])
+            sheet.append(["2026-01-01", "记-0001", "支付费用", "银行存款", 0, 100, "支付其他与经营活动有关的现金"])
+            workbook.save(path)
+            workbook.close()
+
+            mapping = infer_dataset_mapping(scan_workbook(path))
+
+            self.assertIsInstance(mapping, DatasetMapping)
+            self.assertEqual(2, mapping.role_to_column["voucher_no"].column_index)
+            self.assertEqual(7, mapping.role_to_column["flow_item"].column_index)
+            self.assertNotIn("flow_amount", mapping.role_to_column)
+
+    def test_flow_amount_header_is_not_also_a_flow_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "只有现流金额.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目名称", "借方", "贷方", "现金流量金额"])
+            sheet.append(["2026-01-01", "记-0001", "支付费用", "银行存款", 0, 100, 100])
+            workbook.save(path)
+            workbook.close()
+
+            mapping = infer_dataset_mapping(scan_workbook(path))
+
+            self.assertIsInstance(mapping, DatasetMapping)
+            self.assertEqual(7, mapping.role_to_column["flow_amount"].column_index)
+            self.assertNotIn("flow_item", mapping.role_to_column)
+
+    def test_flow_parent_header_does_not_turn_amount_child_into_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "现流分层表头.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append([None, None, None, None, None, None, "现金流量", None])
+            sheet.append(["日期", "凭证号", "摘要", "科目名称", "借方", "贷方", "金额", "编码"])
+            sheet.merge_cells("G1:H1")
+            sheet.append(["2026-01-01", "记-0001", "支付费用", "银行存款", 0, 100, 100, "CFO-07"])
+            workbook.save(path)
+            workbook.close()
+
+            mapping = infer_dataset_mapping(scan_workbook(path))
+
+            self.assertIsInstance(mapping, DatasetMapping)
+            self.assertEqual(7, mapping.role_to_column["flow_amount"].column_index)
+            self.assertNotIn("flow_item", mapping.role_to_column)
+
     def test_voucher_word_and_account_code_are_mapped_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "独立编码字段.xlsx"

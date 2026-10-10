@@ -388,6 +388,13 @@ def _validate_registry(
         "summary",
     ]:
         raise RuleRegistryError("差异表独立来源顺序必须固定为完整路径、摘要")
+    relations = special.get("component_structure", {}).get("relations", {})
+    if (not relations.get("version")
+            or any(type(relations.get(key)) is not int or not 1 <= relations[key] <= 100_000
+                   for key in ("max_search_states", "max_relation_rows"))
+            or any(not isinstance(relations.get(key), list) or not relations[key]
+                   for key in ("payroll_accounts", "payroll_terms", "settlement_accounts", "accrual_terms", "accrual_account_pairs"))):
+        raise RuleRegistryError("业务关系规则缺少版本、关系词或受控搜索上限")
 
 
 def load_rule_registry(project_root: Path) -> RuleRegistry:

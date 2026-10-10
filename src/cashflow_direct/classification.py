@@ -172,6 +172,13 @@ def classify_component(
 ) -> ClassificationDecision:
     if component.account_mapping_status != "confirmed":
         raise ValueError("一级科目映射未全部确认，不能进入现金流分类")
+    if "structure_pending" in component.anomalies:
+        return ClassificationDecision(
+            component.component_id, "", "", "net", "STRUCTURE-PENDING",
+            "业务组成未确认；真实现金保留在未决桥接，先完成结构确认", "pending",
+            resolved=False, evidence_score=None, decision_action="human_decision",
+            candidate_status="structure_pending", original_item_state="blank",
+        )
     exact_item = standardize_flow_item(component.original_item_text, rules)
     if not component.original_item_text.strip():
         pending_original_state = "blank"
@@ -525,7 +532,7 @@ def route_classification_decisions(
     automatic_actions = _AUTOMATIC_ACTIONS
     for component in components:
         decision = decision_by_id[component.component_id]
-        if decision.excluded:
+        if decision.excluded or decision.candidate_status == "structure_pending":
             routed.append(decision)
             continue
         assessment = assessment_by_id[component.component_id]

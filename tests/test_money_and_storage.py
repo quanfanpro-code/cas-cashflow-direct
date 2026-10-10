@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
     "cash_scope",
     "cashflow_component",
     "classification_decision",
+    "component_structure",
     "decision_route",
     "duplicate_group",
     "evidence_assessment",
@@ -37,6 +38,7 @@ EXPECTED_TABLES = {
     "stage_status",
     "statement_comparison",
     "statement_value",
+    "structure_control",
     "voucher",
 }
 

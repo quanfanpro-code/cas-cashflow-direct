@@ -16,6 +16,7 @@ class StructureAITask:
     review_round: str
     candidate_entry_id_combinations: tuple[tuple[str, ...], ...]
     context: str
+    candidate_plan_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,7 @@ class StructureAIResult:
     reviewer_id: str
     model_id: str
     reviewed_at: str
+    selected_plan_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,7 @@ class StructureResolution:
     status: str
     selected_entry_ids: tuple[str, ...] = ()
     basis_type: str = "existing_evidence"
+    selected_plan_id: str = ""
 
 
 def build_structure_ai_tasks(
@@ -58,12 +61,19 @@ def build_structure_ai_tasks(
         for combination in request["candidate_entry_id_combinations"]
     )
     details = tuple(str(value) for value in request.get("candidate_details", ()))
+    plans = tuple(request.get("candidate_plans", ()))
+    plan_ids = tuple(str(plan["plan_id"]) for plan in plans)
+    if not candidates and not plans or not request.get("search_complete", True):
+        return ()
     context = json.dumps(
         {
             "凭证": voucher_key,
             "现金变化金额分": int(request["cash_delta_cent"]),
             "既有候选组合": candidates,
             "候选明细": details,
+            "完整分配方案": plans,
+            "原始分录与定位": request.get("source_entries", ()),
+            "选择字段": "selected_plan_id" if plans else "selected_entry_ids",
             "限制": (
                 "只能选择既有候选组合；不得新增事实、改写金额或创造新组合；"
                 "必须说明金额守恒检查和选择理由"
@@ -74,11 +84,12 @@ def build_structure_ai_tasks(
     )
     return tuple(
         StructureAITask(
-            stable_id("SAI", voucher_key, materiality_level, review_round),
+            stable_id("SAI", voucher_key, materiality_level, review_round, *plan_ids),
             voucher_key,
             review_round,
             candidates,
             context,
+            plan_ids,
         )
         for review_round in rounds
     )
@@ -127,12 +138,15 @@ def validate_structure_ai_results(
             time_valid = reviewed_at.tzinfo is not None
         except ValueError:
             time_valid = False
-        candidate_valid = selected in set(task.candidate_entry_id_combinations)
+        selected_plan = str(payload.get("selected_plan_id", ""))
+        candidate_valid = (selected_plan in task.candidate_plan_ids and not selected
+                           if task.candidate_plan_ids else
+                           selected in set(task.candidate_entry_id_combinations) and not selected_plan)
         is_valid = (
             str(payload.get("voucher_key", "")) == task.voucher_key
             and str(payload.get("review_round", "")) == task.review_round
             and confidence in {"high", "low", "conflict"}
-            and (candidate_valid or (not selected and confidence != "high"))
+            and (candidate_valid or (not selected and not selected_plan and confidence != "high"))
             and (confidence != "high" or candidate_valid)
             and bool(str(payload.get("reason", "")).strip())
             and bool(str(payload.get("reviewer_id", "")).strip())
@@ -153,6 +167,7 @@ def validate_structure_ai_results(
                 str(payload["reviewer_id"]).strip(),
                 str(payload["model_id"]).strip(),
                 str(payload["reviewed_at"]),
+                selected_plan,
             )
         )
     blind = [result for result in valid if result.review_round in {"A", "B", "C"}]
@@ -190,7 +205,9 @@ def resolve_structure_ai_request(
     results: Sequence[StructureAIResult],
     failed_task_ids: set[str] | frozenset[str],
 ) -> StructureResolution:
-    del request, failed_task_ids
+    del failed_task_ids
+    if not request.get("candidate_plans") and not request.get("candidate_entry_id_combinations"):
+        return StructureResolution("needs_user")
     result_by_round = {result.review_round: result for result in results}
     task_rounds = {task.review_round for task in tasks}
     if materiality_level == "M3":
@@ -198,7 +215,7 @@ def resolve_structure_ai_request(
     if materiality_level in {"M0", "M1"}:
         first = result_by_round.get("single")
         if first is not None and first.confidence == "high":
-            return StructureResolution("selected", first.selected_entry_ids)
+            return StructureResolution("selected", first.selected_entry_ids, selected_plan_id=first.selected_plan_id)
         if "second" not in task_rounds:
             return StructureResolution("needs_second")
         second = result_by_round.get("second")
@@ -206,11 +223,11 @@ def resolve_structure_ai_request(
             return StructureResolution("needs_user")
         if (
             first is not None
-            and first.selected_entry_ids
-            and first.selected_entry_ids != second.selected_entry_ids
+            and (first.selected_entry_ids or first.selected_plan_id)
+            and (first.selected_entry_ids, first.selected_plan_id) != (second.selected_entry_ids, second.selected_plan_id)
         ):
             return StructureResolution("needs_user")
-        return StructureResolution("selected", second.selected_entry_ids)
+        return StructureResolution("selected", second.selected_entry_ids, selected_plan_id=second.selected_plan_id)
     if materiality_level == "M2":
         first = result_by_round.get("A")
         second = result_by_round.get("B")
@@ -219,12 +236,13 @@ def resolve_structure_ai_request(
             and second is not None
             and first.confidence == second.confidence == "high"
             and first.selected_entry_ids == second.selected_entry_ids
+            and first.selected_plan_id == second.selected_plan_id
         ):
-            return StructureResolution("selected", first.selected_entry_ids)
+            return StructureResolution("selected", first.selected_entry_ids, selected_plan_id=first.selected_plan_id)
         if "C" not in task_rounds:
             return StructureResolution("needs_c")
         adjudicator = result_by_round.get("C")
         if adjudicator is not None and adjudicator.confidence == "high":
-            return StructureResolution("selected", adjudicator.selected_entry_ids)
+            return StructureResolution("selected", adjudicator.selected_entry_ids, selected_plan_id=adjudicator.selected_plan_id)
         return StructureResolution("needs_user")
     raise ValueError(f"未知业务组成重要性档位：{materiality_level}")

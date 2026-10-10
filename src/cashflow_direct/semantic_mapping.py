@@ -138,6 +138,10 @@ def _score(role: str, path: tuple[str, ...], values: tuple[object, ...], spec: d
             best = max(best, 10)
         elif len(normalized) > 2 and normalized in joined:
             best = max(best, 7)
+    # 简称只精确匹配末级表头，不能借上层标题命中其金额、编码等子列。
+    leaf = path[-1].replace(" ", "") if path else ""
+    if leaf and any(term.replace(" ", "") == leaf for term in spec.get("exact_terms", [])):
+        best = max(best, 10)
     score = best + _type_bonus(values, spec["value_types"])
     if role == "account_name":
         score += _account_path_bonus(path, values)

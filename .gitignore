@@ -39,3 +39,11 @@ docs/superpowers/plans/*
 !docs/architecture/
 docs/architecture/*
 !docs/architecture/2026-08-26-统一规则中心.md
+
+# 2026-10-10 通用需求与验收记录（不含客户原始数据）
+!docs/requirements/2026-10-10-业务关系与现金分配-requirement.md
+!docs/reviews/2026-10-10-业务关系与现金分配-review.md
+!docs/superpowers/plans/2026-10-10-业务关系与现金分配.md
+!docs/superpowers/specs/
+docs/superpowers/specs/*
+!docs/superpowers/specs/2026-10-10-业务关系与现金分配-design.md

@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--decisions",
                 required=True,
-                help="业务组成候选确认 JSON；键为凭证，值为所选来源行编号数组",
+                help="业务组成确认 JSON；键为凭证，新结构值为含 plan_id 的对象",
             )
         elif name == "import-component-ai":
             command.add_argument(

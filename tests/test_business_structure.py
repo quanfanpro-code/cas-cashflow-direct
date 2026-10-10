@@ -1,0 +1,157 @@
+from dataclasses import replace
+from pathlib import Path
+from copy import deepcopy
+
+from cashflow_direct.component_structure import resolve_voucher_structure, validate_structure_plan
+from cashflow_direct.rule_registry import default_rule_registry
+from cashflow_direct.classification import classify_all, load_rule_pack, route_classification_decisions
+from cashflow_direct.models import MaterialityAmounts
+
+from cashflow_direct.components import build_cashflow_components, confirm_cash_scope, discover_cash_scope
+from tests.fixture_factory import _component_entry
+
+
+def entry(n, account, amount, summary):
+    return _component_entry(n, "V-STRUCT", account, debit_cent=max(amount, 0),
+                            credit_cent=max(-amount, 0), summary=summary)
+
+
+def build(rows, **kwargs):
+    proposal = discover_cash_scope(rows)
+    scope = confirm_cash_scope(proposal, {x.account_key: "include" for x in proposal.candidates})
+    return build_cashflow_components(rows, scope, **kwargs)
+
+
+def payroll():
+    return (
+        entry(1, "银行存款", -8400, "付3月装配车间工资"),
+        entry(2, "应付职工薪酬 - 工资", 10000, "付3月装配车间工资"),
+        entry(3, "其他应付款 - 社保", -500, "付3月装配车间工资"),
+        entry(4, "其他应收款 - 借款 - 个人", -1000, "扣装配车间员工甲工资代还借款本金"),
+        entry(5, "应收利息", -100, "扣装配车间员工甲工资代还借款利息"),
+        entry(6, "应收利息", 100, "计提装配车间员工甲个人借款利息"),
+        replace(entry(7, "财务费用 - 利息收入", 0, "计提装配车间员工甲个人借款利息"), debit_cent=-100),
+        entry(8, "银行存款", -2000, "付3月采购部工资"),
+        entry(9, "应付职工薪酬 - 工资", 2000, "付3月采购部工资"),
+    )
+
+
+def test_self_and_on_behalf_payment_keep_separate_business_and_actual_cash():
+    rows = (entry(1, "应付账款", 7000, "付款甲园区2月电费"),
+            entry(2, "其他应收款 - 往来单位", 3000, "付款代乙公司付甲园区2月电费"),
+            entry(3, "银行存款", -10000, "付款甲园区2月电费"))
+    result = build(rows)
+    assert sorted((x.summary, x.cash_delta_cent) for x in result.components) == sorted([
+        (rows[0].summary, -7000), (rows[1].summary, -3000)])
+    assert {x.entry_id for x in result.source_allocations} == {"E3"}
+    assert sorted(x.allocated_cent for x in result.source_allocations) == [-7000, -3000]
+    assert not result.structure_requests
+
+
+def test_payroll_offsets_and_red_accrual_have_distinct_roles():
+    result = build(payroll())
+    assert sorted(x.cash_delta_cent for x in result.components) == [-8400, -2000]
+    assert all(x.counterpart_accounts == ("应付职工薪酬 - 工资",) for x in result.components)
+    plan = result.structure_plans[0]
+    group = next(g for g in plan.business_groups if "E2" in g.main_entry_ids)
+    assert set(group.settlement_entry_ids) == {"E3", "E4", "E5"}
+    assert set(plan.noncash_groups[0].entry_ids) == {"E6", "E7"}
+    assert all("path_depends_on_summary" in x.anomalies for x in result.components)
+
+
+def test_same_summary_duplicate_bank_rows_survive_and_input_order_is_irrelevant():
+    rows = (entry(1, "银行存款", -4000, "付3月研发部工资"),
+            entry(2, "银行存款", -4000, "付3月研发部工资"),
+            entry(3, "应付职工薪酬 - 工资", 5000, "付3月研发部工资"),
+            entry(4, "应付职工薪酬 - 工资", 3000, "付3月研发部工资"))
+    result = build(rows)
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -8000
+    assert {(a.entry_id, a.allocated_cent) for a in result.source_allocations} == {("E1", -4000), ("E2", -4000)}
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_unknown_zero_sum_rows_are_not_silently_discarded():
+    rows = payroll()[:5] + (entry(6, "应收利息", 100, "未知事项甲"),
+                           entry(7, "财务费用", -100, "未知事项乙"))
+    result = build(rows)
+    assert result.structure_requests
+    assert all("structure_pending" in x.anomalies for x in result.components)
+    assert sum(x.cash_delta_cent for x in result.components) == -8400
+
+
+def test_independent_balanced_group_continues_while_other_group_is_pending():
+    rows = payroll()[:5] + (entry(8, "银行存款", -1500, "付3月采购部工资"),
+                           entry(9, "应付职工薪酬 - 工资", 1500, "付3月采购部工资"),
+                           entry(10, "其他应收款", -100, "付3月装配车间工资"))
+    # An unbalanced group is not repaired by consuming another department's entries.
+    result = build(rows)
+    assert any(x.cash_delta_cent == -1500 and "structure_pending" not in x.anomalies for x in result.components)
+    assert any("structure_pending" in x.anomalies for x in result.components)
+    assert result.structure_requests
+
+
+def test_unresolved_opposite_cash_directions_remain_visible_at_net_zero():
+    rows = (entry(1, "银行存款", 5000, "收甲项"), entry(2, "银行存款", -5000, "付乙项"),
+            entry(3, "其他应收款", -5000, "不明甲"), entry(4, "其他应付款", 5000, "不明乙"))
+    result = build(rows)
+    assert result.structure_requests
+    assert sorted(x.cash_delta_cent for x in result.components) == [-5000, 5000]
+    assert all("structure_pending" in x.anomalies for x in result.components)
+
+
+def ambiguous_payroll():
+    return (entry(1, "银行存款", -1100, "付3月装配车间工资"),
+            entry(2, "应付职工薪酬", 1200, "付3月装配车间工资"),
+            entry(3, "银行存款", -1100, "付4月装配车间工资"),
+            entry(4, "应付职工薪酬", 1200, "付4月装配车间工资"),
+            entry(5, "其他应收款", -100, "扣装配车间员工甲工资代还借款本金"),
+            entry(6, "其他应收款", -100, "扣装配车间员工乙工资代还借款本金"))
+
+
+def test_complete_plans_include_competing_offsets_and_selection_is_revalidated():
+    rows = ambiguous_payroll()
+    result = build(rows)
+    request = result.structure_requests[0]
+    assert len(request.candidate_plans) == 2
+    selected = request.candidate_plans[0]
+    accepted = build(rows, structure_plan_selections={"V-STRUCT": selected.plan_id})
+    assert not accepted.structure_requests
+    assert accepted.structure_plans == (selected,)
+    import pytest
+    with pytest.raises(ValueError, match="过期"):
+        build(rows, structure_plan_selections={"V-STRUCT": "old-plan"})
+
+
+def test_search_limit_means_incomplete_not_unique_and_validator_rejects_forgery():
+    rows = ambiguous_payroll()
+    policy = deepcopy(default_rule_registry().special_policy["component_structure"]["relations"])
+    policy["max_search_states"] = 1
+    result = resolve_voucher_structure(rows, ("E1", "E3"), policy)
+    assert not result.search_complete and not result.candidates
+    assert not result.plan.business_groups
+    good = build(payroll()).structure_plans[0]
+    group = good.business_groups[0]
+    forged = replace(good, business_groups=(*good.business_groups, group))
+    assert validate_structure_plan(forged, payroll(), ("E1", "E8"))
+
+
+def test_shortest_amount_subset_does_not_hide_longer_same_summary_business():
+    rows = (entry(1, "银行存款", -1000, "支付工资"),
+            entry(2, "应付职工薪酬", 1000, "支付工资"),
+            entry(3, "应付职工薪酬", 600, "支付工资"),
+            entry(4, "应付职工薪酬", 400, "支付工资"),
+            entry(5, "管理费用", -1000, "支付工资"))
+    result = build(rows)
+    assert result.structure_requests
+    assert all("structure_pending" in c.anomalies for c in result.components)
+
+
+def test_structure_pending_cannot_enter_low_amount_fallback_or_classification_ai():
+    result = build(ambiguous_payroll())
+    rules = load_rule_pack(Path(__file__).resolve().parents[1])
+    decisions = classify_all(result.components, rules)
+    routed = route_classification_decisions(result.components, decisions, MaterialityAmounts(1000000, 700000, 100000))
+    assert not routed.ai_tasks
+    assert all(not d.resolved and not d.excluded and not d.system_item_id for d in routed.decisions)
+    assert all(d.candidate_status == "structure_pending" for d in routed.decisions)

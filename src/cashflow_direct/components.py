@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from cashflow_direct.models import CashflowComponent, NormalizedEntry
+from cashflow_direct.component_structure import VoucherStructurePlan, resolve_voucher_structure
 from cashflow_direct.money import stable_id
 from cashflow_direct.rule_registry import default_rule_registry
 
@@ -81,6 +82,7 @@ class ComponentBuildResult:
     unresolved_cash_delta_cent: int = 0
     source_allocations: tuple[ComponentSourceAllocation, ...] = ()
     structure_requests: tuple[ComponentStructureRequest, ...] = ()
+    structure_plans: tuple[VoucherStructurePlan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,10 @@ class ComponentStructureRequest:
     cash_delta_cent: int
     candidate_entry_id_combinations: tuple[tuple[str, ...], ...]
     reason: str
+    candidate_plans: tuple[VoucherStructurePlan, ...] = ()
+    unresolved_entry_ids: tuple[str, ...] = ()
+    search_complete: bool = True
+    exposure_cent: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1036,6 +1042,7 @@ def build_cashflow_components(
     single_sided_file_ids: frozenset[str] = frozenset(),
     structure_selections: Mapping[str, tuple[str, ...]] | None = None,
     structure_selection_basis: Mapping[str, str] | None = None,
+    structure_plan_selections: Mapping[str, str] | None = None,
 ) -> ComponentBuildResult:
     """按凭证构建现金流业务组成，并保持现金腿金额不变量。"""
     grouped: dict[str, list[NormalizedEntry]] = defaultdict(list)
@@ -1045,6 +1052,8 @@ def build_cashflow_components(
     components: list[CashflowComponent] = []
     excluded: list[InternalTransferLeg] = []
     structure_requests: list[ComponentStructureRequest] = []
+    structure_plans: list[VoucherStructurePlan] = []
+    explicit_allocations: list[ComponentSourceAllocation] = []
     structure_selections = structure_selections or {}
     structure_selection_basis = structure_selection_basis or {}
     for voucher_key, voucher_entries in grouped.items():
@@ -1070,6 +1079,66 @@ def build_cashflow_components(
                 )
                 cash_entries = [entry for entry in cash_entries if entry not in explicit_internal]
             if not cash_entries:
+                continue
+            noncash = [entry for entry in voucher_entries if entry not in cash_entries]
+            relation_structure = (
+                noncash and not explicit_internal and not single_sided
+                and not any(entry.flow_amount_cent for entry in voucher_entries)
+                and (len({entry.summary for entry in voucher_entries}) > 1
+                     or len(voucher_entries) > 2 and len({
+                         1 if row.debit_cent - row.credit_cent > 0 else -1 for row in cash_entries}) == 1)
+            )
+            if relation_structure:
+                search = resolve_voucher_structure(
+                    voucher_entries, tuple(row.entry_id for row in cash_entries),
+                    _COMPONENT_POLICY["relations"],
+                )
+                plan = search.plan
+                selected_plan = (structure_plan_selections or {}).get(voucher_key)
+                if selected_plan:
+                    selected = next((p for p in search.candidates if p.plan_id == selected_plan), None)
+                    if selected is None or not search.search_complete:
+                        raise ValueError("业务组成方案已过期或不属于完整合法候选：" + voucher_key)
+                    plan = selected
+                structure_plans.append(plan)
+                by_id = {row.entry_id: row for row in voucher_entries}
+                for group in plan.business_groups:
+                    main = [by_id[key] for key in group.main_entry_ids]
+                    cash_rows = [by_id[s.entry_id] for s in group.cash_shares]
+                    labels = tuple(sorted({r.original_flow_item for r in (*main, *cash_rows) if r.original_flow_item}))
+                    component = CashflowComponent(
+                        component_id=stable_id("CMP", voucher_key, group.group_id),
+                        voucher_key=voucher_key,
+                        summary=main[0].summary,
+                        cash_delta_cent=sum(s.amount_cent for s in group.cash_shares),
+                        counterpart_accounts=tuple(dict.fromkeys(r.account_name for r in main)),
+                        original_item_text="；".join(labels),
+                        source_keys=tuple(sorted({*group.main_entry_ids, *group.settlement_entry_ids,
+                                                  *(s.entry_id for s in group.cash_shares)})),
+                        anomalies=tuple(dict.fromkeys(("path_depends_on_summary",
+                            *(("original_item_conflict",) if len(labels) > 1 else ()),
+                            *(issue for r in (*main, *cash_rows) for issue in r.input_issues)))),
+                    )
+                    components.append(component)
+                    explicit_allocations.extend(ComponentSourceAllocation(component.component_id, s.entry_id, s.amount_cent)
+                                                for s in group.cash_shares)
+                for share in plan.pending_cash_shares:
+                    row = by_id[share.entry_id]
+                    component = CashflowComponent(
+                        component_id=stable_id("PENDING", voucher_key, share.entry_id),
+                        voucher_key=voucher_key, summary=row.summary,
+                        cash_delta_cent=share.amount_cent, original_item_text=row.original_flow_item,
+                        source_keys=(share.entry_id, *plan.unresolved_entry_ids),
+                        anomalies=("structure_pending",), evidence_strength="weak",
+                    )
+                    components.append(component)
+                    explicit_allocations.append(ComponentSourceAllocation(component.component_id, share.entry_id, share.amount_cent))
+                if plan.pending_cash_shares or plan.unresolved_entry_ids:
+                    structure_requests.append(ComponentStructureRequest(
+                        voucher_key, sum(s.amount_cent for s in plan.pending_cash_shares), (), search.reason,
+                        search.candidates, plan.unresolved_entry_ids, search.search_complete,
+                        max((abs(s.amount_cent) for s in plan.pending_cash_shares), default=0),
+                    ))
                 continue
             built, internal = _voucher_components(
                 voucher_key,
@@ -1155,10 +1224,14 @@ def build_cashflow_components(
             )
         )
     frozen_components = tuple(components)
+    structured_vouchers = {p.voucher_key for p in structure_plans}
     return ComponentBuildResult(
         frozen_components,
         tuple(excluded),
         0,
-        _build_source_allocations(entries, frozen_components, scope),
+        tuple(explicit_allocations) + _build_source_allocations(
+            entries, tuple(c for c in frozen_components
+                           if c.voucher_key not in structured_vouchers), scope),
         tuple(structure_requests),
+        tuple(structure_plans),
     )

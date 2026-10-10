@@ -16,6 +16,8 @@ BUSINESS_TABLES = (
     "cash_scope",
     "cashflow_component",
     "source_allocation",
+    "component_structure",
+    "structure_control",
     "evidence_assessment",
     "materiality_assessment",
     "decision_route",

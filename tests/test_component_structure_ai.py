@@ -15,6 +15,25 @@ REQUEST = {
 }
 
 
+def test_full_plan_protocol_does_not_accept_row_list_as_cash_allocation():
+    from dataclasses import asdict
+    from tests.test_business_structure import ambiguous_payroll, build
+    request = asdict(build(ambiguous_payroll()).structure_requests[0])
+    tasks = build_structure_ai_tasks(request, "M0", ("single",))
+    payload = _payload(tasks[0], ())
+    payload["selected_plan_id"] = request["candidate_plans"][0]["plan_id"]
+    result = validate_structure_ai_results(tasks, (payload,))
+    assert not result.invalid_ids
+    resolution = resolve_structure_ai_request(request, "M0", tasks, result.valid_results, set())
+    assert resolution.selected_plan_id == payload["selected_plan_id"]
+    payload["selected_plan_id"] = "forged-plan"
+    assert validate_structure_ai_results(tasks, (payload,)).invalid_ids
+
+
+def test_no_valid_candidate_does_not_generate_empty_ai_task():
+    assert build_structure_ai_tasks({**REQUEST, "candidate_entry_id_combinations": ()}, "M0", ("single",)) == ()
+
+
 def _payload(task, selected, *, confidence="high", reviewer="R-1"):
     return {
         "task_id": task.task_id,

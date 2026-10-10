@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import sqlite3
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -254,7 +256,27 @@ def _load_state(run_dir: Path) -> dict[str, object]:
     with path.open("r", encoding="utf-8-sig") as source:
         state = json.load(source)
     assert_current_versions(state.get("versions"), PROJECT_ROOT)
+    _check_structure_store(run_dir, state)
     return state
+
+
+_STRUCTURE_STATE_KEYS = ("component_structure_plans", "component_structure_requests",
+                         "component_structure_plan_selections")
+
+
+def _check_structure_store(run_dir: Path, state: Mapping[str, object]) -> None:
+    database = _store(run_dir).path
+    if not database.is_file():
+        return
+    with closing(sqlite3.connect(database)) as connection:
+        row = connection.execute("SELECT payload_json FROM structure_control WHERE record_id='current'").fetchone()
+        plans = {str(key): json.loads(payload) for key, payload in connection.execute(
+            "SELECT record_id, payload_json FROM component_structure")}
+    if row is not None:
+        expected = json.loads(row[0])
+        actual = {key: state.get(key) for key in _STRUCTURE_STATE_KEYS}
+        if expected != actual or plans != {p["voucher_key"]: p for p in state.get("component_structure_plans", ())}:
+            raise RuntimeError("业务组成状态与计算留痕不一致，请恢复完整运行状态")
 
 
 def _replace_with_windows_retry(source: Path, target: Path) -> Path:
@@ -274,6 +296,15 @@ def _save_state(run_dir: Path, state: Mapping[str, object]) -> None:
     temporary = target.with_suffix(".json.tmp")
     with temporary.open("w", encoding="utf-8-sig", newline="\n") as output:
         json.dump(state, output, ensure_ascii=False, separators=(",", ":"))
+    if "component_structure_plans" in state:
+        with _store(run_dir).stage("component_structure") as connection:
+            connection.execute("DELETE FROM component_structure")
+            connection.executemany("INSERT INTO component_structure VALUES (?, ?)", (
+                (item["voucher_key"], json.dumps(item, ensure_ascii=False))
+                for item in state["component_structure_plans"]
+            ))
+            connection.execute("INSERT OR REPLACE INTO structure_control VALUES ('current', ?)",
+                (json.dumps({key: state.get(key) for key in _STRUCTURE_STATE_KEYS}, ensure_ascii=False),))
     _replace_with_windows_retry(temporary, target)
 
 
@@ -1817,10 +1848,9 @@ def _semantic_components_after_component_build(
                 state.get("component_structure_selection_basis", {})
             ).items()
         },
+        structure_plan_selections=state.get("component_structure_plan_selections", {}),
     )
-    if build.structure_requests:
-        raise RuntimeError("业务组成结构尚未确定，请先执行分类并完成结构确认")
-    return tuple(build.components)
+    return tuple(c for c in build.components if "structure_pending" not in c.anomalies)
 
 
 def _semantic_account_paths_after_component_build(
@@ -2354,6 +2384,7 @@ def _structure_ai_task_from_dict(payload: Mapping[str, object]) -> StructureAITa
             for combination in payload["candidate_entry_id_combinations"]
         ),
         context=str(payload["context"]),
+        candidate_plan_ids=tuple(str(value) for value in payload.get("candidate_plan_ids", ())),
     )
 
 
@@ -2374,7 +2405,9 @@ def import_component_structure_ai_results(
         for line in source:
             if line.strip():
                 payloads.append(json.loads(line))
-    prior_payloads = list(state.get("component_structure_ai_results", ()))
+    active_task_ids = {task.task_id for task in tasks}
+    prior_payloads = [item for item in state.get("component_structure_ai_results", ())
+                      if item["task_id"] in active_task_ids]
     validation = validate_structure_ai_results(
         tasks,
         (*prior_payloads, *payloads),
@@ -2435,11 +2468,15 @@ def import_component_structure_ai_results(
     }
     followups: list[StructureAITask] = []
     user_requests: list[dict[str, object]] = []
+    plan_selections = dict(state.get("component_structure_plan_selections", {}))
     for request in state.get("component_structure_requests", ()):
         voucher_key = str(request["voucher_key"])
         level = str(request["materiality_level"])
         voucher_tasks = tuple(tasks_by_voucher.get(voucher_key, ()))
         voucher_results = tuple(results_by_voucher.get(voucher_key, ()))
+        if not voucher_tasks:
+            user_requests.append(dict(request))
+            continue
         resolution = resolve_structure_ai_request(
             request,
             level,
@@ -2448,7 +2485,13 @@ def import_component_structure_ai_results(
             terminal,
         )
         if resolution.status == "selected":
-            selected[voucher_key] = list(resolution.selected_entry_ids)
+            if resolution.selected_plan_id:
+                trial = {**plan_selections, voucher_key: resolution.selected_plan_id}
+                build_cashflow_components(_standardized_entries_from_state(state), _scope_from_dict(state["cash_scope"]),
+                                          structure_plan_selections=trial)
+                plan_selections[voucher_key] = resolution.selected_plan_id
+            else:
+                selected[voucher_key] = list(resolution.selected_entry_ids)
             basis[voucher_key] = resolution.basis_type
         elif resolution.status in {"needs_second", "needs_c"}:
             review_round = "second" if resolution.status == "needs_second" else "C"
@@ -2460,6 +2503,7 @@ def import_component_structure_ai_results(
                     {
                         "轮次": result.review_round,
                         "所选组合": result.selected_entry_ids,
+                        "所选方案": result.selected_plan_id,
                         "把握": result.confidence,
                         "理由": result.reason,
                     }
@@ -2489,6 +2533,8 @@ def import_component_structure_ai_results(
         ]
         state["component_structure_selections"] = selected
         state["component_structure_selection_basis"] = basis
+        state["component_structure_plan_selections"] = plan_selections
+        _invalidate_structure_dependents(state)
         state["stage"] = "waiting_component_structure_ai"
         for batch_number in range(0, len(followups), 25):
             _write_trace_jsonl(
@@ -2503,7 +2549,10 @@ def import_component_structure_ai_results(
         }
     state["component_structure_selections"] = selected
     state["component_structure_selection_basis"] = basis
+    state["component_structure_plan_selections"] = plan_selections
+    _invalidate_structure_dependents(state)
     state["component_structure_requests"] = user_requests
+    _retire_structure_tasks(state)
     state["stage"] = (
         "waiting_component_structure_confirmation"
         if user_requests
@@ -2529,11 +2578,23 @@ def confirm_component_structure(
     request_by_voucher = {
         str(item["voucher_key"]): item for item in requests
     }
-    if set(selections) != set(request_by_voucher):
-        raise ValueError("必须逐项确认全部待定业务组成，不能漏选或增加凭证")
+    if not selections or not set(selections).issubset(request_by_voucher):
+        raise ValueError("必须选择既有待定业务组成，不能增加凭证")
     confirmed: dict[str, list[str]] = {}
     basis_by_voucher: dict[str, str] = {}
+    confirmed_plans = dict(state.get("component_structure_plan_selections", {}))
     for voucher_key, selection_payload in selections.items():
+        request = request_by_voucher[voucher_key]
+        if request.get("candidate_plans"):
+            plan_id = str(selection_payload.get("plan_id", "")) if isinstance(selection_payload, Mapping) else ""
+            if plan_id not in {p["plan_id"] for p in request["candidate_plans"]}:
+                raise ValueError("业务组成方案不属于既有完整候选：" + voucher_key)
+            # The builder recomputes every candidate from unchanged original entries.
+            trial = {**confirmed_plans, voucher_key: plan_id}
+            build_cashflow_components(_standardized_entries_from_state(state), _scope_from_dict(state["cash_scope"]),
+                                      structure_plan_selections=trial)
+            confirmed_plans[voucher_key] = plan_id
+            continue
         if isinstance(selection_payload, Mapping):
             selected_values = selection_payload.get("entry_ids", ())
             basis_type = str(
@@ -2563,7 +2624,12 @@ def confirm_component_structure(
     existing_basis.update(basis_by_voucher)
     state["component_structure_selections"] = existing_confirmed
     state["component_structure_selection_basis"] = existing_basis
-    state.pop("component_structure_requests", None)
+    state["component_structure_plan_selections"] = confirmed_plans
+    state["component_structure_requests"] = [r for r in requests if r["voucher_key"] not in selections]
+    _retire_structure_tasks(state)
+    if not state["component_structure_requests"]:
+        state.pop("component_structure_requests")
+    _invalidate_structure_dependents(state)
     state["stage"] = "component_structure_confirmed"
     _save_state(run_dir, state)
     return StageResult(
@@ -2573,6 +2639,37 @@ def confirm_component_structure(
         "completed",
         "继续构造业务组成和结构化语义",
     )
+
+
+def _retire_structure_tasks(state: dict[str, object]) -> None:
+    pending = {r["voucher_key"] for r in state.get("component_structure_requests", ())}
+    active = []
+    history = {t["task_id"]: t for t in state.get("component_structure_ai_task_history", ())}
+    for task in state.get("component_structure_ai_tasks", ()):
+        if task["voucher_key"] in pending:
+            active.append(task)
+        else:
+            history[task["task_id"]] = task
+    state["component_structure_ai_tasks"] = active
+    state["component_structure_ai_task_history"] = list(history.values())
+    result_history = {r["task_id"]: r for r in state.get("component_structure_ai_result_history", ())}
+    remaining_results = []
+    for result in state.get("component_structure_ai_results", ()):
+        if result["task_id"] in history:
+            result_history[result["task_id"]] = result
+        else:
+            remaining_results.append(result)
+    state["component_structure_ai_results"] = remaining_results
+    state["component_structure_ai_result_history"] = list(result_history.values())
+
+
+def _invalidate_structure_dependents(state: dict[str, object]) -> None:
+    state.pop("classification_summary", None)
+    state.pop("workbook_path", None)
+    state.pop("overall_status", None)
+    state["summary_semantics_completed"] = False
+    # Existing path and summary answers are retained and reused by their identities.
+    state["account_dictionary_completed"] = False
 
 
 def run_classification(run_dir: Path) -> ClassificationStageResult:
@@ -2678,16 +2775,23 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
                 state.get("component_structure_selection_basis", {})
             ).items()
         },
+        structure_plan_selections=state.get("component_structure_plan_selections", {}),
     )
+    state["component_structure_plans"] = [asdict(plan) for plan in build.structure_plans]
+    _write_trace_jsonl(run_dir, "业务关系与现金分配.jsonl", build.structure_plans)
     if build.structure_requests:
         entry_by_id = {entry.entry_id: entry for entry in entries}
+        structure_entries_by_voucher: dict[str, list[NormalizedEntry]] = {}
+        for entry in entries:
+            structure_entries_by_voucher.setdefault(entry.voucher_key, []).append(entry)
         thresholds = _materiality_from_state(state)
         requests = []
         structure_tasks: list[StructureAITask] = []
         for item in build.structure_requests:
             request = asdict(item)
-            level = materiality_level(item.cash_delta_cent, thresholds).value
+            level = materiality_level(item.exposure_cent or item.cash_delta_cent, thresholds).value
             request["materiality_level"] = level
+            request["source_entries"] = [asdict(entry) for entry in structure_entries_by_voucher[item.voucher_key]]
             request["candidate_details"] = [
                 [
                     {
@@ -2713,10 +2817,10 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             )
             structure_tasks.extend(build_structure_ai_tasks(request, level, rounds))
         state["component_structure_requests"] = requests
-        state["component_structure_ai_tasks"] = [
-            asdict(task) for task in structure_tasks
-        ]
-        state["component_structure_ai_results"] = []
+        previous_tasks = {task["task_id"]: task for task in state.get("component_structure_ai_tasks", ())}
+        previous_tasks.update({task.task_id: asdict(task) for task in structure_tasks})
+        state["component_structure_ai_tasks"] = list(previous_tasks.values())
+        state.setdefault("component_structure_ai_results", [])
         state["stage"] = (
             "waiting_component_structure_ai"
             if structure_tasks
@@ -2730,17 +2834,8 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
                 structure_tasks[batch_number : batch_number + 25],
             )
         _save_state(run_dir, state)
-        return ClassificationStageResult(
-            str(state["run_id"]),
-            Path(run_dir),
-            0,
-            "",
-            len(entries),
-            0,
-            len(structure_tasks) if structure_tasks else len(requests),
-            "待AI判断业务组成" if structure_tasks else "待确认业务组成",
-        )
-    state.pop("component_structure_requests", None)
+    else:
+        state.pop("component_structure_requests", None)
     state["semantic_account_paths"] = sorted(
         {
             path
@@ -2806,10 +2901,12 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
                 {
                     component.summary.strip()
                     for component in components
-                    if component.summary.strip()
+                    if component.summary.strip() and "structure_pending" not in component.anomalies
                 }
             )
         )
+        prior_semantics = {result.summary: result for result in _summary_semantics_from_state(state).values()}
+        semantic_results = tuple(prior_semantics.get(result.summary, result) for result in semantic_results)
         tasks = tuple(
             task
             for task in (build_summary_agent_task(result) for result in semantic_results)
@@ -2855,11 +2952,28 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         automatic_change_threshold=int(state["automatic_change_threshold"]),
         source_allocations=build.source_allocations,
     )
-    decisions = routing.decisions
+    if state.get("decisions"):
+        # An explicit structure rebuild may be in a semantic stage; validate the
+        # cached records against SQLite before reusing any completed decision.
+        cached_stage = "waiting_ai" if any(
+            d["decision_action"] in _AI_PENDING_ACTIONS and not d["resolved"]
+            for d in state["decisions"]
+        ) else "waiting_human"
+        assert_decision_store_consistent(run_dir, {**state, "stage": cached_stage})
+    old_components = {item["component_id"]: _component_from_dict(item) for item in state.get("components", ())}
+    old_decisions = {item["component_id"]: _decision_from_dict(item) for item in state.get("decisions", ())}
+    reused = {item.component_id for item in components
+              if old_components.get(item.component_id) == item
+              and item.component_id in old_decisions
+              and "structure_pending" not in item.anomalies}
+    decisions = tuple(old_decisions[item.component_id] if item.component_id in reused else item
+                      for item in routing.decisions)
     checked = validate_classification(components, decisions)
     if not checked.valid:
         raise RuntimeError("自动分类不变量失败：" + "；".join(checked.errors))
-    tasks = routing.ai_tasks
+    old_tasks = tuple(_ai_task_from_dict(item) for item in state.get("ai_tasks", ())
+                      if item["component_id"] in reused)
+    tasks = (*old_tasks, *(item for item in routing.ai_tasks if item.component_id not in reused))
     serialized_components = [asdict(item) for item in components]
     serialized_decisions = [asdict(item) for item in decisions]
     digest_source = json.dumps(serialized_components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2870,9 +2984,10 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         and item.decision_action not in _AI_PENDING_ACTIONS
         for item in decisions
     )
+    has_pending_ai = any(item.decision_action in _AI_PENDING_ACTIONS and not item.resolved for item in decisions)
     classification_status = (
         "waiting_ai"
-        if tasks
+        if has_pending_ai
         else "waiting_human"
         if has_pending_human
         else "classification_completed"
@@ -2887,6 +3002,9 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
     }
     store = _store(run_dir)
     with store.stage("classification") as connection:
+        for table in ("cashflow_component", "classification_decision", "source_allocation", "evidence_assessment",
+                      "materiality_assessment", "decision_route", "ai_task", "internal_transfer"):
+            connection.execute(f'DELETE FROM "{table}"')
         vouchers: dict[str, list[str]] = {}
         for entry in entries:
             vouchers.setdefault(entry.voucher_key, []).append(entry.entry_id)
@@ -3004,7 +3122,7 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             batch,
         )
     _write_trace_jsonl(run_dir, "内部划转排除.jsonl", build.excluded_internal_transfers)
-    if not tasks and not has_pending_human:
+    if not has_pending_ai and not has_pending_human and not state.get("component_structure_requests"):
         _prepare_consistency_stage(state, run_dir)
     _save_state(run_dir, state)
     return _result_from_classification(state, run_dir)

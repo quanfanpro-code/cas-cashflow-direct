@@ -466,15 +466,14 @@ class ComponentTests(unittest.TestCase):
 
         self.assertEqual(1, len(result.components))
         self.assertEqual(-10_000, result.components[0].cash_delta_cent)
-        self.assertEqual("", result.components[0].summary)
-        self.assertIn("summary_allocation_ambiguous", result.components[0].anomalies)
+        self.assertEqual("支付采购款", result.components[0].summary)
+        self.assertIn("structure_pending", result.components[0].anomalies)
         self.assertEqual(1, len(result.structure_requests))
-        self.assertEqual(
-            {("E79", "E81"), ("E80", "E81")},
-            set(result.structure_requests[0].candidate_entry_id_combinations),
-        )
+        # Amount subsets omit the unassigned reversal; neither is a full business plan.
+        self.assertEqual((), result.structure_requests[0].candidate_plans)
+        self.assertEqual({"E79", "E80", "E81", "E82"}, set(result.structure_plans[0].unresolved_entry_ids))
 
-    def test_confirmed_component_structure_selection_builds_only_the_selected_rows(self) -> None:
+    def test_legacy_row_selection_cannot_discard_unassigned_business_rows(self) -> None:
         entries = (
             _component_entry(
                 178,
@@ -520,28 +519,10 @@ class ComponentTests(unittest.TestCase):
             structure_selections={"V-SELECT-STRUCTURE": ("E179", "E181")},
         )
 
-        assert result.structure_requests == ()
-        assert all(
-            "path_depends_on_summary" in item.anomalies
-            for item in result.components
-        )
-        assert {(item.cash_delta_cent, item.summary) for item in result.components} == {
-            (-6_000, "支付甲材料款"),
-            (-4_000, "支付共同材料款"),
-        }
-
-        independent = build_cashflow_components(
-            entries,
-            scope,
-            structure_selections={"V-SELECT-STRUCTURE": ("E179", "E181")},
-            structure_selection_basis={
-                "V-SELECT-STRUCTURE": "independent_external"
-            },
-        )
-        assert all(
-            "path_depends_on_summary" not in item.anomalies
-            for item in independent.components
-        )
+        assert result.structure_requests
+        assert all("structure_pending" in item.anomalies for item in result.components)
+        assert set(result.structure_plans[0].unresolved_entry_ids) == {"E179", "E180", "E181"}
+        assert sum(item.cash_delta_cent for item in result.components) == -10_000
 
     def test_illegal_summary_keeps_the_cash_amount_and_marks_the_component(self) -> None:
         entry = replace(
