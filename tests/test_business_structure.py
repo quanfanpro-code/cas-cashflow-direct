@@ -22,6 +22,112 @@ def build(rows, **kwargs):
     return build_cashflow_components(rows, scope, **kwargs)
 
 
+def test_reciprocal_counterparts_identify_unique_cash_pairs_with_broader_cash_summary():
+    rows = (
+        replace(entry(1, "应交税费_未交增值税", 501, "缴纳上月增值税"), counterpart_name="银行存款"),
+        replace(entry(2, "应交税费_城市维护建设税", 102, "缴纳上月附加税"), counterpart_name="银行存款"),
+        replace(entry(3, "应交税费_教育费附加", 77, "缴纳上月附加税"), counterpart_name="银行存款"),
+        replace(entry(4, "银行存款_甲银行", -501, "缴纳上月增值税及附加税"), counterpart_name="应交税费"),
+        replace(entry(5, "银行存款_甲银行", -102, "缴纳上月增值税及附加税"), counterpart_name="应交税费"),
+        replace(entry(6, "银行存款_甲银行", -77, "缴纳上月增值税及附加税"), counterpart_name="应交税费"),
+    )
+
+    result = build(rows)
+
+    assert not result.structure_requests
+    assert sorted(x.cash_delta_cent for x in result.components) == [-501, -102, -77]
+    assert {x.entry_id for x in result.source_allocations} == {"E4", "E5", "E6"}
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_reciprocal_counterpart_pairing_does_not_guess_equal_amounts_or_conflicting_accounts():
+    base = (
+        replace(entry(1, "应交税费_未交增值税", 100, "缴纳增值税"), counterpart_name="银行存款"),
+        replace(entry(2, "应交税费_教育费附加", 100, "缴纳附加税"), counterpart_name="银行存款"),
+        replace(entry(3, "银行存款_甲银行", -100, "缴纳税款甲"), counterpart_name="应交税费"),
+        replace(entry(4, "银行存款_甲银行", -100, "缴纳税款乙"), counterpart_name="应交税费"),
+    )
+    assert build(base).structure_requests
+    distinct = (
+        base[0], replace(base[1], debit_cent=200),
+        base[2], replace(base[3], credit_cent=200, counterpart_name="管理费用"),
+    )
+    assert build(distinct).structure_requests
+
+
+def test_reciprocal_counterparts_keep_identical_business_with_repeated_amounts_together():
+    rows = (
+        replace(entry(1, "应付职工薪酬_社会保险", 100, "支付本月社保"), counterpart_name="银行存款"),
+        replace(entry(2, "应付职工薪酬_社会保险", 100, "支付本月社保"), counterpart_name="银行存款"),
+        replace(entry(3, "银行存款_甲银行", -100, "代缴社会保险甲"), counterpart_name="应付职工薪酬"),
+        replace(entry(4, "银行存款_甲银行", -100, "代缴社会保险乙"), counterpart_name="应付职工薪酬"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -200
+    assert {x.entry_id for x in result.source_allocations} == {"E3", "E4"}
+
+
+def test_reciprocal_invoice_entries_are_non_cash_without_guessing_a_balance_subset():
+    rows = (
+        replace(entry(1, "固定资产_设备", 80, "设备发票入账"), counterpart_name="应付账款"),
+        replace(entry(2, "应交税费_进项税额", 20, "设备发票入账"), counterpart_name="应付账款"),
+        replace(entry(3, "应付账款", -80, "设备发票入账"), counterpart_name="固定资产"),
+        replace(entry(4, "应付账款", -20, "设备发票入账"), counterpart_name="应交税费"),
+        replace(entry(5, "应付账款", 100, "支付设备款"), counterpart_name="银行存款"),
+        replace(entry(6, "银行存款", -100, "支付设备款"), counterpart_name="应付账款"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -100
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E1", "E2", "E3", "E4"}
+
+
+def test_reciprocal_groups_distinguish_staff_and_personal_insurance_with_repeated_amounts():
+    rows = (
+        replace(entry(1, "应付职工薪酬_社会保险", 100, "支付本月社保"), counterpart_name="银行存款"),
+        replace(entry(2, "应付职工薪酬_社会保险", 100, "支付本月社保"), counterpart_name="银行存款"),
+        replace(entry(3, "其他应付款_个人社保", 30, "支付个人社保"), counterpart_name="银行存款"),
+        replace(entry(4, "银行存款", -100, "缴纳社保"), counterpart_name="应付职工薪酬"),
+        replace(entry(5, "银行存款", -100, "缴纳社保"), counterpart_name="应付职工薪酬"),
+        replace(entry(6, "银行存款", -30, "缴纳社保"), counterpart_name="其他应付款"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert sorted(x.cash_delta_cent for x in result.components) == [-200, -30]
+
+
+def test_reciprocal_non_cash_withholding_is_not_a_second_cash_flow():
+    rows = (
+        replace(entry(1, "应付职工薪酬_奖金", 150, "年度奖励发放"), counterpart_name="银行存款"),
+        replace(entry(2, "应付职工薪酬_奖金", 50, "年度奖励发放"), counterpart_name="应交税费"),
+        replace(entry(3, "应交税费_个人所得税", -50, "年度奖励及提成代扣税"), counterpart_name="应付职工薪酬"),
+        replace(entry(4, "银行存款", -150, "支付年度奖励"), counterpart_name="应付职工薪酬"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -150
+    assert {x.entry_id for x in result.source_allocations} == {"E4"}
+
+
+def test_explicit_staff_settlement_keeps_sources_without_guessing_bonus_and_salary_pairs():
+    rows = (
+        replace(entry(1, "应付职工薪酬_奖金", 100, "支付年度奖金"), counterpart_name="银行存款"),
+        replace(entry(2, "应付职工薪酬_工资", 100, "支付留存工资"), counterpart_name="银行存款"),
+        replace(entry(3, "银行存款", -100, "支付奖金及工资"), counterpart_name="应付职工薪酬"),
+        replace(entry(4, "银行存款", -100, "支付奖金及工资"), counterpart_name="应付职工薪酬"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -200
+    assert {x.entry_id for x in result.source_allocations} == {"E3", "E4"}
+    assert sorted(x.allocated_cent for x in result.source_allocations) == [-100, -100]
+
+
 def payroll():
     return (
         entry(1, "银行存款", -8400, "付3月装配车间工资"),

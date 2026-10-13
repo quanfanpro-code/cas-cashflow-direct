@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from cashflow_direct.evidence import split_account_levels
 from cashflow_direct.models import NormalizedEntry
 from cashflow_direct.money import stable_id
 
@@ -65,6 +66,21 @@ def _has(value: str, terms: Sequence[str]) -> bool:
     return any(term in value for term in terms)
 
 
+def _reciprocal_counterparts(row, other) -> bool:
+    account = split_account_levels(row.account_name)
+    counterpart = split_account_levels(row.counterpart_name)
+    return bool(account and counterpart
+                and split_account_levels(other.counterpart_name)[:1] == account[:1]
+                and split_account_levels(other.account_name)[:1] == counterpart[:1])
+
+
+def _unique_reciprocal_pairs(rows) -> bool:
+    return all(sum(_reciprocal_counterparts(row, other)
+                   and _balance(other) == -_balance(row) != 0
+                   for other in rows if other.entry_id != row.entry_id) == 1
+               for row in rows)
+
+
 def _evidence(rows: Sequence[NormalizedEntry], relation: str) -> tuple[StructureEvidence, ...]:
     return tuple(StructureEvidence(row.entry_id, row.summary, relation) for row in rows)
 
@@ -108,7 +124,8 @@ def _known_noncash_group(rows: Sequence[NormalizedEntry], policy: Mapping[str, o
         and summary not in cash_summaries
         and all(_balance(row) for row in rows)
         and sum(_balance(row) for row in rows) == 0
-        and _matches_account_pair(rows, policy["accrual_account_pairs"])
+        and (_matches_account_pair(rows, policy["accrual_account_pairs"])
+             or _unique_reciprocal_pairs(rows))
     )
 
 
@@ -137,7 +154,9 @@ def _business_groups(rows, cash, policy):
     if any(_balance(r) * amount <= 0 for r in cash):
         return ()
     payroll = [r for r in rows if _has(r.account_name, policy["payroll_accounts"])]
-    if payroll and all(_has(r.summary, policy["payroll_terms"]) for r in payroll):
+    if payroll and (all(_has(r.summary, policy["payroll_terms"]) for r in payroll)
+                    or all(_reciprocal_counterparts(row, source)
+                           for row in payroll for source in cash)):
         main = payroll
         offsets = [r for r in rows if r not in main]
         if (any(_balance(r) * amount >= 0 for r in main)
@@ -207,6 +226,56 @@ def _split_contiguous_balanced_groups(rows: Sequence[NormalizedEntry]):
     return tuple(groups) if start == len(ordered) and len(groups) > 1 else None
 
 
+def _reciprocal_counterpart_groups(rows, cash, policy):
+    """双方所填对方一级互相对应，且逐来源金额配对唯一时，采用显式分录关系。"""
+    if not rows or not cash:
+        return ()
+    if ((len({(row.summary, row.account_name) for row in rows}) == 1
+         or all(_has(row.account_name, policy["payroll_accounts"]) for row in rows))
+            and all(_reciprocal_counterparts(row, source)
+                    for row in rows for source in cash)):
+        groups = _business_groups(rows, cash, policy)
+        cash_ids = {source.entry_id for source in cash}
+        return tuple(StructureBusinessGroup(
+            group.group_id, group.main_entry_ids, group.settlement_entry_ids,
+            group.cash_shares,
+            tuple(StructureEvidence(e.entry_id, e.text,
+                  "cash_source" if e.entry_id in cash_ids else "reciprocal_counterpart_same_business")
+                  for e in group.evidence),
+        ) for group in groups)
+    business_rows = defaultdict(list)
+    for row in rows:
+        key = (("explicit_staff_settlement", "")
+               if _has(row.account_name, policy["payroll_accounts"])
+               else (row.summary, row.account_name))
+        business_rows[key].append(row)
+    cash_by_business = defaultdict(list)
+    for source in cash:
+        matches = {key for key, members in business_rows.items()
+                   if any(_reciprocal_counterparts(row, source)
+                          and _balance(source) == -_balance(row) != 0 for row in members)}
+        exact_summaries = {key for key in matches if key[0] == source.summary}
+        if exact_summaries:
+            matches = exact_summaries
+        if len(matches) != 1:
+            return ()
+        cash_by_business[next(iter(matches))].append(source)
+    result = []
+    for key, members in business_rows.items():
+        sources = cash_by_business[key]
+        groups = _business_groups(members, sources, policy)
+        if len(groups) != 1:
+            return ()
+        group = groups[0]
+        result.append(StructureBusinessGroup(
+            group.group_id, group.main_entry_ids, group.settlement_entry_ids,
+            group.cash_shares,
+            (*_evidence(members, "reciprocal_counterpart_exact_amount"),
+             *_evidence(sources, "cash_source")),
+        ))
+    return tuple(result)
+
+
 def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids: Sequence[str],
                               policy: Mapping[str, object]) -> StructureSearchResult:
     rows = tuple(sorted(entries, key=lambda r: r.entry_id))
@@ -258,21 +327,69 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
                     "原始行序可完整切分为多个连续平衡分录组",
                 )
 
+    # 所填对方明确互相指向非现金科目时，先保留这项独立非现金结算；
+    # 任何一方指向实际现金一级时均不在此排除，避免丢掉真实现金业务。
+    cash_level1s = {split_account_levels(row.account_name)[:1] for row in cash}
+    explicit_noncash = defaultdict(list)
+    for row in noncash:
+        counterpart = split_account_levels(row.counterpart_name)[:1]
+        if counterpart and counterpart not in cash_level1s and row.summary:
+            explicit_noncash[row.summary].append(row)
+    excluded = []
+    for group in explicit_noncash.values():
+        if (len(group) >= 2 and sum(_balance(row) for row in group) == 0
+                and all(any(_reciprocal_counterparts(row, other)
+                            and _balance(row) * _balance(other) < 0
+                            for other in group) for row in group)):
+            ids = tuple(row.entry_id for row in group)
+            excluded.append(StructureNonCashGroup(
+                stable_id("NC", *ids), ids,
+                _evidence(group, "reciprocal_counterpart_noncash"),
+            ))
+    explicit_ids = {entry_id for group in excluded for entry_id in group.entry_ids}
+    remaining_explicit = [row for group in explicit_noncash.values() for row in group
+                          if row.entry_id not in explicit_ids]
+    pair_matches = {
+        row.entry_id: tuple(other for other in remaining_explicit
+                            if other.entry_id != row.entry_id
+                            and _reciprocal_counterparts(row, other)
+                            and _balance(other) == -_balance(row) != 0)
+        for row in remaining_explicit
+    }
+    for row in remaining_explicit:
+        matches = pair_matches[row.entry_id]
+        if row.entry_id in explicit_ids or len(matches) != 1:
+            continue
+        other = matches[0]
+        if tuple(x.entry_id for x in pair_matches[other.entry_id]) != (row.entry_id,):
+            continue
+        pair = (row, other)
+        ids = tuple(x.entry_id for x in pair)
+        excluded.append(StructureNonCashGroup(
+            stable_id("NC", *ids), ids,
+            _evidence(pair, "reciprocal_counterpart_noncash"),
+        ))
+        explicit_ids.update(ids)
+    noncash = [row for row in noncash if row.entry_id not in explicit_ids]
     accrual_groups = defaultdict(list)
     for row in noncash:
         if (_has(row.summary, policy["accrual_terms"])
                 and row.summary not in {r.summary for r in cash}):
             accrual_groups[row.summary].append(row)
-    excluded = []
     for summary, group in sorted(accrual_groups.items()):
-        pairs = policy["accrual_account_pairs"]
-        if (len(group) >= 2 and sum(_balance(r) for r in group) == 0
-                and all(_balance(r) for r in group)
-                and _matches_account_pair(group, pairs)):
+        if _known_noncash_group(group, policy, {row.summary for row in cash}):
             ids = tuple(r.entry_id for r in group)
             excluded.append(StructureNonCashGroup(stable_id("NC", *ids), ids, _evidence(group, "balanced_accrual")))
     excluded_ids = {i for g in excluded for i in g.entry_ids}
     noncash = [r for r in noncash if r.entry_id not in excluded_ids]
+    reciprocal_groups = _reciprocal_counterpart_groups(noncash, cash, policy)
+    if reciprocal_groups:
+        reciprocal_plan = _plan(voucher, reciprocal_groups, excluded, rows, cash)
+        if not validate_structure_plan(reciprocal_plan, rows, cash_ids):
+            return StructureSearchResult(
+                reciprocal_plan, (reciprocal_plan,), True,
+                "双方对方一级互相对应，逐现金来源金额配对唯一且守恒",
+            )
     cash_groups = defaultdict(list)
     for row in cash:
         cash_groups[(row.summary, 1 if _balance(row) > 0 else -1)].append(row)
