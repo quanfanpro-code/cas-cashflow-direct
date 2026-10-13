@@ -81,6 +81,22 @@ def test_reciprocal_counterparts_identify_unique_cash_pairs_with_broader_cash_su
     assert result == build(tuple(reversed(rows)))
 
 
+def test_payroll_group_keeps_cash_and_bank_sources_without_cross_matching_them():
+    rows = (
+        replace(entry(1, "应付职工薪酬_工资", 300, "支付留存绩效"), counterpart_name="银行存款"),
+        replace(entry(2, "应付职工薪酬_奖金", 100, "支付留存绩效"), counterpart_name="库存现金"),
+        replace(entry(3, "银行存款", -300, "职工款项结算"), counterpart_name="应付职工薪酬"),
+        replace(entry(4, "库存现金", -100, "职工款项结算"), counterpart_name="应付职工薪酬"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert sum(x.cash_delta_cent for x in result.components) == -400
+    assert {x.entry_id for x in result.source_allocations} == {"E3", "E4"}
+    assert result == build(tuple(reversed(rows)))
+    inconsistent = (*rows[:3], replace(rows[3], counterpart_name="管理费用"))
+    assert build(inconsistent).structure_requests
+
+
 def test_reciprocal_counterpart_pairing_does_not_guess_equal_amounts_or_conflicting_accounts():
     base = (
         replace(entry(1, "应交税费_未交增值税", 100, "缴纳增值税"), counterpart_name="银行存款"),

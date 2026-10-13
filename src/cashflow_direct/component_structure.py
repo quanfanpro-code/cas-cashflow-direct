@@ -74,6 +74,14 @@ def _reciprocal_counterparts(row, other) -> bool:
                 and split_account_levels(other.account_name)[:1] == counterpart[:1])
 
 
+def _reciprocal_coverage(rows, cash) -> bool:
+    """同一业务组两侧均有明确对应；不同现金账户不必与每条业务行交叉匹配。"""
+    return bool(rows and cash) and (
+        all(any(_reciprocal_counterparts(row, source) for source in cash) for row in rows)
+        and all(any(_reciprocal_counterparts(row, source) for row in rows) for source in cash)
+    )
+
+
 def _unique_reciprocal_pairs(rows) -> bool:
     return all(sum(_reciprocal_counterparts(row, other)
                    and _balance(other) == -_balance(row) != 0
@@ -155,8 +163,7 @@ def _business_groups(rows, cash, policy):
         return ()
     payroll = [r for r in rows if _has(r.account_name, policy["payroll_accounts"])]
     if payroll and (all(_has(r.summary, policy["payroll_terms"]) for r in payroll)
-                    or all(_reciprocal_counterparts(row, source)
-                           for row in payroll for source in cash)):
+                    or _reciprocal_coverage(payroll, cash)):
         main = payroll
         offsets = [r for r in rows if r not in main]
         if (any(_balance(r) * amount >= 0 for r in main)
@@ -232,8 +239,7 @@ def _reciprocal_counterpart_groups(rows, cash, policy):
         return ()
     if ((len({(row.summary, row.account_name) for row in rows}) == 1
          or all(_has(row.account_name, policy["payroll_accounts"]) for row in rows))
-            and all(_reciprocal_counterparts(row, source)
-                    for row in rows for source in cash)):
+            and _reciprocal_coverage(rows, cash)):
         groups = _business_groups(rows, cash, policy)
         cash_ids = {source.entry_id for source in cash}
         return tuple(StructureBusinessGroup(
