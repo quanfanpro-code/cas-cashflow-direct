@@ -10,6 +10,44 @@ def _review():
     return importlib.import_module("cashflow_direct.ai_review")
 
 
+def test_blind_reviewer_can_review_distinct_components_and_resubmit_results() -> None:
+    review = _review()
+    tasks = tuple(
+        replace(
+            _task(),
+            task_id=f"AI-A-{number}",
+            component_id=f"CMP-{number}",
+            context=_task().context + "；独立复核A：不得查看另一复核结果",
+        )
+        for number in (1, 2)
+    )
+    payloads = tuple(
+        {
+            **_payload(),
+            "task_id": task.task_id,
+            "component_id": task.component_id,
+            "review_round": "A",
+            "reviewer_id": "same-independent-reviewer-a",
+        }
+        for task in tasks
+    )
+    valid_items = {"CFO-01", "CFO-03"}
+    first = review.validate_structured_ai_results(tasks, payloads[:1], valid_items)
+
+    merged = review.merge_structured_ai_results(
+        tasks, first.valid_results, payloads[1:], valid_items
+    )
+    assert merged.status == "AI 已完成"
+    assert merged.invalid_ids == ()
+    assert merged.missing_ids == ()
+
+    repeated = review.merge_structured_ai_results(
+        tasks, merged.valid_results, payloads, valid_items
+    )
+    assert repeated.status == "AI 已完成"
+    assert repeated.valid_results == merged.valid_results
+
+
 def _task() -> AITask:
     return AITask(
         task_id="AI-1",

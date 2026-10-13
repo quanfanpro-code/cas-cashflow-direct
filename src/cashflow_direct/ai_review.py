@@ -604,7 +604,7 @@ def merge_structured_ai_results(
     incoming = validate_structured_ai_results(expected, payloads, valid_item_ids)
     merged = {item.task_id: item for item in prior_results}
     prior_blind_reviewers = {
-        item.reviewer_id: item.task_id
+        (item.component_id, item.reviewer_id): item.review_round
         for item in prior_results
         if item.review_round in {"A", "B", "C"}
     }
@@ -612,8 +612,9 @@ def merge_structured_ai_results(
         item.task_id
         for item in incoming.valid_results
         if item.review_round in {"A", "B", "C"}
-        and item.reviewer_id in prior_blind_reviewers
-        and prior_blind_reviewers[item.reviewer_id] != item.task_id
+        and (item.component_id, item.reviewer_id) in prior_blind_reviewers
+        and prior_blind_reviewers[(item.component_id, item.reviewer_id)]
+        != item.review_round
     }
     for item in incoming.valid_results:
         if item.task_id in cross_batch_invalid:
