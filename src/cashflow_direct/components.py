@@ -1155,6 +1155,12 @@ def build_cashflow_components(
                 entry
                 for entry in cash_entries
                 if _counterpart_is_included_cash(entry, scope)
+                and (single_sided or not any(
+                    account_key_for_entry(other) in scope.excluded_keys
+                    and other.summary == entry.summary
+                    and entry_cash_delta_cent(other) == -entry_cash_delta_cent(entry)
+                    for other in voucher_entries
+                ))
             ]
             if explicit_internal:
                 excluded.extend(

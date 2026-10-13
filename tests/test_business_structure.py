@@ -1,6 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 from copy import deepcopy
+import pytest
 
 from cashflow_direct.component_structure import resolve_voucher_structure, validate_structure_plan
 from cashflow_direct.rule_registry import default_rule_registry
@@ -20,6 +21,46 @@ def build(rows, **kwargs):
     proposal = discover_cash_scope(rows)
     scope = confirm_cash_scope(proposal, {x.account_key: "include" for x in proposal.candidates})
     return build_cashflow_components(rows, scope, **kwargs)
+
+
+def test_repeated_noncash_deductions_close_after_unique_cross_summary_pair():
+    rows = (
+        replace(entry(1, "应付职工薪酬_奖金", 100, "发放奖金"), counterpart_name="银行存款"),
+        replace(entry(2, "应付职工薪酬_奖金", 11, "发放奖金"), counterpart_name="应交税费"),
+        replace(entry(3, "应付职工薪酬_奖金", 11, "发放奖金"), counterpart_name="应交税费"),
+        replace(entry(4, "应付职工薪酬_工资", 200, "支付留存绩效"), counterpart_name="银行存款"),
+        replace(entry(5, "应付职工薪酬_工资", 7, "支付留存绩效"), counterpart_name="应交税费"),
+        replace(entry(6, "银行存款", -100, "发放奖金及绩效"), counterpart_name="应付职工薪酬"),
+        replace(entry(7, "应交税费_个人所得税", -11, "发放奖金"), counterpart_name="应付职工薪酬"),
+        replace(entry(8, "应交税费_个人所得税", -7, "发放奖金"), counterpart_name="应付职工薪酬"),
+        replace(entry(9, "银行存款", -200, "发放奖金及绩效"), counterpart_name="应付职工薪酬"),
+        replace(entry(10, "应交税费_个人所得税", -11, "发放奖金"), counterpart_name="应付职工薪酬"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert sum(x.cash_delta_cent for x in result.components) == -300
+    assert {x.entry_id for x in result.source_allocations} == {"E6", "E9"}
+    assert {"E2", "E3", "E7", "E10"} in [set(g.entry_ids) for g in result.structure_plans[0].noncash_groups]
+    assert result == build(tuple(reversed(rows)))
+
+
+@pytest.mark.parametrize("direction", (1, -1))
+def test_generic_bank_counterpart_cannot_hide_transfer_from_excluded_account(direction):
+    rows = (
+        replace(entry(1, "银行存款_活期户", direction * 1000, "定期与活期账户转移"), account_code="100201", counterpart_name="银行存款"),
+        replace(entry(2, "银行存款_半年定期户", -direction * 1000, "定期与活期账户转移"), account_code="100202", counterpart_name="银行存款"),
+        replace(entry(3, "银行存款_活期户", 7, "定期存款利息收款"), account_code="100201", counterpart_name="财务费用"),
+        replace(entry(4, "财务费用_利息收入", -7, "定期存款利息收款"), counterpart_name="银行存款"),
+    )
+    alias = replace(entry(20, "银行存款", 1, "其他凭证账户标识"), voucher_key="OTHER")
+    scope = confirm_cash_scope(discover_cash_scope((*rows, alias)), {
+        "100201": "include", "100202": "exclude", "银行存款": "include",
+    })
+    result = build_cashflow_components(rows, scope)
+    assert not result.structure_requests
+    assert not result.excluded_internal_transfers
+    assert sorted(x.cash_delta_cent for x in result.components) == sorted([7, direction * 1000])
+    assert sum(x.allocated_cent for x in result.source_allocations) == direction * 1000 + 7
 
 
 def test_reciprocal_counterparts_identify_unique_cash_pairs_with_broader_cash_summary():

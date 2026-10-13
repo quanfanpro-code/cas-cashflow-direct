@@ -336,17 +336,23 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
         if counterpart and counterpart not in cash_level1s and row.summary:
             explicit_noncash[row.summary].append(row)
     excluded = []
-    for group in explicit_noncash.values():
-        if (len(group) >= 2 and sum(_balance(row) for row in group) == 0
-                and all(any(_reciprocal_counterparts(row, other)
-                            and _balance(row) * _balance(other) < 0
-                            for other in group) for row in group)):
-            ids = tuple(row.entry_id for row in group)
-            excluded.append(StructureNonCashGroup(
-                stable_id("NC", *ids), ids,
-                _evidence(group, "reciprocal_counterpart_noncash"),
-            ))
-    explicit_ids = {entry_id for group in excluded for entry_id in group.entry_ids}
+    explicit_ids = set()
+
+    def exclude_balanced_explicit_groups():
+        for candidates in explicit_noncash.values():
+            group = tuple(row for row in candidates if row.entry_id not in explicit_ids)
+            if (len(group) >= 2 and sum(_balance(row) for row in group) == 0
+                    and all(any(_reciprocal_counterparts(row, other)
+                                and _balance(row) * _balance(other) < 0
+                                for other in group) for row in group)):
+                ids = tuple(row.entry_id for row in group)
+                excluded.append(StructureNonCashGroup(
+                    stable_id("NC", *ids), ids,
+                    _evidence(group, "reciprocal_counterpart_noncash"),
+                ))
+                explicit_ids.update(ids)
+
+    exclude_balanced_explicit_groups()
     remaining_explicit = [row for group in explicit_noncash.values() for row in group
                           if row.entry_id not in explicit_ids]
     pair_matches = {
@@ -370,6 +376,8 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
             _evidence(pair, "reciprocal_counterpart_noncash"),
         ))
         explicit_ids.update(ids)
+    # 唯一配对拆出后，再验证整个剩余同摘要组；不搜索金额子集或猜配重复行。
+    exclude_balanced_explicit_groups()
     noncash = [row for row in noncash if row.entry_id not in explicit_ids]
     accrual_groups = defaultdict(list)
     for row in noncash:
