@@ -69,6 +69,49 @@ def _evidence(rows: Sequence[NormalizedEntry], relation: str) -> tuple[Structure
     return tuple(StructureEvidence(row.entry_id, row.summary, relation) for row in rows)
 
 
+def _matches_account_pair(rows: Sequence[NormalizedEntry], pairs) -> bool:
+    if not rows:
+        return False
+    for pair in pairs:
+        if (len(pair) == 1 and all(_has(row.account_name, pair) for row in rows)):
+            return True
+        if (len(pair) > 1
+                and all(_has(row.account_name, pair) for row in rows)
+                and all(any(term in row.account_name for row in rows) for term in pair)):
+            return True
+
+    # A single accrual may debit several expense paths against one payable.
+    # Permit their registered pairs together only when they share an account
+    # anchor and every row belongs to one of those fully represented pairs.
+    anchors = {term for pair in pairs if len(pair) > 1 for term in pair}
+    for anchor in anchors:
+        present_pairs = [
+            pair for pair in pairs if len(pair) > 1 and anchor in pair
+            and all(any(term in row.account_name for row in rows) for term in pair)
+        ]
+        if len(present_pairs) < 2:
+            continue
+        allowed_terms = {term for pair in present_pairs for term in pair}
+        if all(any(term in row.account_name for term in allowed_terms) for row in rows):
+            return True
+    return False
+
+
+def _known_noncash_group(rows: Sequence[NormalizedEntry], policy: Mapping[str, object],
+                         cash_summaries: set[str]) -> bool:
+    summaries = {row.summary for row in rows}
+    summary = next(iter(summaries), "")
+    return (
+        len(rows) >= 2
+        and len(summaries) == 1
+        and bool(summary)
+        and summary not in cash_summaries
+        and all(_balance(row) for row in rows)
+        and sum(_balance(row) for row in rows) == 0
+        and _matches_account_pair(rows, policy["accrual_account_pairs"])
+    )
+
+
 def _plan(voucher: str, groups, noncash, rows, cash) -> VoucherStructurePlan:
     groups = tuple(sorted(groups, key=lambda g: g.group_id))
     used = {i for g in groups for i in (*g.main_entry_ids, *g.settlement_entry_ids)}
@@ -141,6 +184,29 @@ def _business_groups(rows, cash, policy):
     return tuple(result)
 
 
+def _split_contiguous_balanced_groups(rows: Sequence[NormalizedEntry]):
+    """按来源行序切分多个完整平衡的连续分录组；不按金额子集猜配。"""
+    if len(rows) < 4 or len({(r.source.file_id, r.source.sheet_name) for r in rows}) != 1:
+        return None
+    ordered = tuple(sorted(rows, key=lambda r: (r.source.row_start, r.source.row_end)))
+    if len({r.source.row_start for r in ordered}) != len(ordered):
+        return None
+
+    groups = []
+    start = 0
+    balance = 0
+    for position, row in enumerate(ordered):
+        debit, credit = row.debit_cent, row.credit_cent
+        if (debit == 0) == (credit == 0):
+            return None
+        balance += debit - credit
+        if balance == 0:
+            groups.append(ordered[start:position + 1])
+            start = position + 1
+
+    return tuple(groups) if start == len(ordered) and len(groups) > 1 else None
+
+
 def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids: Sequence[str],
                               policy: Mapping[str, object]) -> StructureSearchResult:
     rows = tuple(sorted(entries, key=lambda r: r.entry_id))
@@ -155,6 +221,43 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
     if len(noncash) > int(policy["max_relation_rows"]):
         plan = _plan(voucher, (), (), rows, cash)
         return StructureSearchResult(plan, (), False, "关系搜索未完成：超过分录行数上限")
+
+    # 借鉴对方科目生成器：只有原始行序能完整切成至少两个平衡组时才采用。
+    # 含现金组继续按现金方向分配；不含现金的平衡组作为非现金业务留痕。
+    contiguous_groups = _split_contiguous_balanced_groups(rows)
+    if contiguous_groups:
+        split_business = []
+        split_noncash = []
+        split_is_complete = True
+        for group_rows in contiguous_groups:
+            group_cash = tuple(r for r in group_rows if r.entry_id in cash_ids)
+            group_noncash = tuple(r for r in group_rows if r.entry_id not in cash_ids)
+            if group_cash:
+                business = _business_groups(group_noncash, group_cash, policy)
+                if not business:
+                    split_is_complete = False
+                    break
+                split_business.extend(business)
+            elif group_noncash:
+                if not _known_noncash_group(
+                    group_noncash, policy, {row.summary for row in cash}
+                ):
+                    split_is_complete = False
+                    break
+                ids = tuple(r.entry_id for r in group_noncash)
+                split_noncash.append(StructureNonCashGroup(
+                    stable_id("NC", *ids), ids,
+                    _evidence(group_noncash, "balanced_contiguous_group"),
+                ))
+        if split_is_complete:
+            split_plan = _plan(voucher, split_business, split_noncash, rows, cash)
+            if (not split_plan.unresolved_entry_ids and not split_plan.pending_cash_shares
+                    and not validate_structure_plan(split_plan, rows, cash_ids)):
+                return StructureSearchResult(
+                    split_plan, (split_plan,), True,
+                    "原始行序可完整切分为多个连续平衡分录组",
+                )
+
     accrual_groups = defaultdict(list)
     for row in noncash:
         if (_has(row.summary, policy["accrual_terms"])
@@ -165,9 +268,7 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
         pairs = policy["accrual_account_pairs"]
         if (len(group) >= 2 and sum(_balance(r) for r in group) == 0
                 and all(_balance(r) for r in group)
-                and any(all(_has(r.account_name, pair) for r in group)
-                        and all(any(term in r.account_name for r in group) for term in pair)
-                        for pair in pairs)):
+                and _matches_account_pair(group, pairs)):
             ids = tuple(r.entry_id for r in group)
             excluded.append(StructureNonCashGroup(stable_id("NC", *ids), ids, _evidence(group, "balanced_accrual")))
     excluded_ids = {i for g in excluded for i in g.entry_ids}

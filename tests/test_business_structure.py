@@ -48,6 +48,101 @@ def test_self_and_on_behalf_payment_keep_separate_business_and_actual_cash():
     assert not result.structure_requests
 
 
+def test_paid_payable_is_split_from_same_voucher_invoice_accrual():
+    rows = (
+        entry(1, "银行存款", -14_000, "付曾瀚报销拉晶车间采购钢化玻璃1件货款1.7"),
+        entry(2, "应付账款_应付账款_人民币", 14_000, "付曾瀚报销拉晶车间采购钢化玻璃1件货款1.7"),
+        entry(3, "低值易耗品_生产仪器工具", 14_000, "收拉晶车间采购钢化玻璃发票24312000000406430491"),
+        entry(4, "应付账款_应付账款_人民币", -14_000, "收拉晶车间采购钢化玻璃发票24312000000406430491"),
+    )
+
+    result = build(rows)
+
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -14_000
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E3", "E4"}
+
+
+def test_contiguous_balanced_voucher_groups_split_cash_and_non_cash_by_source_order():
+    cash = replace(
+        entry(1, "银行存款", -14_000, "付钢化玻璃货款"),
+        original_flow_item="购买商品、接受劳务支付的现金",
+        label_side="cash",
+        retained_side="cash",
+    )
+    rows = (
+        cash,
+        entry(2, "应付账款", 14_000, "付钢化玻璃货款"),
+        entry(3, "原材料_辅助材料_高温材料", 14_000, "收钢化玻璃验收单"),
+        entry(4, "应付账款", -14_000, "收钢化玻璃验收单"),
+    )
+
+    result = build(rows)
+
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -14_000
+    assert result.components[0].original_item_text == "购买商品、接受劳务支付的现金"
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E3", "E4"}
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_contiguous_mixed_expense_accrual_is_grouped_as_one_non_cash_event():
+    rows = (
+        entry(1, "银行存款", -120_000, "支付员工福利"),
+        entry(2, "应付职工薪酬_应付福利费", 120_000, "支付员工福利"),
+        entry(3, "生产成本_直接人工_福利费", 60_000, "计提员工福利"),
+        entry(4, "销售费用_福利费", 60_000, "计提员工福利"),
+        entry(5, "应付职工薪酬_应付福利费", -120_000, "计提员工福利"),
+    )
+
+    result = build(rows)
+
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -120_000
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E3", "E4", "E5"}
+
+
+def test_balanced_noncash_group_with_different_summaries_remains_pending():
+    rows = payroll()[:5] + (
+        entry(6, "制造费用", 100, "计提福利"),
+        entry(7, "应付职工薪酬", -100, "冲回福利"),
+    )
+
+    result = build(rows)
+
+    assert result.structure_requests
+    assert all("structure_pending" in x.anomalies for x in result.components)
+
+
+def test_balanced_noncash_group_with_unknown_account_pair_remains_pending():
+    rows = payroll()[:5] + (
+        entry(6, "预付账款", 100, "其他事项"),
+        entry(7, "其他应收款", -100, "其他事项"),
+    )
+
+    result = build(rows)
+
+    assert result.structure_requests
+    assert all("structure_pending" in x.anomalies for x in result.components)
+
+
+def test_noncash_group_with_cash_summary_remains_pending_even_if_it_is_an_accrual():
+    rows = (
+        entry(1, "银行存款", -120, "计提员工福利"),
+        entry(2, "应付职工薪酬", 120, "计提员工福利"),
+        entry(3, "制造费用", 120, "计提员工福利"),
+        entry(4, "应付职工薪酬", -120, "计提员工福利"),
+    )
+
+    result = build(rows)
+
+    assert result.structure_requests
+    assert all("structure_pending" in x.anomalies for x in result.components)
+
+
 def test_payroll_offsets_and_red_accrual_have_distinct_roles():
     result = build(payroll())
     assert sorted(x.cash_delta_cent for x in result.components) == [-8400, -2000]

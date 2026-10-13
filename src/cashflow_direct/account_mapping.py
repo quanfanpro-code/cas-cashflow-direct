@@ -179,9 +179,10 @@ def resolve_account_mappings(
             raise ValueError(f"等待一级科目确认：{record.original_level1}")
         if choice == "manual":
             raise ValueError(
-                f"一级科目必须映射至201条基线后才能继续：{record.original_level1}"
+                f"一级科目必须选择标准科目或明确保留原名：{record.original_level1}"
             )
-        if choice not in standard_names:
+        keep_original = choice == record.original_level1
+        if choice not in standard_names and not keep_original:
             raise ValueError(f"不是201条基线中的标准一级科目：{choice}")
         resolved.append(
             replace(
@@ -191,7 +192,7 @@ def resolve_account_mappings(
                 candidate_standard_names=tuple(
                     dict.fromkeys((*record.candidate_standard_names, choice))
                 ),
-                basis="用户确认",
+                basis="用户确认保留原名" if keep_original else "用户确认",
             )
         )
     return tuple(resolved)

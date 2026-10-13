@@ -126,7 +126,7 @@ def test_every_unknown_name_must_be_mapped_before_processing_can_continue() -> N
     accounts = load_standard_accounts(PROJECT_ROOT)
     pending = build_account_mappings(("研发支出费_项目甲", "客户自定义成本_检验费"), accounts)
 
-    with pytest.raises(ValueError, match="必须映射至201条基线"):
+    with pytest.raises(ValueError, match="必须选择标准科目或明确保留原名"):
         resolve_account_mappings(
             pending,
             {"研发支出费": "研发支出", "客户自定义成本": "manual"},
@@ -148,6 +148,22 @@ def test_confirmed_mapping_can_be_corrected_before_downstream_processing() -> No
 
     assert corrected[0].standard_level1 == "管理费用"
     assert corrected[0].basis == "用户确认"
+
+
+def test_user_can_confirm_preserving_an_unmapped_account_name() -> None:
+    accounts = load_standard_accounts(PROJECT_ROOT)
+    pending = build_account_mappings(("待摊费用_租金",), accounts)
+
+    preserved = resolve_account_mappings(
+        pending, {"待摊费用": "待摊费用"}, accounts
+    )
+
+    assert preserved[0].standard_level1 == "待摊费用"
+    assert preserved[0].status == "confirmed"
+    assert preserved[0].basis == "用户确认保留原名"
+    assert apply_account_mapping(
+        "待摊费用_租金", {preserved[0].original_level1: preserved[0]}
+    ) == ("待摊费用_租金", True)
 
 
 def test_component_keeps_raw_path_but_classifies_with_standard_path() -> None:
