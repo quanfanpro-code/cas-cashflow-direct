@@ -39,6 +39,8 @@ _ANOMALY_TEXT = {
     "voucher_unbalanced": "凭证借贷不平衡",
     "unallocated_cash": "现金金额尚未完整分配",
     "cash_allocation_mismatch": "现金分配金额不守恒",
+    "original_item_conflict": "同一业务的原现流项目不一致",
+    "counterpart_level1_mismatch": "本业务含现金行对方一级科目与对应业务不一致（待核实字段或关联）",
 }
 
 

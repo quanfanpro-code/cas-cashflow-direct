@@ -6,9 +6,10 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from cashflow_direct.models import CashflowComponent, NormalizedEntry
+from cashflow_direct.models import CashflowComponent, NormalizedEntry, SourceLocator
 from cashflow_direct.component_structure import VoucherStructurePlan, resolve_voucher_structure
 from cashflow_direct.money import stable_id
+from cashflow_direct.account_mapping import extract_original_level1
 from cashflow_direct.rule_registry import default_rule_registry
 
 
@@ -76,6 +77,18 @@ class RoughReconciliation:
 
 
 @dataclass(frozen=True, slots=True)
+class CounterpartLevel1Check:
+    cash_entry_id: str
+    source: SourceLocator
+    declared_counterpart: str
+    declared_level1: str
+    actual_level1s: tuple[str, ...]
+    component_ids: tuple[str, ...]
+    status: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ComponentBuildResult:
     components: tuple[CashflowComponent, ...]
     excluded_internal_transfers: tuple[InternalTransferLeg, ...]
@@ -83,6 +96,7 @@ class ComponentBuildResult:
     source_allocations: tuple[ComponentSourceAllocation, ...] = ()
     structure_requests: tuple[ComponentStructureRequest, ...] = ()
     structure_plans: tuple[VoucherStructurePlan, ...] = ()
+    counterpart_level1_checks: tuple[CounterpartLevel1Check, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1036,6 +1050,58 @@ def _group_components(
     return grouped
 
 
+def _check_counterpart_level1(
+    entries: Sequence[NormalizedEntry],
+    components: Sequence[CashflowComponent],
+    allocations: Sequence[ComponentSourceAllocation],
+    scope: CashScope,
+    excluded: Sequence[InternalTransferLeg],
+) -> tuple[CounterpartLevel1Check, ...]:
+    """按已确定的实际现金来源核验一级集合，不替代路径、评分或业务关联。"""
+    by_id = {component.component_id: component for component in components}
+    related: dict[str, set[str]] = defaultdict(set)
+    allocated: dict[str, int] = defaultdict(int)
+    for allocation in allocations:
+        if allocation.allocated_cent:
+            related[allocation.entry_id].add(allocation.component_id)
+            allocated[allocation.entry_id] += allocation.allocated_cent
+    internal_ids = {leg.entry_id for leg in excluded}
+    uncertain_markers = {
+        "structure_pending", "summary_allocation_ambiguous", "cash_allocation_mismatch",
+        "unallocated_cash", "voucher_unbalanced",
+    }
+    checks = []
+    for entry in sorted(entries, key=lambda row: row.entry_id):
+        if not entry.account_name or account_key_for_entry(entry) not in scope.included_keys:
+            continue
+        component_ids = tuple(sorted(related[entry.entry_id]))
+        associated = tuple(by_id[key] for key in component_ids)
+        actual = tuple(sorted({
+            level1 for component in associated for path in component.counterpart_accounts
+            if (level1 := extract_original_level1(path))
+        }))
+        declared = extract_original_level1(entry.counterpart_name)
+        if not declared:
+            status, reason = "未提供", "现金行未提供可用对方科目，不新增核验异常"
+        elif not associated and (entry.entry_id in internal_ids or not entry_cash_delta_cent(entry)):
+            status, reason = "不适用", "该现金行已确认内部划转或没有现金变化"
+        elif (not associated or not actual
+              or allocated[entry.entry_id] != entry_cash_delta_cent(entry)
+              or any(uncertain_markers.intersection(component.anomalies)
+                     or not component.counterpart_accounts for component in associated)):
+            status, reason = "待核实", "对应业务尚未全部确定，不据此判断对方一级矛盾"
+        elif declared in actual:
+            status, reason = "一致", "现金行对方一级包含在对应业务的一级科目集合中"
+        else:
+            status, reason = "不一致", "现金行对方一级不在对应业务集合中，请核实对方字段或业务关联"
+        checks.append(CounterpartLevel1Check(
+            entry.entry_id, entry.source,
+            entry.original_counterpart_name or entry.counterpart_name,
+            declared, actual, component_ids, status, reason,
+        ))
+    return tuple(checks)
+
+
 def build_cashflow_components(
     entries: Sequence[NormalizedEntry],
     scope: CashScope,
@@ -1225,13 +1291,44 @@ def build_cashflow_components(
         )
     frozen_components = tuple(components)
     structured_vouchers = {p.voucher_key for p in structure_plans}
+    allocations = tuple(explicit_allocations) + _build_source_allocations(
+        entries, tuple(c for c in frozen_components
+                       if c.voucher_key not in structured_vouchers), scope)
+    # 原项目跟随已确定的现金来源，不参与业务关联或金额分配。
+    entry_by_id = {entry.entry_id: entry for entry in entries}
+    cash_items: dict[str, list[str]] = defaultdict(list)
+    for allocation in allocations:
+        entry = entry_by_id[allocation.entry_id]
+        if allocation.allocated_cent and account_key_for_entry(entry) in scope.included_keys:
+            cash_items[allocation.component_id].append(entry.original_flow_item)
+    preserved_components = []
+    for component in frozen_components:
+        labels = tuple(dict.fromkeys(
+            part for text in (component.original_item_text, *cash_items[component.component_id])
+            for part in text.split("；") if part
+        ))
+        preserved_components.append(replace(
+            component,
+            original_item_text="；".join(labels),
+            anomalies=tuple(dict.fromkeys((
+                *component.anomalies,
+                *(("original_item_conflict",) if len(labels) > 1 else ()),
+            ))),
+        ))
+    checks = _check_counterpart_level1(entries, preserved_components, allocations, scope, excluded)
+    mismatch_ids = {key for check in checks if check.status == "不一致" for key in check.component_ids}
+    checked_components = tuple(
+        replace(component, anomalies=tuple(dict.fromkeys((
+            *component.anomalies, "counterpart_level1_mismatch",
+        )))) if component.component_id in mismatch_ids else component
+        for component in preserved_components
+    )
     return ComponentBuildResult(
-        frozen_components,
+        checked_components,
         tuple(excluded),
         0,
-        tuple(explicit_allocations) + _build_source_allocations(
-            entries, tuple(c for c in frozen_components
-                           if c.voucher_key not in structured_vouchers), scope),
+        allocations,
         tuple(structure_requests),
         tuple(structure_plans),
+        checks,
     )

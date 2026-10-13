@@ -2777,6 +2777,8 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         },
         structure_plan_selections=state.get("component_structure_plan_selections", {}),
     )
+    state["counterpart_level1_checks"] = [asdict(check) for check in build.counterpart_level1_checks]
+    _write_trace_jsonl(run_dir, "对方科目一级核验.jsonl", build.counterpart_level1_checks)
     state["component_structure_plans"] = [asdict(plan) for plan in build.structure_plans]
     _write_trace_jsonl(run_dir, "业务关系与现金分配.jsonl", build.structure_plans)
     if build.structure_requests:
