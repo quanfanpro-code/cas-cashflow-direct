@@ -128,6 +128,34 @@ def test_explicit_staff_settlement_keeps_sources_without_guessing_bonus_and_sala
     assert sorted(x.allocated_cent for x in result.source_allocations) == [-100, -100]
 
 
+def test_internal_withdrawal_by_full_cash_account_name_does_not_contaminate_a_real_payment():
+    bank = "银行存款_甲银行_基本户"
+    rows = (
+        replace(entry(1, "其他应收款_往来单位", 700, "支付单位往来"), counterpart_name="银行存款"),
+        replace(entry(2, bank, -700, "支付单位往来"), account_code="100201", counterpart_name="其他应收款"),
+        replace(entry(3, "库存现金", 100, "取现"), account_code="1001", counterpart_name=bank),
+        replace(entry(4, bank, -100, "取现"), account_code="100201", counterpart_name="库存现金"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 1
+    assert result.components[0].cash_delta_cent == -700
+    assert result.components[0].counterpart_accounts == ("其他应收款_往来单位",)
+    assert {x.entry_id for x in result.source_allocations} == {"E2"}
+    assert {x.entry_id for x in result.excluded_internal_transfers} == {"E3", "E4"}
+
+
+def test_pure_cash_transfer_does_not_require_both_counterpart_fields():
+    bank = "银行存款_甲银行_基本户"
+    rows = (
+        replace(entry(1, "库存现金", 100, "取现"), account_code="1001", counterpart_name=""),
+        replace(entry(2, bank, -100, "取现"), account_code="100201", counterpart_name="库存现金"),
+    )
+    result = build(rows)
+    assert not result.components
+    assert {x.entry_id for x in result.excluded_internal_transfers} == {"E1", "E2"}
+
+
 def payroll():
     return (
         entry(1, "银行存款", -8400, "付3月装配车间工资"),

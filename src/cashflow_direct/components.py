@@ -141,6 +141,22 @@ def account_key_for_entry(
     return _account_key(name)
 
 
+def _counterpart_is_included_cash(entry: NormalizedEntry, scope: CashScope) -> bool:
+    """对方可写账户编码、已确认全名或一级别名；具体排除账户不继承纳入属性。"""
+    if not entry.counterpart_name:
+        return False
+    key = account_key_for_entry(entry, counterpart=True)
+    named_keys = {
+        account_key for account_key, names in scope.account_names_by_key
+        if any(_account_key(name) == key for name in names)
+    }
+    if named_keys:
+        return bool(named_keys.intersection(scope.included_keys)) and not bool(
+            named_keys.intersection(scope.excluded_keys)
+        )
+    return key in scope.included_keys
+
+
 def find_cash_row_cleanup_requests(
     entries: Sequence[NormalizedEntry], scope: CashScope
 ) -> tuple[CashRowCleanupRequest, ...]:
@@ -157,8 +173,7 @@ def find_cash_row_cleanup_requests(
             for entry in voucher_entries
         )
         has_named_included_cash = any(
-            entry.counterpart_name
-            and account_key_for_entry(entry, counterpart=True) in scope.included_keys
+            _counterpart_is_included_cash(entry, scope)
             for entry in voucher_entries
         )
         if has_included_cash or has_named_included_cash:
@@ -997,10 +1012,7 @@ def _build_source_allocations(
             for entry in entries_by_voucher.get(voucher_key, ())
             if entry.account_name
             and account_key_for_entry(entry) in scope.included_keys
-            and not (
-                entry.counterpart_name
-                and account_key_for_entry(entry, counterpart=True) in scope.included_keys
-            )
+            and not _counterpart_is_included_cash(entry, scope)
         ]
         remaining = {entry.entry_id: entry_cash_delta_cent(entry) for entry in cash_entries}
         for component in voucher_components:
@@ -1132,11 +1144,17 @@ def build_cashflow_components(
             if entry.account_name and account_key_for_entry(entry) in scope.included_keys
         ]
         if cash_entries:
+            if (not single_sided and len(cash_entries) == len(voucher_entries)
+                    and sum(row.debit_cent - row.credit_cent for row in cash_entries) == 0):
+                excluded.extend(
+                    InternalTransferLeg(voucher_key, row.entry_id, abs(entry_cash_delta_cent(row)))
+                    for row in cash_entries if entry_cash_delta_cent(row)
+                )
+                continue
             explicit_internal = [
                 entry
                 for entry in cash_entries
-                if entry.counterpart_name
-                and account_key_for_entry(entry, counterpart=True) in scope.included_keys
+                if _counterpart_is_included_cash(entry, scope)
             ]
             if explicit_internal:
                 excluded.extend(
@@ -1144,11 +1162,12 @@ def build_cashflow_components(
                     for entry in explicit_internal
                 )
                 cash_entries = [entry for entry in cash_entries if entry not in explicit_internal]
+                voucher_entries = [entry for entry in voucher_entries if entry not in explicit_internal]
             if not cash_entries:
                 continue
             noncash = [entry for entry in voucher_entries if entry not in cash_entries]
             relation_structure = (
-                noncash and not explicit_internal and not single_sided
+                noncash and not single_sided
                 and not any(entry.flow_amount_cent for entry in voucher_entries)
                 and (len({entry.summary for entry in voucher_entries}) > 1
                      or len(voucher_entries) > 2 and len({
@@ -1274,10 +1293,7 @@ def build_cashflow_components(
         )
         one_sided: list[CashflowComponent] = []
         for entry in voucher_entries:
-            named_cash_counterpart = bool(
-                entry.counterpart_name
-                and account_key_for_entry(entry, counterpart=True) in scope.included_keys
-            )
+            named_cash_counterpart = _counterpart_is_included_cash(entry, scope)
             if (
                 entry.retained_side == "counterpart"
                 and named_cash_counterpart
