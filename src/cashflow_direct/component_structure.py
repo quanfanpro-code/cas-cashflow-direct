@@ -233,7 +233,50 @@ def _split_contiguous_balanced_groups(rows: Sequence[NormalizedEntry]):
     return tuple(groups) if start == len(ordered) and len(groups) > 1 else None
 
 
-def _reciprocal_counterpart_groups(rows, cash, policy):
+def _equivalent_source_groups(business_rows, cash, policy, assigned):
+    """仅来源全行相同时消除行号歧义，每笔业务和现金记录仍分别保留。"""
+    source_classes = defaultdict(list)
+    for source in cash:
+        if not source.source_row_hash:
+            return ()
+        key = (source.source_row_hash, source.account_name, source.counterpart_name,
+               source.summary, source.original_flow_item, _balance(source))
+        source_classes[key].append(source)
+    assignments = defaultdict(list)
+    for key, members in business_rows.items():
+        remaining = (sum(_balance(row) for row in members)
+                     + sum(_balance(row) for row in assigned[key]))
+        if not remaining:
+            continue
+        matching = [signature for signature, sources in source_classes.items()
+                    if remaining == -_balance(sources[0])
+                    and _reciprocal_coverage(members, sources)]
+        if len(matching) != 1:
+            return ()
+        assignments[matching[0]].append(key)
+    for signature, sources in source_classes.items():
+        keys = sorted(assignments[signature])
+        if len(keys) != len(sources):
+            return ()
+        for key, source in zip(keys, sorted(sources, key=lambda row: row.entry_id)):
+            assigned[key].append(source)
+    result = []
+    for key, members in business_rows.items():
+        sources = assigned[key]
+        groups = _business_groups(members, sources, policy)
+        if len(groups) != 1:
+            return ()
+        group = groups[0]
+        result.append(StructureBusinessGroup(
+            group.group_id, group.main_entry_ids, group.settlement_entry_ids,
+            group.cash_shares,
+            (*_evidence(members, "reciprocal_counterpart_exact_amount"),
+             *_evidence(sources, "cash_source")),
+        ))
+    return tuple(result)
+
+
+def _reciprocal_counterpart_groups(rows, cash, policy, *, allow_partial=False):
     """双方所填对方一级互相对应，且逐来源金额配对唯一时，采用显式分录关系。"""
     if not rows or not cash:
         return ()
@@ -256,21 +299,39 @@ def _reciprocal_counterpart_groups(rows, cash, policy):
                else (row.summary, row.account_name))
         business_rows[key].append(row)
     cash_by_business = defaultdict(list)
-    for source in cash:
-        matches = {key for key, members in business_rows.items()
-                   if any(_reciprocal_counterparts(row, source)
-                          and _balance(source) == -_balance(row) != 0 for row in members)}
-        exact_summaries = {key for key in matches if key[0] == source.summary}
-        if exact_summaries:
-            matches = exact_summaries
-        if len(matches) != 1:
-            return ()
-        cash_by_business[next(iter(matches))].append(source)
+    pending_sources = list(cash)
+    while pending_sources:
+        progressed = False
+        for source in tuple(pending_sources):
+            matches = set()
+            for key, members in business_rows.items():
+                remaining = (sum(_balance(row) for row in members)
+                             + sum(_balance(row) for row in cash_by_business[key]))
+                if (remaining * _balance(source) < 0
+                        and abs(remaining) >= abs(_balance(source))
+                        and any(_reciprocal_counterparts(row, source)
+                                and _balance(source) == -_balance(row) != 0
+                                for row in members)):
+                    matches.add(key)
+            exact_summaries = {key for key in matches if key[0] == source.summary}
+            if exact_summaries:
+                matches = exact_summaries
+            if len(matches) == 1:
+                cash_by_business[next(iter(matches))].append(source)
+                pending_sources.remove(source)
+                progressed = True
+        if not progressed:
+            equivalent = _equivalent_source_groups(business_rows, pending_sources, policy, cash_by_business)
+            if equivalent or not allow_partial:
+                return equivalent
+            break
     result = []
     for key, members in business_rows.items():
         sources = cash_by_business[key]
         groups = _business_groups(members, sources, policy)
         if len(groups) != 1:
+            if allow_partial:
+                continue
             return ()
         group = groups[0]
         result.append(StructureBusinessGroup(
@@ -309,6 +370,8 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
             group_noncash = tuple(r for r in group_rows if r.entry_id not in cash_ids)
             if group_cash:
                 business = _business_groups(group_noncash, group_cash, policy)
+                if not business:
+                    business = _reciprocal_counterpart_groups(group_noncash, group_cash, policy)
                 if not business:
                     split_is_complete = False
                     break
@@ -384,6 +447,27 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
         explicit_ids.update(ids)
     # 唯一配对拆出后，再验证整个剩余同摘要组；不搜索金额子集或猜配重复行。
     exclude_balanced_explicit_groups()
+    # 对方一级已双向指明非现金结算时，重复的等额记录整体保留，
+    # 不猜测人员或发票间的逐行配对，也不将抵扣解释成现金收付。
+    reciprocal_pools = defaultdict(list)
+    for group in explicit_noncash.values():
+        for row in group:
+            if row.entry_id in explicit_ids or not _balance(row):
+                continue
+            account = split_account_levels(row.account_name)[:1]
+            counterpart = split_account_levels(row.counterpart_name)[:1]
+            reciprocal_pools[(tuple(sorted((account, counterpart))), abs(_balance(row)))].append(row)
+    for group in reciprocal_pools.values():
+        if (len(group) >= 2 and sum(_balance(row) for row in group) == 0
+                and all(any(_reciprocal_counterparts(row, other)
+                            and _balance(other) == -_balance(row)
+                            for other in group) for row in group)):
+            ids = tuple(row.entry_id for row in group)
+            excluded.append(StructureNonCashGroup(
+                stable_id("NC", *ids), ids,
+                _evidence(group, "reciprocal_counterpart_noncash"),
+            ))
+            explicit_ids.update(ids)
     noncash = [row for row in noncash if row.entry_id not in explicit_ids]
     accrual_groups = defaultdict(list)
     for row in noncash:
@@ -396,10 +480,15 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
             excluded.append(StructureNonCashGroup(stable_id("NC", *ids), ids, _evidence(group, "balanced_accrual")))
     excluded_ids = {i for g in excluded for i in g.entry_ids}
     noncash = [r for r in noncash if r.entry_id not in excluded_ids]
-    reciprocal_groups = _reciprocal_counterpart_groups(noncash, cash, policy)
+    reciprocal_groups = _reciprocal_counterpart_groups(noncash, cash, policy, allow_partial=True)
     if reciprocal_groups:
         reciprocal_plan = _plan(voucher, reciprocal_groups, excluded, rows, cash)
         if not validate_structure_plan(reciprocal_plan, rows, cash_ids):
+            if reciprocal_plan.unresolved_entry_ids or reciprocal_plan.pending_cash_shares:
+                return StructureSearchResult(
+                    reciprocal_plan, (), True,
+                    "独立闭合且双方对应的业务继续；其余分录与现金来源仍待核实",
+                )
             return StructureSearchResult(
                 reciprocal_plan, (reciprocal_plan,), True,
                 "双方对方一级互相对应，逐现金来源金额配对唯一且守恒",

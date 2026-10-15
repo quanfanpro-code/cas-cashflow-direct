@@ -1,4 +1,6 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
+import hashlib
+import json
 from pathlib import Path
 from copy import deepcopy
 import pytest
@@ -21,6 +23,101 @@ def build(rows, **kwargs):
     proposal = discover_cash_scope(rows)
     scope = confirm_cash_scope(proposal, {x.account_key: "include" for x in proposal.candidates})
     return build_cashflow_components(rows, scope, **kwargs)
+
+
+def equivalent_source_rows():
+    rows = (
+        replace(entry(1, "其他应收款_人员甲", 6000, "人员甲备用金"), counterpart_name="银行存款"),
+        replace(entry(2, "其他应收款_人员乙", 6000, "人员乙备用金"), counterpart_name="银行存款"),
+        replace(entry(3, "银行存款_结算户", -6000, "支付人员备用金"), counterpart_name="其他应收款", original_flow_item="支付其他与经营活动有关的现金"),
+        replace(entry(4, "银行存款_结算户", -6000, "支付人员备用金"), counterpart_name="其他应收款", original_flow_item="支付其他与经营活动有关的现金"),
+    )
+    result = []
+    for row in rows:
+        content = asdict(row)
+        content.pop("source")
+        content.pop("entry_id")
+        content.pop("source_row_hash", None)
+        digest = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        result.append(replace(row, source_row_hash=digest))
+    return tuple(result)
+
+
+def test_identical_cash_source_records_keep_each_business_and_cash_row():
+    rows = equivalent_source_rows()
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 2
+    assert sorted(c.cash_delta_cent for c in result.components) == [-6000, -6000]
+    assert {c.counterpart_accounts for c in result.components} == {
+        ("其他应收款_人员甲",), ("其他应收款_人员乙",),
+    }
+    assert {(a.entry_id, a.allocated_cent) for a in result.source_allocations} == {("E3", -6000), ("E4", -6000)}
+    assert all(c.original_item_text == "支付其他与经营活动有关的现金" for c in result.components)
+    assert result == build(tuple(reversed(rows)))
+
+
+@pytest.mark.parametrize("change", ("missing_hash", "auxiliary", "account", "summary", "original_item", "no_reciprocal"))
+def test_equal_amounts_do_not_replace_full_source_equivalence(change):
+    rows = list(equivalent_source_rows())
+    if change == "missing_hash":
+        rows = [replace(r, source_row_hash="") for r in rows]
+    else:
+        edits = {
+            "auxiliary": {},
+            "account": {"account_name": "银行存款_另一结算户"},
+            "summary": {"summary": "其他人员备用金支付"},
+            "original_item": {"original_flow_item": "购买商品、接受劳务支付的现金"},
+            "no_reciprocal": {"counterpart_name": "管理费用"},
+        }[change]
+        rows[3] = replace(rows[3], **edits, source_row_hash=hashlib.sha256(change.encode()).hexdigest())
+    result = build(rows)
+    assert result.structure_requests
+    assert sum(c.cash_delta_cent for c in result.components) == -12000
+    assert all("structure_pending" in c.anomalies for c in result.components)
+
+
+def test_equivalent_sources_only_complete_unassigned_part_of_voucher():
+    rows = (*equivalent_source_rows(),
+        replace(entry(5, "管理费用_差旅费", 2000, "报销差旅费"), counterpart_name="银行存款"),
+        replace(entry(6, "管理费用_差旅费", 8000, "报销差旅费"), counterpart_name="银行存款"),
+        replace(entry(7, "银行存款_结算户", -2000, "报销差旅费"), counterpart_name="管理费用"),
+        replace(entry(8, "银行存款_结算户", -8000, "报销差旅费"), counterpart_name="管理费用"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert sum(c.cash_delta_cent for c in result.components) == -22000
+    assert {(a.entry_id, a.allocated_cent) for a in result.source_allocations} == {
+        ("E3", -6000), ("E4", -6000), ("E7", -2000), ("E8", -8000)}
+
+
+def test_explicit_summary_assignment_leaves_unique_reciprocal_business():
+    rows = (
+        replace(entry(1, "其他应收款_人员甲", 6000, "人员甲备用金"), counterpart_name="银行存款"),
+        replace(entry(2, "其他应收款_人员乙", 6000, "人员乙备用金"), counterpart_name="银行存款"),
+        replace(entry(3, "银行存款_结算户", -6000, "人员甲备用金"), counterpart_name="其他应收款"),
+        replace(entry(4, "银行存款_结算户", -6000, "支付人员备用金"), counterpart_name="其他应收款"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert len(result.components) == 2
+    assert {(a.entry_id, a.allocated_cent) for a in result.source_allocations} == {("E3", -6000), ("E4", -6000)}
+
+
+def test_repeated_reciprocal_noncash_settlement_keeps_all_rows_without_pairing():
+    rows = (
+        replace(entry(1, "销售费用_差旅费", 6000, "人员甲机票"), counterpart_name="其他应收款"),
+        replace(entry(2, "销售费用_差旅费", 6000, "人员乙机票"), counterpart_name="其他应收款"),
+        replace(entry(3, "其他应收款_备用金", -6000, "员工报销抵扣备用金"), counterpart_name="销售费用"),
+        replace(entry(4, "其他应收款_备用金", -6000, "员工报销抵扣备用金"), counterpart_name="销售费用"),
+        replace(entry(5, "银行存款", 9000, "收回剩余备用金"), counterpart_name="其他应收款"),
+        replace(entry(6, "其他应收款_备用金", -9000, "收回剩余备用金"), counterpart_name="银行存款"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [c.cash_delta_cent for c in result.components] == [9000]
+    excluded = {i for p in result.structure_plans for g in p.noncash_groups for i in g.entry_ids}
+    assert excluded == {"E1", "E2", "E3", "E4"}
 
 
 def test_repeated_noncash_deductions_close_after_unique_cross_summary_pair():

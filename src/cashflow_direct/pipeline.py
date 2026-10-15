@@ -295,7 +295,7 @@ def _save_state(run_dir: Path, state: Mapping[str, object]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".json.tmp")
     with temporary.open("w", encoding="utf-8-sig", newline="\n") as output:
-        json.dump(state, output, ensure_ascii=False, separators=(",", ":"))
+        output.write(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
     if "component_structure_plans" in state:
         with _store(run_dir).stage("component_structure") as connection:
             connection.execute("DELETE FROM component_structure")
@@ -1205,18 +1205,19 @@ def confirm_cash_scope(
         for candidate in proposal.candidates
         if candidate.system_suggestion in {"include", "exclude"}
     }
-    store = _store(run_dir)
-    with store.stage("cash_scope") as connection:
-        connection.execute(
-            "INSERT OR REPLACE INTO cash_scope(record_id, payload_json) VALUES (?, ?)",
-            (scope.scope_hash, json.dumps(asdict(scope), ensure_ascii=False, default=list)),
-        )
     state["cash_scope"] = {
         "included_keys": sorted(scope.included_keys),
         "excluded_keys": sorted(scope.excluded_keys),
         "account_names_by_key": scope.account_names_by_key,
         "scope_hash": scope.scope_hash,
+        "confirmation_details": dict(decisions),
     }
+    store = _store(run_dir)
+    with store.stage("cash_scope") as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO cash_scope(record_id, payload_json) VALUES (?, ?)",
+            (scope.scope_hash, json.dumps(state["cash_scope"], ensure_ascii=False, default=list)),
+        )
     state["stage"] = "cash_scope_confirmed"
     _save_state(run_dir, state)
     return StageResult(str(state["run_id"]), Path(run_dir), "cash_scope", "completed", "执行自动分类")
@@ -1644,6 +1645,7 @@ def confirm_company_notes(
             "cash_scope_confirmed" if "cash_scope" in state else "waiting_cash_scope"
         )
     state["company_notes"] = validated
+    state["company_notes_confirmed"] = True
     _save_state(run_dir, state)
     _write_trace_json(run_dir, "公司规则登记.json", validated)
     return StageResult(
@@ -1937,7 +1939,8 @@ def scan_accounts(run_dir: Path) -> dict[str, object]:
     _assert_inputs_unchanged(state)
     if "cash_scope" not in state:
         raise RuntimeError("请确认现金范围后继续")
-    if state.get("company_notes_raw") and not state.get("company_notes"):
+    if (state.get("company_notes_raw") and not state.get("company_notes")
+            and not state.get("company_notes_confirmed")):
         return {"status": "待确认公司特殊规则", "missing": 0}
     entries = _standardized_entries_from_state(state)
     components = _semantic_components_after_component_build(state, entries)
@@ -2895,7 +2898,11 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
         )
         for component in raw_components
     )
-    if not state.get("summary_semantics_completed"):
+    current_semantics = _summary_semantics_from_state(state)
+    if (not state.get("summary_semantics_completed") or any(
+        component.summary.strip() and "structure_pending" not in component.anomalies
+        and component.summary not in current_semantics for component in components
+    )):
         summary_rules = load_summary_rules(PROJECT_ROOT)
         semantic_results = tuple(
             analyze_summary(summary, summary_rules)
@@ -3222,7 +3229,7 @@ def _register_ai_technical_attempts(
     submitted = {
         str(payload.get("task_id", "")) for payload in payloads if payload.get("task_id")
     }
-    failed = submitted.intersection({*invalid_ids, *duplicate_ids}) | set(missing_ids)
+    failed = submitted.intersection({*invalid_ids, *duplicate_ids, *missing_ids})
     failure_log = list(state.get(f"{state_prefix}_technical_failure_log", ()))
     for task_id in sorted(failed):
         if task_id in terminal:
@@ -3656,7 +3663,12 @@ def _assert_agent_gates_closed(state: Mapping[str, object]) -> None:
         raise RuntimeError("业务组成结构仍待Agent或用户确认，不能生成最终工作簿")
 
 
-def finalize_run(run_dir: Path) -> FinalizeResult:
+def export_diagnostic_run(run_dir: Path) -> FinalizeResult:
+    """导出明确不可定稿的诊断底稿，保留结构待办与正式完成门禁。"""
+    return finalize_run(run_dir, diagnostic_only=True)
+
+
+def finalize_run(run_dir: Path, *, diagnostic_only: bool = False) -> FinalizeResult:
     state = _load_state(run_dir)
     _assert_inputs_unchanged(state)
     assert_decision_store_consistent(
@@ -3664,8 +3676,30 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
         state,
         allow_finalized_recovery=True,
     )
-    _assert_agent_gates_closed(state)
-    if state.get("overall_status") and state.get("workbook_path"):
+    if not diagnostic_only:
+        _assert_agent_gates_closed(state)
+    else:
+        pending_structure_ids = {
+            str(request["voucher_key"])
+            for request in state.get("component_structure_requests", ())
+        }
+        if any(
+            str(task["voucher_key"]) in pending_structure_ids
+            for task in state.get("component_structure_ai_tasks", ())
+        ):
+            raise RuntimeError("业务组成AI尚未完成，不能导出诊断底稿")
+        if any(
+            component.get("voucher_key") in pending_structure_ids
+            and "structure_pending" in component.get("anomalies", ())
+            and any(
+                decision.get("component_id") == component.get("component_id")
+                and decision.get("resolved")
+                for decision in state.get("decisions", ())
+            )
+            for component in state.get("components", ())
+        ):
+            raise RuntimeError("未确定业务结构的现金被错误列入已决定项目")
+    if not diagnostic_only and state.get("overall_status") and state.get("workbook_path"):
         existing_output = Path(str(state["workbook_path"]))
         if existing_output.is_file():
             try:
@@ -4269,7 +4303,9 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             for item in normalization_errors
         )
     )
-    if blocking_readiness_errors:
+    if diagnostic_only:
+        status = "诊断材料，不可作为最终表；业务结构及人工事项仍须核实"
+    elif blocking_readiness_errors:
         status = "诊断材料，不可作为最终表"
     elif statement_unconfirmed:
         status = "草稿：存在未核对的疑似正表"
@@ -4427,7 +4463,8 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
     sequence = 1
     while True:
         suffix = "" if sequence == 1 else f"_重建{sequence}"
-        workbook_path = Path(run_dir) / f"现金流量表正表及复核底稿{suffix}.xlsx"
+        prefix = "现金流量表诊断稿及复核底稿" if diagnostic_only else "现金流量表正表及复核底稿"
+        workbook_path = Path(run_dir) / f"{prefix}{suffix}.xlsx"
         temporary_path = workbook_path.with_name(f"{workbook_path.stem}_生成中.xlsx")
         if not workbook_path.exists() and not temporary_path.exists():
             break
@@ -4473,16 +4510,20 @@ def finalize_run(run_dir: Path) -> FinalizeResult:
             ("cash_reconciliation", json.dumps(asdict(reconciliation), ensure_ascii=False)),
         )
     state["reconciliation"] = asdict(reconciliation)
-    state["workbook_path"] = str(workbook_path)
-    state["overall_status"] = status
-    state["stage"] = "finalized"
+    if diagnostic_only:
+        state["diagnostic_workbook_path"] = str(workbook_path)
+        state["diagnostic_status"] = status
+    else:
+        state["workbook_path"] = str(workbook_path)
+        state["overall_status"] = status
+        state["stage"] = "finalized"
     if status == "最终可使用":
         state["excel_recalculation"] = {
             "status": "completed",
             "recalculated_at": datetime.now(timezone.utc).isoformat(),
             "workbook_sha256": hashlib.sha256(workbook_path.read_bytes()).hexdigest(),
         }
-    else:
+    elif not diagnostic_only:
         state.pop("excel_recalculation", None)
     _save_state(run_dir, state)
     return FinalizeResult(str(state["run_id"]), Path(run_dir), workbook_path, status)

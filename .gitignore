@@ -47,3 +47,6 @@ docs/architecture/*
 !docs/superpowers/specs/
 docs/superpowers/specs/*
 !docs/superpowers/specs/2026-10-10-业务关系与现金分配-design.md
+
+# 2026-10-15 独立复核报告，仅包含匿名测试及程序修复记录
+!docs/reviews/2026-10-15-断流修复独立复核.md

@@ -48,6 +48,7 @@ class NormalizedEntry:
     input_issues: tuple[str, ...] = ()
     original_account_name: str = ""
     original_counterpart_name: str = ""
+    source_row_hash: str = ""
 
 
 @dataclass(frozen=True, slots=True)

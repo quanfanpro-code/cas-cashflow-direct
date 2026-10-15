@@ -860,7 +860,7 @@ def test_three_invalid_ai_submissions_clear_the_queue_and_use_the_cell_failure_e
         assert state["decisions"][0]["resolved"] is True
 
 
-def test_three_missing_ai_submissions_also_clear_the_queue_and_reach_a_terminal_exit() -> None:
+def test_three_empty_ai_batches_keep_unsubmitted_tasks_pending() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         preflight = run_preflight(
@@ -883,11 +883,12 @@ def test_three_missing_ai_submissions_also_clear_the_queue_and_reach_a_terminal_
             result = import_ai_results(preflight.run_dir, missing_path)
 
         state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        assert result.missing_count == 0
-        assert state["classification_summary"]["ai_tasks_missing"] == 0
-        assert state["ai_terminal_failure_ids"] == [task_id]
-        assert state["ai_task_attempts"] == {task_id: 3}
-        assert state["ai_technical_failure_log"][-1]["status"] == "无有效结果"
+        assert result.missing_count == 1
+        assert state["classification_summary"]["ai_tasks_missing"] == 1
+        assert state["ai_terminal_failure_ids"] == []
+        assert state["ai_task_attempts"] == {}
+        assert state["ai_technical_failure_log"] == []
+        assert state["decisions"][0]["resolved"] is False
 
 
 def test_pipeline_restores_valid_original_when_ai_does_not_prove_change() -> None:

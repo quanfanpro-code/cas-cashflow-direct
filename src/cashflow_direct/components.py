@@ -44,6 +44,7 @@ class CashScopeCandidate:
     system_suggestion: str
     cash_equivalent_terms: tuple[str, ...] = ()
     period_change_terms: tuple[str, ...] = ()
+    standard_account_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,10 +254,17 @@ def discover_cash_scope(entries: Sequence[NormalizedEntry]) -> CashScopeProposal
     candidates: list[CashScopeCandidate] = []
     for key, items in sorted(grouped.items()):
         names = tuple(sorted({name for _, name, _, _ in items}))
+        standard_names = tuple(sorted({
+            entry.account_name
+            if _looks_like_cash_scope_candidate(entry.account_name)
+            else entry.counterpart_name
+            for entry, _, _, _ in items
+        }))
         debit = sum(item_debit for _, _, item_debit, _ in items)
         credit = sum(item_credit for _, _, _, item_credit in items)
         restrictions = tuple(
-            term for term in RESTRICTED_TERMS if any(term in name for name in names)
+            term for term in RESTRICTED_TERMS
+            if any(term in name for name in (*names, *standard_names))
         )
         cash_equivalent_terms = tuple(
             term for term in CASH_EQUIVALENT_TERMS if any(term in name for name in names)
@@ -286,6 +294,7 @@ def discover_cash_scope(entries: Sequence[NormalizedEntry]) -> CashScopeProposal
                 suggestion,
                 cash_equivalent_terms,
                 period_change_terms,
+                standard_names,
             )
         )
     return CashScopeProposal(tuple(candidates))
@@ -309,14 +318,24 @@ def confirm_cash_scope(
             raise ValueError("等待现金范围确认：每个候选均需选择 include 或 exclude")
         if candidate.period_change_terms and status == "include":
             raise ValueError("现金范围在期间内发生变化，请按期间拆分账户或明细后重新确认")
-        if candidate.cash_equivalent_terms and status == "include":
-            criteria = (
-                "short_term",
-                "high_liquidity",
-                "known_cash_amount",
-                "low_value_change_risk",
-                "available_for_payment",
-            )
+        deposit_policy = _CASH_SCOPE_POLICY["withdrawable_deposit"]
+        if (status == "include"
+                and detail.get(deposit_policy["basis_field"]) == deposit_policy["basis_value"]):
+            standard_names = candidate.standard_account_names or candidate.account_names
+            if (not standard_names
+                    or not all(extract_original_level1(name) in deposit_policy["require_level1"]
+                               for name in standard_names)
+                    or candidate.restricted_terms
+                    or any(term in name
+                           for term in deposit_policy["forbidden_account_terms"]
+                           for name in (*candidate.account_names, *standard_names))):
+                raise ValueError("随时支取存款分支仅适用于无受限标志的银行存款，理财、债券和基金等投资不可使用")
+            criteria = tuple(deposit_policy["required_facts"])
+            if not all(detail.get(name) is True for name in criteria):
+                raise ValueError("纳入随时支取存款前必须确认可随时全额支取本金、无提款限制及可随时支付")
+            normalized_details.append(key + ":" + deposit_policy["basis_value"] + ":" + ",".join(criteria))
+        elif candidate.cash_equivalent_terms and status == "include":
+            criteria = tuple(_CASH_SCOPE_POLICY["cash_equivalent_required_facts"])
             if not detail or not all(detail.get(name) is True for name in criteria):
                 raise ValueError("纳入现金等价物前必须确认期限短、流动性强、金额确定、价值变动风险小四项条件及可随时支付")
             normalized_details.append(key + ":" + ",".join(criteria))

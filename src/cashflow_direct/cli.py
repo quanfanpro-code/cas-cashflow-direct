@@ -19,6 +19,7 @@ from cashflow_direct.pipeline import (
     confirm_mapping,
     confirm_cash_scope,
     finalize_run,
+    export_diagnostic_run,
     import_ai_results,
     import_component_structure_ai_results,
     import_dictionary_results,
@@ -63,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
         "import-ai",
         "confirm-manual",
         "finalize",
+        "export-diagnostic",
         "status",
     ):
         command = commands.add_parser(name)
@@ -172,6 +174,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = confirm_manual_decisions(
                 Path(arguments.run_dir), json.loads(arguments.decisions)
             )
+        elif arguments.command == "export-diagnostic":
+            result = export_diagnostic_run(Path(arguments.run_dir))
         elif arguments.command == "finalize":
             result = finalize_run(Path(arguments.run_dir))
         else:

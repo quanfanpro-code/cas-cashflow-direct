@@ -19,6 +19,65 @@ from tests.fixture_factory import break_dimension, write_all_input_types
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_uncached_auxiliary_formulas_cannot_make_cash_sources_equivalent(self) -> None:
+        self._assert_formula_sources_pending(array_formula=False)
+
+    def test_array_formula_range_cannot_make_cash_sources_equivalent(self) -> None:
+        self._assert_formula_sources_pending(array_formula=True)
+
+    def _assert_formula_sources_pending(self, *, array_formula: bool) -> None:
+        from cashflow_direct.components import (
+            build_cashflow_components, confirm_cash_scope, discover_cash_scope,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "公式辅助项.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目名称", "对方科目", "借方", "贷方", "辅助项"])
+            for summary, account, counterpart, debit, credit, auxiliary in (
+                ("人员甲备用金", "其他应收款_人员甲", "银行存款", 60, 0, "人员甲"),
+                ("人员乙备用金", "其他应收款_人员乙", "银行存款", 60, 0, "人员乙"),
+                ("支付人员备用金", "银行存款_结算户", "其他应收款", 0, 60, '="人员乙"'),
+                ("支付人员备用金", "银行存款_结算户", "其他应收款", 0, 60, '="人员甲"'),
+            ):
+                sheet.append(["2026-01-01", "记-1", summary, account, counterpart, debit, credit, auxiliary])
+            if array_formula:
+                from openpyxl.worksheet.formula import ArrayFormula
+                sheet['H2'] = ArrayFormula(ref='H2:H5', text='=ROW(H2:H5)')
+                sheet['H3'] = sheet['H4'] = sheet['H5'] = None
+            workbook.save(path)
+            workbook.close()
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            rows = normalize_dataset(path, "FORMULA", mapping).entries
+            proposal = discover_cash_scope(rows)
+            scope = confirm_cash_scope(proposal, {c.account_key: "include" for c in proposal.candidates})
+            result = build_cashflow_components(rows, scope)
+            self.assertTrue(result.structure_requests)
+            self.assertEqual(-12000, sum(c.cash_delta_cent for c in result.components))
+            self.assertTrue(all("structure_pending" in c.anomalies for c in result.components))
+
+    def test_source_row_hash_includes_unmapped_auxiliary_and_original_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "来源行完整内容.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["日期", "凭证号", "摘要", "科目名称", "对方科目", "借方", "贷方", "现金流量", "辅助项"])
+            values = ["2026-01-01", "记-1", "支付人员备用金", "银行存款", "其他应收款", 0, 60, "支付其他与经营活动有关的现金", "人员组甲"]
+            sheet.append(values)
+            sheet.append(values)
+            sheet.append([*values[:-1], "人员组乙"])
+            sheet.append([*values[:7], "购买商品、接受劳务支付的现金", values[8]])
+            workbook.save(path)
+            mapping = infer_dataset_mapping(scan_workbook(path))
+            self.assertIsInstance(mapping, DatasetMapping)
+            rows = normalize_dataset(path, "FSOURCE", mapping).entries
+            self.assertEqual(4, len(rows))
+            self.assertEqual(64, len(rows[0].source_row_hash))
+            self.assertEqual(rows[0].source_row_hash, rows[1].source_row_hash)
+            self.assertNotEqual(rows[0].source_row_hash, rows[2].source_row_hash)
+            self.assertNotEqual(rows[0].source_row_hash, rows[3].source_row_hash)
+
     def test_optional_source_fields_preserve_blank_zero_and_negative_amounts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "原始字段.xlsx"

@@ -1499,12 +1499,12 @@ class PipelineTests(unittest.TestCase):
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
                 ai_sheet = workbook["AI复核记录"]
-                self.assertEqual(5, ai_sheet.max_row)
+                # 尚未提交的另一轮不计失败；只有本轮越界结果留技术失败记录。
+                self.assertEqual(4, ai_sheet.max_row)
                 ai_headers = [cell.value for cell in ai_sheet[1]]
                 stage_column = ai_headers.index("阶段") + 1
                 self.assertCountEqual(
                     [
-                        "分类AI技术失败",
                         "分类AI技术失败",
                         "分类AI有效结果",
                         "分类AI有效结果",

@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import re
+import hashlib
+import json
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,7 +16,7 @@ from cashflow_direct.models import EvidenceProfile, NormalizedEntry, SourceLocat
 from cashflow_direct.money import stable_id, yuan_to_cent
 from cashflow_direct.rule_registry import default_rule_registry
 from cashflow_direct.semantic_mapping import DatasetMapping
-from cashflow_direct.workbook_structure import open_workbook_robust
+from cashflow_direct.workbook_structure import formula_row_numbers, open_workbook_robust
 
 
 CASH_ACCOUNT_TERMS = ("库存现金", "银行存款", "其他货币资金", "现金等价物")
@@ -139,6 +141,11 @@ def infer_evidence_profile(entries: Sequence[NormalizedEntry]) -> EvidenceProfil
 
 def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> NormalizationResult:
     """把不同证据形态统一为逐行分录，并完整记录排除和错误。"""
+    formula_rows = formula_row_numbers(path, mapping.sheet_name)
+    for merged in mapping.merged_ranges:
+        _, min_row, _, max_row = range_boundaries(merged)
+        if min_row in formula_rows:
+            formula_rows.update(range(min_row, max_row + 1))
     workbook = open_workbook_robust(path)
     entries: list[NormalizedEntry] = []
     exclusions: list[RowExclusion] = []
@@ -323,6 +330,9 @@ def normalize_dataset(path: Path, file_id: str, mapping: DatasetMapping) -> Norm
                     source_credit_cent=source_money["credit"],
                     source_flow_amount_cent=source_money["flow_amount"],
                     input_issues=tuple(input_issues),
+                    source_row_hash="" if row_number in formula_rows else hashlib.sha256(json.dumps(
+                        list(row), ensure_ascii=False, default=str
+                    ).encode("utf-8")).hexdigest(),
                 )
             )
     finally:

@@ -83,7 +83,36 @@
       "解除质押",
       "冻结",
       "解除冻结"
-    ]
+    ],
+    "cash_equivalent_required_facts": [
+      "short_term",
+      "high_liquidity",
+      "known_cash_amount",
+      "low_value_change_risk",
+      "available_for_payment"
+    ],
+    "withdrawable_deposit": {
+      "basis_field": "cash_basis",
+      "basis_value": "withdrawable_deposit",
+      "require_level1": [
+        "银行存款"
+      ],
+      "forbidden_account_terms": [
+        "理财",
+        "债券",
+        "基金",
+        "交易性金融资产",
+        "债权投资"
+      ],
+      "required_facts": [
+        "withdrawable_on_demand",
+        "full_principal_withdrawal",
+        "unrestricted",
+        "available_for_payment"
+      ],
+      "standard_basis": "企业会计准则第31号第二条：现金包括可以随时用于支付的存款",
+      "source_url": "https://kjs.mof.gov.cn/zt/kjzzss/kuaijizhunzeshishi/200806/t20080618_46250.htm"
+    }
   },
   "component_structure": {
     "inflow_item_terms": [

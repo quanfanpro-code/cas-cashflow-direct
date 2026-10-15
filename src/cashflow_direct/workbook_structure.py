@@ -7,6 +7,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from openpyxl import load_workbook
+from openpyxl.utils.cell import range_boundaries
 
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -37,20 +38,43 @@ class HeaderBand:
     score: int
 
 
+def _xml_sheet_members(archive: zipfile.ZipFile) -> dict[str, str]:
+    workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+    relationships = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    targets = {
+        item.attrib["Id"]: item.attrib["Target"]
+        for item in relationships.findall(f"{{{PKG_REL_NS}}}Relationship")
+    }
+    members = {}
+    for sheet in workbook.findall(f".//{{{MAIN_NS}}}sheet"):
+        relation_id = sheet.attrib[f"{{{DOC_REL_NS}}}id"]
+        target = targets[relation_id].lstrip("/")
+        members[sheet.attrib["name"]] = (
+            target if target.startswith("xl/") else posixpath.normpath(f"xl/{target}")
+        )
+    return members
+
+
+def formula_row_numbers(path: Path, sheet_name: str) -> set[int]:
+    """直接检查公式标记，避免缺失或过期缓存被当成相同来源内容。"""
+    rows = set()
+    with zipfile.ZipFile(path) as archive:
+        with archive.open(_xml_sheet_members(archive)[sheet_name]) as source:
+            for _, element in ElementTree.iterparse(source, events=("end",)):
+                if element.tag == f"{{{MAIN_NS}}}row":
+                    for formula in element.findall(f".//{{{MAIN_NS}}}f"):
+                        rows.add(int(element.attrib["r"]))
+                        if formula.get("ref"):
+                            _, first_row, _, last_row = range_boundaries(formula.attrib["ref"])
+                            rows.update(range(first_row, last_row + 1))
+                    element.clear()
+    return rows
+
+
 def _xml_sheet_metadata(path: Path) -> dict[str, tuple[tuple[str, ...], tuple[int, ...]]]:
     metadata: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] = {}
     with zipfile.ZipFile(path) as archive:
-        workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
-        relationships = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-        targets = {
-            item.attrib["Id"]: item.attrib["Target"]
-            for item in relationships.findall(f"{{{PKG_REL_NS}}}Relationship")
-        }
-        for sheet in workbook.findall(f".//{{{MAIN_NS}}}sheet"):
-            name = sheet.attrib["name"]
-            relation_id = sheet.attrib[f"{{{DOC_REL_NS}}}id"]
-            target = targets[relation_id].lstrip("/")
-            member = target if target.startswith("xl/") else posixpath.normpath(f"xl/{target}")
+        for name, member in _xml_sheet_members(archive).items():
             root = ElementTree.fromstring(archive.read(member))
             merges = tuple(
                 item.attrib["ref"] for item in root.findall(f".//{{{MAIN_NS}}}mergeCell")

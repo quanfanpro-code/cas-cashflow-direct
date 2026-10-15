@@ -40,7 +40,9 @@ def apply_blank_original_fallback(
 ) -> ClassificationDecision:
     """为低于实际执行重要性的空白原项目形成可重复的最终项目。"""
     if (
-        decision.resolved
+        "structure_pending" in component.anomalies
+        or decision.candidate_status == "structure_pending"
+        or decision.resolved
         or decision.excluded
         or decision.decision_action not in _FINAL_UNRESOLVED_ACTIONS
         or decision.original_item_state not in _ELIGIBLE_ORIGINAL_STATES
