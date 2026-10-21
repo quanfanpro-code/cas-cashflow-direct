@@ -38,7 +38,7 @@ description: Use when 需要编制、校验或复核一般企业直接法现金�
 
 使用 `python scripts/run_cashflow_direct.py`，按状态逐步推进：
 
-`preflight → confirm-mapping（如需）→ confirm-account-mapping（如需）→ confirm-notes（如需）→ confirm-cash → supplement-cash（如需）→ classify → import-component-ai / confirm-components（如需）→ import-dictionary（如需）→ classify / import-summary（仅有未决语言槽位时）→ classify → import-ai（可能多轮）→ finalize → 用户在最终工作簿内完成人工确认`
+`prepare-paired-input（仅摘要式现流明细配原始序时账时）→ preflight → confirm-mapping（如需）→ confirm-account-mapping（如需）→ confirm-notes（如需）→ confirm-cash → supplement-cash（如需）→ classify → import-component-ai / confirm-components（如需）→ import-dictionary（如需）→ classify / import-summary（仅有未决语言槽位时）→ classify → import-ai（可能多轮）→ finalize → 用户在最终工作簿内完成人工确认`
 
 每一步使用上一步返回的 `run_dir`，不得重新挑文件或用旧运行目录绕过门禁。
 
@@ -60,7 +60,9 @@ description: Use when 需要编制、校验或复核一般企业直接法现金�
 
 ### 只有摘要的现流明细
 
-收到的明细若只有日期、凭证号、原现金流项目、摘要、流入流出方向和金额，缺少账户及对方科目，必须在 `preflight` 前识别并向客户索取可按凭证号对应的本期完整序时账。补充资料须能看到相关凭证的科目编码与完整名称、借贷金额和现金账户分录，以确认真实现金来源并还原完整对方科目路径；现流明细保留作原项目对照。不要让客户凭摘要手填或推测科目路径。取得补充序时账前停止正式分类、评分和最终工作簿生成；原项目、摘要、方向和金额均不能代替现金腿或路径证据。若补充序时账已随同提交，先核对凭证关联是否可靠，再继续正常流程。
+收到的明细若只有日期、凭证号、原现金流项目、摘要、流入流出方向和金额，缺少账户及对方科目，必须在 `preflight` 前识别并向客户索取可按凭证号对应的本期完整序时账。补充资料须能看到相关凭证的科目编码与完整名称、借贷金额和现金账户分录。不要让客户凭摘要手填或推测科目路径；未取得补充序时账前停止正式分类、评分和最终工作簿生成。
+
+两份资料齐备时，先执行 `prepare-paired-input --flow <现流明细> --journal <原始序时账> --output <新工作簿>`，再仅将生成的工作簿交给 `preflight --paths`；若还有客户正表，可一并传入。优先识别包含完整借贷分录、且没有派生“对方科目”列的原始序时账工作表；无法唯一识别时指定 `--journal-sheet` 或 `--flow-sheet`，不得自动采用已拆分的生成结果页。先按日期、凭证字和编号、摘要、有效收付方向及整数分金额逐组核对；日期相差但在同月的同凭证明细可继续核对；明细金额仍不逐行相等时，仅在同月凭证剩余现金净额相等、每个方向只有一个原项目且有该方向的原始现金行时，按方向关联原项目，并标记“凭证净额”。负数冲销按实际现金增减反转方向。相同组的多行只有原项目一致才可关联，不宣称物理逐行唯一；净额不符、同方向原项目冲突或缺少对应方向现金行时停止并列出凭证。保留本期全部原始分录、未贴标签的现金行及来源行号。不同主体的原始账即使同日同号也不得直接并成一张凭证，须先核实主体、现金来源和业务关系。此步骤不推断对方科目、不拆分业务、不认定内部划转；这些仍交由后续现金范围确认与业务组成流程处理。配对报告记录原文件哈希、工作表、期间、行数和关联方式；原文件只读。
 
 ## 现金行原项目与对方一级核验
 

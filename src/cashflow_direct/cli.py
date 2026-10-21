@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from cashflow_direct.intake import choose_input_files
+from cashflow_direct.paired_input import prepare_paired_input
 from cashflow_direct.decision_policy import (
     AUTOMATIC_CHANGE_SCORE_OPTIONS,
     DEFAULT_AUTOMATIC_CHANGE_SCORE,
@@ -34,6 +35,12 @@ from cashflow_direct.pipeline import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="一般企业直接法现金流量表编制与校验")
     commands = parser.add_subparsers(dest="command")
+    paired = commands.add_parser("prepare-paired-input", help="把摘要式现流明细与原始序时账配对为可处理的完整分录")
+    paired.add_argument("--flow", required=True, help="摘要式现流明细工作簿")
+    paired.add_argument("--journal", required=True, help="含完整原始分录的序时账工作簿")
+    paired.add_argument("--output", required=True, help="新生成的配对工作簿，不覆盖已有文件")
+    paired.add_argument("--flow-sheet", help="现流明细工作表；可唯一识别时省略")
+    paired.add_argument("--journal-sheet", help="原始序时账工作表；可唯一识别时省略")
     preflight = commands.add_parser("preflight", help="选择并登记资料")
     preflight.add_argument("--overall", required=True, help="财务报表整体重要性，单位元")
     preflight.add_argument("--performance", required=True, help="实际执行的重要性，单位元")
@@ -115,7 +122,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_parser().print_help()
         return 0
     try:
-        if arguments.command == "preflight":
+        if arguments.command == "prepare-paired-input":
+            result = prepare_paired_input(
+                Path(arguments.flow), Path(arguments.journal), Path(arguments.output),
+                flow_sheet=arguments.flow_sheet, journal_sheet=arguments.journal_sheet,
+            )
+        elif arguments.command == "preflight":
             notes = (
                 Path(arguments.notes).read_text(encoding="utf-8")
                 if arguments.notes
