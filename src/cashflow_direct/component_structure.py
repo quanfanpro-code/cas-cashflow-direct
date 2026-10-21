@@ -25,12 +25,19 @@ class StructureCashShare:
 
 
 @dataclass(frozen=True, slots=True)
+class StructureEntryShare:
+    entry_id: str
+    amount_cent: int
+
+
+@dataclass(frozen=True, slots=True)
 class StructureBusinessGroup:
     group_id: str
     main_entry_ids: tuple[str, ...]
     settlement_entry_ids: tuple[str, ...]
     cash_shares: tuple[StructureCashShare, ...]
     evidence: tuple[StructureEvidence, ...]
+    entry_shares: tuple[StructureEntryShare, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +212,9 @@ def plan_from_agent_proposal(entries: Sequence[NormalizedEntry], cash_entry_ids:
         raise ValueError("Agent 业务组成字段不完整")
     groups = []
     for raw in proposal["business_groups"]:
-        if not isinstance(raw, Mapping) or set(raw) != {"main_entry_ids", "settlement_entry_ids", "cash_shares"}:
+        if (not isinstance(raw, Mapping)
+                or set(raw) not in ({"main_entry_ids", "settlement_entry_ids", "cash_shares"},
+                                    {"main_entry_ids", "settlement_entry_ids", "cash_shares", "entry_shares"})):
             raise ValueError("Agent 现金业务组字段不完整")
         main = tuple(str(value) for value in raw["main_entry_ids"])
         settlement = tuple(str(value) for value in raw["settlement_entry_ids"])
@@ -220,11 +229,21 @@ def plan_from_agent_proposal(entries: Sequence[NormalizedEntry], cash_entry_ids:
         if not shares:
             raise ValueError("Agent 现金业务组缺少现金来源")
         ids = (*main, *settlement)
+        entry_shares = []
+        for item in raw.get("entry_shares", ()):
+            if (not isinstance(item, Mapping) or set(item) != {"entry_id", "amount_cent"}
+                    or type(item["amount_cent"]) is not int):
+                raise ValueError("Agent 原始分录分摊须提供来源行和整数分金额")
+            entry_shares.append(StructureEntryShare(str(item["entry_id"]), item["amount_cent"]))
+        if entry_shares and (len(entry_shares) != len(ids)
+                             or {share.entry_id for share in entry_shares} != set(ids)):
+            raise ValueError("Agent 原始分录分摊须逐一覆盖本业务组来源行")
         evidence = (*_evidence([by_id[key] for key in ids], "agent_original_entry"),
                     *_evidence([by_id[key] for key in cash_entry_ids if key in {s.entry_id for s in shares}],
                                "cash_source"))
         groups.append(StructureBusinessGroup(
-            stable_id("BG", *ids, repr(tuple(shares))), main, settlement, tuple(shares), evidence,
+            stable_id("BG", *ids, repr(tuple(shares)), repr(tuple(entry_shares))),
+            main, settlement, tuple(shares), evidence, tuple(entry_shares),
         ))
     noncash = []
     for raw in proposal["noncash_groups"]:
@@ -675,6 +694,7 @@ def validate_structure_plan(plan: VoucherStructurePlan, entries: Sequence[Normal
     errors = []
     used = []
     allocated = defaultdict(int)
+    noncash_allocated = defaultdict(int)
     for group in plan.business_groups:
         ids = (*group.main_entry_ids, *group.settlement_entry_ids)
         used.extend(ids)
@@ -683,7 +703,19 @@ def validate_structure_plan(plan: VoucherStructurePlan, entries: Sequence[Normal
         if any(i not in by_id or i in cash_ids for i in ids):
             errors.append("业务行不存在或误用现金行")
             continue
-        if sum(s.amount_cent for s in group.cash_shares) != -sum(_balance(by_id[i]) for i in ids):
+        if len(ids) != len(set(ids)):
+            errors.append("同一业务组重复引用原始行")
+        shares = (group.entry_shares if group.entry_shares else
+                  tuple(StructureEntryShare(i, _balance(by_id[i])) for i in ids))
+        if len(shares) != len(ids) or {share.entry_id for share in shares} != set(ids):
+            errors.append("业务组原始行分摊不完整")
+            continue
+        for share in shares:
+            original = _balance(by_id[share.entry_id])
+            if not share.amount_cent or share.amount_cent * original <= 0 or abs(share.amount_cent) > abs(original):
+                errors.append("原始行分摊金额越界或方向错误")
+            noncash_allocated[share.entry_id] += share.amount_cent
+        if sum(s.amount_cent for s in group.cash_shares) != -sum(s.amount_cent for s in shares):
             errors.append("业务金额不守恒")
         for share in group.cash_shares:
             allocated[share.entry_id] += share.amount_cent
@@ -694,9 +726,17 @@ def validate_structure_plan(plan: VoucherStructurePlan, entries: Sequence[Normal
         if (not group.evidence or any(i not in by_id or i in cash_ids for i in group.entry_ids)
                 or sum(_balance(by_id[i]) for i in group.entry_ids if i in by_id)):
             errors.append("非现金处置无依据或不平衡")
+        for entry_id in group.entry_ids:
+            if entry_id in by_id and entry_id not in cash_ids:
+                noncash_allocated[entry_id] += _balance(by_id[entry_id])
     used.extend(plan.unresolved_entry_ids)
-    if len(used) != len(set(used)) or set(used) != set(by_id) - cash_ids:
+    for entry_id in plan.unresolved_entry_ids:
+        if entry_id in by_id and entry_id not in cash_ids:
+            noncash_allocated[entry_id] += _balance(by_id[entry_id])
+    if set(used) != set(by_id) - cash_ids:
         errors.append("业务行处置重复或不完整")
+    if any(noncash_allocated[i] != _balance(by_id[i]) for i in set(by_id) - cash_ids):
+        errors.append("逐原始行分摊金额不守恒")
     for share in plan.pending_cash_shares:
         allocated[share.entry_id] += share.amount_cent
         if share.entry_id not in cash_ids or share.amount_cent * _balance(by_id[share.entry_id]) <= 0:

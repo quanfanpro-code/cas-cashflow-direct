@@ -2839,6 +2839,12 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             level = materiality_level(item.exposure_cent or item.cash_delta_cent, thresholds).value
             request["materiality_level"] = level
             request["source_entries"] = [asdict(entry) for entry in structure_entries_by_voucher[item.voucher_key]]
+            if not item.candidate_plans and not item.candidate_entry_id_combinations:
+                from cashflow_direct.对方科目拆分参考 import analyze_counterpart_splits
+                try:
+                    request["对方科目拆分参考"] = analyze_counterpart_splits(request["source_entries"])
+                except Exception as exc:
+                    request["对方科目拆分参考"] = {"状态": "参考生成失败", "原因": str(exc)}
             request["candidate_details"] = [
                 [
                     {
