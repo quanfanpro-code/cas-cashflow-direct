@@ -60,6 +60,21 @@ class ClassificationTests(unittest.TestCase):
         self.assertIsNone(standardize_flow_item("客户自定义项目", rules))
         self.assertIsNone(standardize_flow_item("经营活动现金流入小计", rules))
 
+    def test_standardize_flow_item_accepts_numbered_labels_and_common_wording(self) -> None:
+        rules = load_rule_pack(ROOT)
+        cases = {
+            "销售商品、提供劳务收到的现金(01)": "CFO-01",
+            "收到的其他与经营活动的现金(03)": "CFO-03",
+            "支付的与其他经营活动有关的现金(07)": "CFO-07",
+            "借款所收到的现金(18)": "CFF-02",
+            "收到的其他与筹资活动有关的现金(19)": "CFF-03",
+            "支付的其他与筹资活动有关的现金(22)": "CFF-06",
+        }
+        for label, expected in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(expected, standardize_flow_item(label, rules).item_id)
+        self.assertIsNone(standardize_flow_item("未知项目(07)", rules))
+
     def test_vat_accompanies_trade_classification(self) -> None:
         rules = load_rule_pack(ROOT)
         cases = [

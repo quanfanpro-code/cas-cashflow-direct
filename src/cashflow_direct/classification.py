@@ -61,6 +61,7 @@ class StatementItem:
 @dataclass(frozen=True, slots=True)
 class RulePack:
     statement_items: tuple[StatementItem, ...]
+    original_item_aliases: tuple[tuple[str, str], ...] = ()
 
     @property
     def item_by_id(self) -> dict[str, StatementItem]:
@@ -95,7 +96,14 @@ def load_rule_pack(root: Path) -> RulePack:
     )
     if len(items) != 35 or len({item.item_id for item in items}) != 35:
         raise ValueError("一般企业正表项目必须恰好包含 35 个唯一行项目")
-    return RulePack(items)
+    aliases = tuple(
+        (alias, item["item_id"])
+        for item in item_payload["statement_items"]
+        for alias in item.get("original_aliases", ())
+    )
+    if len({_normalize_item_name(alias) for alias, _ in aliases}) != len(aliases):
+        raise ValueError("客户原项目别名不得重复")
+    return RulePack(items, aliases)
 
 
 def _score_summary_semantics(
@@ -149,12 +157,13 @@ def _score_summary_semantics(
 
 
 def _normalize_item_name(value: str) -> str:
+    value = re.sub(r"[（(]\d{1,2}[）)]\s*$", "", value.strip())
     return re.sub(r"[\s，。；：、,.!！?？（）()《》\[\]【】]+", "", value)
 
 
 def standardize_flow_item(value: str, rules: RulePack) -> StatementItem | None:
     normalized = _normalize_item_name(value)
-    return next(
+    exact = next(
         (
             item
             for item in rules.statement_items
@@ -162,6 +171,14 @@ def standardize_flow_item(value: str, rules: RulePack) -> StatementItem | None:
         ),
         None,
     )
+    if exact is not None:
+        return exact
+    alias_id = next(
+        (item_id for alias, item_id in rules.original_item_aliases
+         if normalized and _normalize_item_name(alias) == normalized),
+        "",
+    )
+    return rules.item_by_id.get(alias_id)
 
 
 def classify_component(
