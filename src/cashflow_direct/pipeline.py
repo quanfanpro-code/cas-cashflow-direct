@@ -619,6 +619,26 @@ def run_preflight(
         automatic_change_threshold
     )
     amounts = validate_materiality(*materiality)
+    summary_only_sheets: list[str] = []
+    has_journal_columns = False
+    for path in inputs:
+        for mapping in infer_dataset_mappings(scan_workbook(path)):
+            if not isinstance(mapping, DatasetMapping):
+                continue
+            roles = mapping.role_to_column
+            if {"voucher_no", "account_name", "debit", "credit"} <= roles.keys():
+                has_journal_columns = True
+            elif not ({"account_name", "counterpart_name"} & roles.keys()) and {
+                "voucher_no", "summary", "flow_item", "direction", "flow_amount"
+            } <= roles.keys():
+                summary_only_sheets.append(f"{path.name}／{mapping.sheet_name}")
+    if summary_only_sheets and not has_journal_columns:
+        raise ValueError(
+            "现流明细只有摘要、方向、金额和原项目，缺少账户及对方科目："
+            + "、".join(summary_only_sheets)
+            + "。请客户补充可按凭证号对应的本期完整序时账，包含相关凭证的科目编码与完整名称、"
+              "借贷金额和现金账户分录；取得资料并核对关联前，不能继续正式分类。"
+        )
     intake = register_inputs(inputs, output_parent=output_parent)
     run_dir = intake.run_dir
     trace_dir = _trace_dir(run_dir)
