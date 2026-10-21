@@ -6,7 +6,7 @@ from pathlib import Path
 from cashflow_direct.rule_registry import load_rule_registry
 
 
-SCHEMA_VERSION = "4.9"
+SCHEMA_VERSION = "5.0"
 SCORING_VERSION = "2026-08-26-unified-rule-center-v17"
 ACTION_MATRIX_VERSION = "2026-08-26-unified-rule-center-v18"
 ACCOUNT_MAPPING_VERSION = "2026-08-21-mapping-first-hard-gate-v2"

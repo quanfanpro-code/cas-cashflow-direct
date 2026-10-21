@@ -122,7 +122,7 @@ def _matches_account_pair(rows: Sequence[NormalizedEntry], pairs) -> bool:
 
 
 def _known_noncash_group(rows: Sequence[NormalizedEntry], policy: Mapping[str, object],
-                         cash_summaries: set[str]) -> bool:
+                         cash_summaries: set[str], cash_business_accounts: set[str]) -> bool:
     summaries = {row.summary for row in rows}
     summary = next(iter(summaries), "")
     return (
@@ -133,7 +133,8 @@ def _known_noncash_group(rows: Sequence[NormalizedEntry], policy: Mapping[str, o
         and all(_balance(row) for row in rows)
         and sum(_balance(row) for row in rows) == 0
         and (_matches_account_pair(rows, policy["accrual_account_pairs"])
-             or _unique_reciprocal_pairs(rows))
+             or _unique_reciprocal_pairs(rows)
+             or any(row.account_name in cash_business_accounts for row in rows))
     )
 
 
@@ -154,6 +155,57 @@ def _plan(voucher: str, groups, noncash, rows, cash) -> VoucherStructurePlan:
                                 tuple(noncash), unresolved, pending)
 
 
+def plan_from_agent_proposal(entries: Sequence[NormalizedEntry], cash_entry_ids: Sequence[str],
+                             proposal: Mapping[str, object]) -> VoucherStructurePlan:
+    """用原始分录重建 Agent 提议；逐行覆盖和现金守恒由验证器把关。"""
+    rows = tuple(entries)
+    if not rows or len({row.voucher_key for row in rows}) != 1:
+        raise ValueError("Agent 业务组成必须只包含同一凭证")
+    by_id = {row.entry_id: row for row in rows}
+    cash_ids = set(cash_entry_ids)
+    if not isinstance(proposal, Mapping) or set(proposal) != {"business_groups", "noncash_groups"}:
+        raise ValueError("Agent 业务组成字段不完整")
+    groups = []
+    for raw in proposal["business_groups"]:
+        if not isinstance(raw, Mapping) or set(raw) != {"main_entry_ids", "settlement_entry_ids", "cash_shares"}:
+            raise ValueError("Agent 现金业务组字段不完整")
+        main = tuple(str(value) for value in raw["main_entry_ids"])
+        settlement = tuple(str(value) for value in raw["settlement_entry_ids"])
+        if not main or any(key not in by_id or key in cash_ids for key in (*main, *settlement)):
+            raise ValueError("Agent 现金业务组主项或结算行无效")
+        shares = []
+        for item in raw["cash_shares"]:
+            if (not isinstance(item, Mapping) or set(item) != {"entry_id", "amount_cent"}
+                    or type(item["amount_cent"]) is not int):
+                raise ValueError("Agent 现金来源必须提供原始行和整数分金额")
+            shares.append(StructureCashShare(str(item["entry_id"]), item["amount_cent"]))
+        if not shares:
+            raise ValueError("Agent 现金业务组缺少现金来源")
+        ids = (*main, *settlement)
+        evidence = (*_evidence([by_id[key] for key in ids], "agent_original_entry"),
+                    *_evidence([by_id[key] for key in cash_entry_ids if key in {s.entry_id for s in shares}],
+                               "cash_source"))
+        groups.append(StructureBusinessGroup(
+            stable_id("BG", *ids, repr(tuple(shares))), main, settlement, tuple(shares), evidence,
+        ))
+    noncash = []
+    for raw in proposal["noncash_groups"]:
+        if not isinstance(raw, Mapping) or set(raw) != {"entry_ids"}:
+            raise ValueError("Agent 非现金组字段不完整")
+        ids = tuple(str(value) for value in raw["entry_ids"])
+        if len(ids) < 2 or any(key not in by_id or key in cash_ids for key in ids):
+            raise ValueError("Agent 非现金组来源行无效")
+        noncash.append(StructureNonCashGroup(
+            stable_id("NC", *ids), ids, _evidence([by_id[key] for key in ids], "agent_original_entry"),
+        ))
+    plan = _plan(rows[0].voucher_key, groups, noncash, rows,
+                 [by_id[key] for key in cash_entry_ids if key in by_id])
+    errors = validate_structure_plan(plan, rows, cash_entry_ids)
+    if plan.unresolved_entry_ids or plan.pending_cash_shares or errors:
+        raise ValueError("Agent 业务组成未覆盖原始行或现金来源，或金额不守恒：" + "；".join(errors))
+    return plan
+
+
 def _business_groups(rows, cash, policy):
     """只表达可证明的现金份额；多来源、多性质不得任意顺序分摊。"""
     amount = sum(_balance(r) for r in cash)
@@ -167,9 +219,19 @@ def _business_groups(rows, cash, policy):
         main = payroll
         offsets = [r for r in rows if r not in main]
         if (any(_balance(r) * amount >= 0 for r in main)
-                or any(_balance(r) * amount <= 0 or not _has(r.account_name, policy["settlement_accounts"])
+                or any(not _has(r.account_name, policy["settlement_accounts"])
                        for r in offsets)):
             return ()
+        parts = [(main, offsets)]
+    elif (len(cash) == 1
+          and len([r for r in rows if _balance(r) * amount < 0]) == 1
+          and any(_balance(r) * amount > 0 for r in rows)
+          and next(r for r in rows if _balance(r) * amount < 0).summary == cash[0].summary
+          and all(_has(r.account_name, policy["settlement_accounts"])
+                  and r.summary.startswith(cash[0].summary)
+                  for r in rows if _balance(r) * amount > 0)):
+        main = [r for r in rows if _balance(r) * amount < 0]
+        offsets = [r for r in rows if r not in main]
         parts = [(main, offsets)]
     elif all(_balance(r) * amount < 0 for r in rows):
         same_business = len({(r.summary, r.account_name) for r in rows}) == 1
@@ -208,29 +270,6 @@ def _business_groups(rows, cash, policy):
         result.append(StructureBusinessGroup(stable_id("BG", *ids, *offset_ids, repr(shares)),
                       ids, offset_ids, shares, (*evidence, *_evidence(cash, "cash_source"))))
     return tuple(result)
-
-
-def _split_contiguous_balanced_groups(rows: Sequence[NormalizedEntry]):
-    """按来源行序切分多个完整平衡的连续分录组；不按金额子集猜配。"""
-    if len(rows) < 4 or len({(r.source.file_id, r.source.sheet_name) for r in rows}) != 1:
-        return None
-    ordered = tuple(sorted(rows, key=lambda r: (r.source.row_start, r.source.row_end)))
-    if len({r.source.row_start for r in ordered}) != len(ordered):
-        return None
-
-    groups = []
-    start = 0
-    balance = 0
-    for position, row in enumerate(ordered):
-        debit, credit = row.debit_cent, row.credit_cent
-        if (debit == 0) == (credit == 0):
-            return None
-        balance += debit - credit
-        if balance == 0:
-            groups.append(ordered[start:position + 1])
-            start = position + 1
-
-    return tuple(groups) if start == len(ordered) and len(groups) > 1 else None
 
 
 def _equivalent_source_groups(business_rows, cash, policy, assigned):
@@ -358,43 +397,36 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
         plan = _plan(voucher, (), (), rows, cash)
         return StructureSearchResult(plan, (), False, "关系搜索未完成：超过分录行数上限")
 
-    # 借鉴对方科目生成器：只有原始行序能完整切成至少两个平衡组时才采用。
-    # 含现金组继续按现金方向分配；不含现金的平衡组作为非现金业务留痕。
-    contiguous_groups = _split_contiguous_balanced_groups(rows)
-    if contiguous_groups:
-        split_business = []
-        split_noncash = []
-        split_is_complete = True
-        for group_rows in contiguous_groups:
-            group_cash = tuple(r for r in group_rows if r.entry_id in cash_ids)
-            group_noncash = tuple(r for r in group_rows if r.entry_id not in cash_ids)
-            if group_cash:
-                business = _business_groups(group_noncash, group_cash, policy)
-                if not business:
-                    business = _reciprocal_counterpart_groups(group_noncash, group_cash, policy)
-                if not business:
-                    split_is_complete = False
-                    break
-                split_business.extend(business)
-            elif group_noncash:
-                if not _known_noncash_group(
-                    group_noncash, policy, {row.summary for row in cash}
-                ):
-                    split_is_complete = False
-                    break
-                ids = tuple(r.entry_id for r in group_noncash)
-                split_noncash.append(StructureNonCashGroup(
-                    stable_id("NC", *ids), ids,
-                    _evidence(group_noncash, "balanced_contiguous_group"),
-                ))
-        if split_is_complete:
-            split_plan = _plan(voucher, split_business, split_noncash, rows, cash)
-            if (not split_plan.unresolved_entry_ids and not split_plan.pending_cash_shares
-                    and not validate_structure_plan(split_plan, rows, cash_ids)):
+    # 未提供分录号时，原始行序不能证明业务关系；仅抵消同科目、同金额的唯一借贷对。
+    by_account_amount = defaultdict(lambda: {1: [], -1: []})
+    for row in noncash:
+        amount = _balance(row)
+        if row.account_name and row.summary and amount:
+            by_account_amount[(row.account_name, abs(amount))][1 if amount > 0 else -1].append(row)
+    excluded = []
+    explicit_ids = set()
+    for sides in by_account_amount.values():
+        if len(sides[1]) == len(sides[-1]) == 1:
+            pair = (sides[1][0], sides[-1][0])
+            ids = tuple(row.entry_id for row in pair)
+            excluded.append(StructureNonCashGroup(
+                stable_id("NC", *ids), ids,
+                _evidence(pair, "same_account_opposite_equal"),
+            ))
+            explicit_ids.update(ids)
+    remaining_after_offset = [row for row in noncash if row.entry_id not in explicit_ids]
+    if excluded:
+        direct = _business_groups(remaining_after_offset, cash, policy)
+        if direct:
+            plan = _plan(voucher, direct, excluded, rows, cash)
+            if (not plan.unresolved_entry_ids and not plan.pending_cash_shares
+                    and not validate_structure_plan(plan, rows, cash_ids)):
                 return StructureSearchResult(
-                    split_plan, (split_plan,), True,
-                    "原始行序可完整切分为多个连续平衡分录组",
+                    plan, (plan,), True,
+                    "同科目等额反向分录抵消后，剩余业务与现金逐来源闭合",
                 )
+    excluded = []
+    explicit_ids = set()
 
     # 所填对方明确互相指向非现金科目时，先保留这项独立非现金结算；
     # 任何一方指向实际现金一级时均不在此排除，避免丢掉真实现金业务。
@@ -404,9 +436,6 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
         counterpart = split_account_levels(row.counterpart_name)[:1]
         if counterpart and counterpart not in cash_level1s and row.summary:
             explicit_noncash[row.summary].append(row)
-    excluded = []
-    explicit_ids = set()
-
     def exclude_balanced_explicit_groups():
         for candidates in explicit_noncash.values():
             group = tuple(row for row in candidates if row.entry_id not in explicit_ids)
@@ -474,12 +503,36 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
         if (_has(row.summary, policy["accrual_terms"])
                 and row.summary not in {r.summary for r in cash}):
             accrual_groups[row.summary].append(row)
+    cash_summaries = {row.summary for row in cash}
+    cash_business_accounts = {row.account_name for row in noncash if row.summary in cash_summaries}
     for summary, group in sorted(accrual_groups.items()):
-        if _known_noncash_group(group, policy, {row.summary for row in cash}):
+        if _known_noncash_group(group, policy, cash_summaries, cash_business_accounts):
             ids = tuple(r.entry_id for r in group)
             excluded.append(StructureNonCashGroup(stable_id("NC", *ids), ids, _evidence(group, "balanced_accrual")))
     excluded_ids = {i for g in excluded for i in g.entry_ids}
     noncash = [r for r in noncash if r.entry_id not in excluded_ids]
+    shortest_cash_summary = min(cash_summaries, key=len)
+    if (noncash and cash and not any(row.counterpart_name for row in (*noncash, *cash))
+            and all(row.summary.startswith(shortest_cash_summary) for row in cash)
+            and all(_has(row.summary, policy["payroll_terms"]) for row in cash)
+            and any(_has(row.account_name, policy["payroll_accounts"]) for row in noncash)):
+        direct = _business_groups(noncash, cash, policy)
+        if direct:
+            plan = _plan(voucher, direct, excluded, rows, cash)
+            if (not plan.unresolved_entry_ids and not plan.pending_cash_shares
+                    and not validate_structure_plan(plan, rows, cash_ids)):
+                return StructureSearchResult(
+                    plan, (plan,), True, "薪酬主项、代扣结算与全部现金来源完整闭合",
+                )
+    if len(cash) == 1 and noncash:
+        direct = _business_groups(noncash, cash, policy)
+        if len(direct) == 1 and direct[0].settlement_entry_ids:
+            plan = _plan(voucher, direct, excluded, rows, cash)
+            if (not plan.unresolved_entry_ids and not plan.pending_cash_shares
+                    and not validate_structure_plan(plan, rows, cash_ids)):
+                return StructureSearchResult(
+                    plan, (plan,), True, "同摘要结算主项及抵付行完整闭合",
+                )
     reciprocal_groups = _reciprocal_counterpart_groups(noncash, cash, policy, allow_partial=True)
     if reciprocal_groups:
         reciprocal_plan = _plan(voucher, reciprocal_groups, excluded, rows, cash)

@@ -349,10 +349,11 @@ def test_paid_payable_is_split_from_same_voucher_invoice_accrual():
     assert not result.structure_requests
     assert len(result.components) == 1
     assert result.components[0].cash_delta_cent == -14_000
-    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E3", "E4"}
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E2", "E4"}
+    assert result.components[0].counterpart_accounts == ("低值易耗品_生产仪器工具",)
 
 
-def test_contiguous_balanced_voucher_groups_split_cash_and_non_cash_by_source_order():
+def test_equal_opposite_payable_cancels_without_using_source_order():
     cash = replace(
         entry(1, "银行存款", -14_000, "付钢化玻璃货款"),
         original_flow_item="购买商品、接受劳务支付的现金",
@@ -372,11 +373,12 @@ def test_contiguous_balanced_voucher_groups_split_cash_and_non_cash_by_source_or
     assert len(result.components) == 1
     assert result.components[0].cash_delta_cent == -14_000
     assert result.components[0].original_item_text == "购买商品、接受劳务支付的现金"
-    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E3", "E4"}
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E2", "E4"}
+    assert result.components[0].counterpart_accounts == ("原材料_辅助材料_高温材料",)
     assert result == build(tuple(reversed(rows)))
 
 
-def test_contiguous_mixed_expense_accrual_is_grouped_as_one_non_cash_event():
+def test_equal_opposite_payable_cancels_before_mixed_expense_allocation():
     rows = (
         entry(1, "银行存款", -120_000, "支付员工福利"),
         entry(2, "应付职工薪酬_应付福利费", 120_000, "支付员工福利"),
@@ -388,9 +390,47 @@ def test_contiguous_mixed_expense_accrual_is_grouped_as_one_non_cash_event():
     result = build(rows)
 
     assert not result.structure_requests
+    assert sum(component.cash_delta_cent for component in result.components) == -120_000
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E2", "E5"}
+    assert {account for component in result.components for account in component.counterpart_accounts} == {
+        "生产成本_直接人工_福利费", "销售费用_福利费"
+    }
+
+
+def test_invoice_payable_offset_exposes_remaining_business_and_tax():
+    rows = (
+        entry(1, "其他应付款_供应商", 17_367, "支付服务费"),
+        entry(2, "银行存款", -17_367, "支付服务费"),
+        entry(3, "其他应付款_供应商", 16_383, "收到服务发票"),
+        entry(4, "应交税费_进项税额", 984, "收到服务发票"),
+        entry(5, "其他应付款_供应商", -17_367, "收到服务发票"),
+    )
+
+    result = build(rows)
+
+    assert not result.structure_requests
     assert len(result.components) == 1
-    assert result.components[0].cash_delta_cent == -120_000
-    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E3", "E4", "E5"}
+    assert result.components[0].cash_delta_cent == -17_367
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E1", "E5"}
+    assert set(result.components[0].counterpart_accounts) == {"其他应付款_供应商", "应交税费_进项税额"}
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_equal_opposite_tax_transfer_exposes_remaining_payment():
+    rows = (
+        entry(1, "应交税费_未交增值税", 324_788, "结转增值税"),
+        entry(2, "应交税费_已交增值税", -324_788, "结转增值税"),
+        entry(3, "应交税费_已交增值税", 324_788, "支付增值税及附加"),
+        entry(4, "应交税费_城建税", 22_735, "支付增值税及附加"),
+        entry(5, "银行存款", -347_523, "支付增值税及附加"),
+    )
+
+    result = build(rows)
+
+    assert not result.structure_requests
+    assert sum(component.cash_delta_cent for component in result.components) == -347_523
+    assert set(result.structure_plans[0].noncash_groups[0].entry_ids) == {"E2", "E3"}
+    assert result == build(tuple(reversed(rows)))
 
 
 def test_balanced_noncash_group_with_different_summaries_remains_pending():
@@ -417,7 +457,7 @@ def test_balanced_noncash_group_with_unknown_account_pair_remains_pending():
     assert all("structure_pending" in x.anomalies for x in result.components)
 
 
-def test_noncash_group_with_cash_summary_remains_pending_even_if_it_is_an_accrual():
+def test_equal_opposite_payable_cancels_even_when_summaries_match():
     rows = (
         entry(1, "银行存款", -120, "计提员工福利"),
         entry(2, "应付职工薪酬", 120, "计提员工福利"),
@@ -427,8 +467,9 @@ def test_noncash_group_with_cash_summary_remains_pending_even_if_it_is_an_accrua
 
     result = build(rows)
 
-    assert result.structure_requests
-    assert all("structure_pending" in x.anomalies for x in result.components)
+    assert not result.structure_requests
+    assert result.components[0].cash_delta_cent == -120
+    assert result.components[0].counterpart_accounts == ("制造费用",)
 
 
 def test_payroll_offsets_and_red_accrual_have_distinct_roles():
@@ -461,6 +502,98 @@ def test_unknown_zero_sum_rows_are_not_silently_discarded():
     assert result.structure_requests
     assert all("structure_pending" in x.anomalies for x in result.components)
     assert sum(x.cash_delta_cent for x in result.components) == -8400
+
+
+def test_agent_can_resolve_no_candidate_from_original_rows_with_full_reconciliation():
+    rows = (
+        entry(1, "银行存款", -1000, "支付维修费"),
+        entry(2, "管理费用_维修费", 1000, "支付维修费"),
+        entry(3, "预付账款", 200, "另项内部结算"),
+        entry(4, "其他应收款", -200, "另项内部结算"),
+    )
+    assert build(rows).structure_requests
+    proposal = {
+        "business_groups": [{
+            "main_entry_ids": ["E2"], "settlement_entry_ids": [],
+            "cash_shares": [{"entry_id": "E1", "amount_cent": -1000}],
+        }],
+        "noncash_groups": [{"entry_ids": ["E3", "E4"]}],
+    }
+
+    result = build(rows, structure_agent_plans={"V-STRUCT": proposal})
+
+    assert not result.structure_requests
+    assert result.components[0].counterpart_accounts == ("管理费用_维修费",)
+    assert result.components[0].cash_delta_cent == -1000
+    assert result == build(tuple(reversed(rows)), structure_agent_plans={"V-STRUCT": proposal})
+    forged = deepcopy(proposal)
+    forged["business_groups"][0]["cash_shares"][0]["amount_cent"] = -900
+    with pytest.raises(ValueError, match="不守恒"):
+        build(rows, structure_agent_plans={"V-STRUCT": forged})
+
+
+def test_unique_cross_account_cash_transfer_inside_mixed_voucher():
+    rows = (
+        entry(1, "银行存款_结算户", 1000, "退还保证金"),
+        entry(2, "其他应收款_保证金", -1000, "退还保证金"),
+        entry(3, "银行存款_结算户", 700, "平台提现"),
+        entry(4, "其他货币资金_平台款项", -700, "平台提现"),
+    )
+    result = build(rows)
+    assert {item.entry_id for item in result.excluded_internal_transfers} == {"E3", "E4"}
+    assert [item.cash_delta_cent for item in result.components] == [1000]
+
+
+def test_equal_opposite_cash_with_related_business_is_not_silently_excluded():
+    rows = (
+        entry(1, "银行存款_结算户", 700, "平台结算"),
+        entry(2, "其他货币资金_平台款项", -700, "平台结算"),
+        entry(3, "应收账款_货款", -100, "平台结算"),
+        entry(4, "财务费用_手续费", 100, "平台结算"),
+        entry(5, "银行存款_结算户", -50, "另付运费"),
+        entry(6, "销售费用_运费", 50, "另付运费"),
+    )
+    result = build(rows)
+    assert not result.excluded_internal_transfers
+
+
+def test_single_cash_payment_with_same_business_deposit_offset():
+    rows = (
+        entry(1, "应付账款_货款", 76000, "支付药品款"),
+        entry(2, "银行存款", -45600, "支付药品款"),
+        entry(3, "其他应付款_保证金", -30400, "支付药品款（保证金抵扣）"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-45600]
+    assert result.components[0].counterpart_accounts == ("应付账款_货款",)
+
+
+def test_payment_and_balanced_invoice_with_shared_payable_account():
+    rows = (
+        entry(1, "其他应付款_供应商", 40565, "支付推广费"),
+        entry(2, "银行存款", -40565, "支付推广费"),
+        entry(3, "其他应付款_供应商", 38175, "支付推广费/发票回票"),
+        entry(4, "应交税费_进项税", 2290, "支付推广费/发票回票"),
+        entry(5, "其他应付款_供应商", -40465, "支付推广费/发票回票"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-40565]
+    assert {item.entry_ids for item in result.structure_plans[0].noncash_groups} == {("E3", "E4", "E5")}
+
+
+def test_payroll_deductions_with_both_signs_keep_one_cash_business():
+    rows = (
+        entry(1, "应付职工薪酬_工资", 10000, "发放工资"),
+        entry(2, "银行存款", -8800, "发放工资"),
+        entry(3, "其他应收款_社保", -1400, "发放工资"),
+        entry(4, "其他应收款_社保", 200, "发放工资（补扣社保）"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-8800]
+    assert result.components[0].counterpart_accounts == ("应付职工薪酬_工资",)
 
 
 def test_independent_balanced_group_continues_while_other_group_is_pending():

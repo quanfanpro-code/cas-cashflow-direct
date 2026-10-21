@@ -131,3 +131,49 @@ def test_partial_manual_confirmation_retires_only_its_structure_tasks(tmp_path):
     assert len(after["component_structure_ai_tasks"]) == 1
     assert after["component_structure_ai_tasks"][0]["voucher_key"] != request["voucher_key"]
     assert len(after["component_structure_ai_task_history"]) == 1
+
+
+def test_agent_original_journal_plan_is_accepted_only_when_cash_reconciles(tmp_path):
+    rows = (
+        entry(1, "银行存款", -1000, "支付维修费"),
+        entry(2, "管理费用_维修费", 1000, "支付维修费"),
+        entry(3, "预付账款", 200, "另项内部结算"),
+        entry(4, "其他应收款", -200, "另项内部结算"),
+    )
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["日期", "凭证号", "摘要", "科目名称", "借方金额", "贷方金额"])
+    for row in rows:
+        sheet.append(["2026-03-01", "7", row.summary, row.account_name,
+                      row.debit_cent / 100, row.credit_cent / 100])
+    path = tmp_path / "待结构分析序时账.xlsx"
+    book.save(path)
+    book.close()
+    run = p.run_preflight([path], ("100000", "50000", "5000"), tmp_path).run_dir
+    state = p._load_state(run)
+    p.confirm_cash_scope(run, {c["account_key"]: "include" for c in state["cash_scope_proposal"]["candidates"]})
+    p.supplement_cash_balances(run, "100", "90", "0", "合成测试余额")
+    p.run_classification(run)
+    before = p._load_state(run)
+    request = before["component_structure_requests"][0]
+    assert not request["candidate_plans"]
+    source_rows = request["source_entries"]
+    cash = next(row for row in source_rows if row["account_name"] == "银行存款")
+    expense = next(row for row in source_rows if row["account_name"] == "管理费用_维修费")
+    others = [row for row in source_rows if row not in (cash, expense)]
+    proposal = {
+        "business_groups": [{"main_entry_ids": [expense["entry_id"]], "settlement_entry_ids": [],
+                             "cash_shares": [{"entry_id": cash["entry_id"], "amount_cent": -1000}]}],
+        "noncash_groups": [{"entry_ids": [row["entry_id"] for row in others]}],
+    }
+    with pytest.raises(ValueError, match="依据"):
+        p.confirm_component_structure(run, {request["voucher_key"]: {"agent_plan": proposal}})
+    p.confirm_component_structure(run, {request["voucher_key"]: {
+        "agent_plan": proposal, "reason": "原始账显示维修费由银行支付；另两行内部结算借贷相等。",
+    }})
+    mark_dictionary_complete(run)
+    p.run_classification(run)
+    after = p._load_state(run)
+    assert not after.get("component_structure_requests")
+    assert after["component_structure_agent_plans"][request["voucher_key"]] == proposal
+    assert sum(item["allocated_cent"] for item in after["source_allocations"]) == -1000

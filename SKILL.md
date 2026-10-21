@@ -11,7 +11,7 @@ description: Use when 需要编制、校验或复核一般企业直接法现金�
 
 完整序时账先按业务关系划分主项、结算扣项和独立非现金事项，逐现金来源以整数分校验。自付与代付分别保留，工资代扣不生成现金收回，同摘要多笔银行记录不去重。仅金额闭合、最少行或净额零都不能证明业务关系。全部合法候选中可独立确定的部分继续分类，其余保留结构待办和现金桥接；结构待办不能经低金额兜底消除。
 
-结构AI仅选择程序列出的完整方案，返回 `selected_plan_id`；`confirm-components` 支持 `{"凭证键":{"plan_id":"SP_…"}}`。无合法候选或搜索未完成时不发空任务，须补充真实业务依据。详细协议、适用边界及恢复方法见 README 第六步。新结构记录保存在 JSONL、运行状态与 SQLite；当前运行版本4.9，版本不一致的旧运行目录不得续用。原行含公式或受数组、共享公式及相关合并区域影响时，不得用缓存值相同证明来源全行相同。
+程序有完整候选时，结构AI只选择既有方案并返回 `selected_plan_id`。无候选时，Agent 必须先阅读 `业务组成Agent分析请求.jsonl` 中的完整原始分录，自行分析账内业务关系；可以用 `confirm-components` 提交逐行 `agent_plan` 和原账依据，程序验证全部非现金行、每条现金来源和整数分金额后才接纳。原账确实不足以判断时，才就具体缺失事实向客户提问，不得把全部无候选凭证直接列为客户待核实清单。完整账未注明分录号时，原始行序不能作为拆分依据；同一完整科目下唯一的等额借贷对，只有抵消后剩余业务与现金全部闭合才自动抵消。另按整组平衡及共享结算科目识别收付与发票计提并列、薪酬社保与代扣、同摘要抵付；凭证中不同现金账户的唯一等额反向分录可识别为内部划转，但不得凭同号或净额为零抵消现金。所有规则均须逐来源守恒，非唯一或关系不明时继续交 Agent 看原账。详细协议见 README 第六步。新结构记录保存在 JSONL、运行状态与 SQLite；当前运行版本5.0，旧运行目录不得续用。原行含公式或受数组、共享公式及相关合并区域影响时，不得用缓存值相同证明来源全行相同。
 
 ## 不可越过的原则
 
@@ -38,7 +38,7 @@ description: Use when 需要编制、校验或复核一般企业直接法现金�
 
 使用 `python scripts/run_cashflow_direct.py`，按状态逐步推进：
 
-`prepare-paired-input（仅摘要式现流明细配原始序时账时）→ preflight → confirm-mapping（如需）→ confirm-account-mapping（如需）→ confirm-notes（如需）→ confirm-cash → supplement-cash（如需）→ classify → import-component-ai / confirm-components（如需）→ import-dictionary（如需）→ classify / import-summary（仅有未决语言槽位时）→ classify → import-ai（可能多轮）→ finalize → 用户在最终工作簿内完成人工确认`
+`prepare-paired-input（仅摘要式现流明细配原始序时账时）→ preflight → confirm-mapping（如需）→ confirm-account-mapping（如需）→ confirm-notes（如需）→ confirm-cash → supplement-cash（如需）→ classify → import-component-ai / Agent读原账后confirm-components（如需）→ import-dictionary（如需）→ classify / import-summary（仅有未决语言槽位时）→ classify → import-ai（可能多轮）→ finalize → 用户在最终工作簿内完成人工确认`
 
 每一步使用上一步返回的 `run_dir`，不得重新挑文件或用旧运行目录绕过门禁。
 
@@ -256,7 +256,7 @@ Excel最终可使用前必须由Microsoft Excel完整重算并保存；不能只
 | 输入文件已修改 | 用修改后的文件新建运行，旧结果不得复用 |
 | waiting_mapping | 完成全部一级科目映射确认，不得继续分类 |
 | 待AI判断业务组成 | 处理 `业务组成AI请求_*.jsonl`；只能在系统列出的守恒组合中选择，不得新增事实或组合 |
-| 待确认业务组成 | Agent按系统列出的组合请用户确认；确认前不做科目语义、分类和评分 |
+| 待确认业务组成 | Agent先查完整原账，能唯一证明的用 `agent_plan` 提交并由程序逐行、逐现金来源验证；仅原账缺少决定性事实时，请用户补充该事实。确认前不做科目语义、分类和评分 |
 | 待科目语义确认 | 完整回答全部路径任务后导入；不得用“无公司特殊规则”批量留空 |
 | 待摘要语义确认 | 只处理固定规则无法解析的语言槽位；Agent不得查看或返回会计判断字段 |
 | AI未完成 | 只补齐缺失或无效任务，不重复提交已通过任务 |

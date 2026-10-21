@@ -7,7 +7,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from cashflow_direct.models import CashflowComponent, NormalizedEntry, SourceLocator
-from cashflow_direct.component_structure import VoucherStructurePlan, resolve_voucher_structure
+from cashflow_direct.component_structure import (
+    VoucherStructurePlan, plan_from_agent_proposal, resolve_voucher_structure,
+)
 from cashflow_direct.money import stable_id
 from cashflow_direct.account_mapping import extract_original_level1
 from cashflow_direct.rule_registry import default_rule_registry
@@ -1140,6 +1142,7 @@ def build_cashflow_components(
     structure_selections: Mapping[str, tuple[str, ...]] | None = None,
     structure_selection_basis: Mapping[str, str] | None = None,
     structure_plan_selections: Mapping[str, str] | None = None,
+    structure_agent_plans: Mapping[str, Mapping[str, object]] | None = None,
 ) -> ComponentBuildResult:
     """按凭证构建现金流业务组成，并保持现金腿金额不变量。"""
     grouped: dict[str, list[NormalizedEntry]] = defaultdict(list)
@@ -1153,6 +1156,8 @@ def build_cashflow_components(
     explicit_allocations: list[ComponentSourceAllocation] = []
     structure_selections = structure_selections or {}
     structure_selection_basis = structure_selection_basis or {}
+    structure_agent_plans = structure_agent_plans or {}
+    used_agent_plans: set[str] = set()
     for voucher_key, voucher_entries in grouped.items():
         single_sided = all(
             entry.source.file_id in single_sided_file_ids for entry in voucher_entries
@@ -1188,6 +1193,26 @@ def build_cashflow_components(
                 )
                 cash_entries = [entry for entry in cash_entries if entry not in explicit_internal]
                 voucher_entries = [entry for entry in voucher_entries if entry not in explicit_internal]
+            if not single_sided and len(cash_entries) > 1:
+                pairs = {}
+                for entry in cash_entries:
+                    matches = [other for other in cash_entries
+                               if other.entry_id != entry.entry_id
+                               and other.summary == entry.summary
+                               and account_key_for_entry(other) != account_key_for_entry(entry)
+                               and entry_cash_delta_cent(other) == -entry_cash_delta_cent(entry)
+                               and not any(row.summary == entry.summary
+                                           for row in voucher_entries if row not in cash_entries)]
+                    if len(matches) == 1:
+                        pairs[entry.entry_id] = matches[0].entry_id
+                internal_ids = {key for key, other in pairs.items() if pairs.get(other) == key}
+                if internal_ids:
+                    excluded.extend(
+                        InternalTransferLeg(voucher_key, entry.entry_id, abs(entry_cash_delta_cent(entry)))
+                        for entry in cash_entries if entry.entry_id in internal_ids
+                    )
+                    cash_entries = [entry for entry in cash_entries if entry.entry_id not in internal_ids]
+                    voucher_entries = [entry for entry in voucher_entries if entry.entry_id not in internal_ids]
             if not cash_entries:
                 continue
             noncash = [entry for entry in voucher_entries if entry not in cash_entries]
@@ -1205,11 +1230,21 @@ def build_cashflow_components(
                 )
                 plan = search.plan
                 selected_plan = (structure_plan_selections or {}).get(voucher_key)
+                agent_plan = structure_agent_plans.get(voucher_key)
+                if selected_plan and agent_plan:
+                    raise ValueError("同一凭证不能同时选择系统方案和 Agent 方案：" + voucher_key)
+                if agent_plan and search.candidates:
+                    raise ValueError("已有完整候选时不能改用 Agent 自拟方案：" + voucher_key)
                 if selected_plan:
                     selected = next((p for p in search.candidates if p.plan_id == selected_plan), None)
                     if selected is None or not search.search_complete:
                         raise ValueError("业务组成方案已过期或不属于完整合法候选：" + voucher_key)
                     plan = selected
+                if agent_plan:
+                    plan = plan_from_agent_proposal(
+                        voucher_entries, tuple(row.entry_id for row in cash_entries), agent_plan,
+                    )
+                    used_agent_plans.add(voucher_key)
                 structure_plans.append(plan)
                 by_id = {row.entry_id: row for row in voucher_entries}
                 for group in plan.business_groups:
@@ -1364,6 +1399,8 @@ def build_cashflow_components(
         )))) if component.component_id in mismatch_ids else component
         for component in preserved_components
     )
+    if set(structure_agent_plans) != used_agent_plans:
+        raise ValueError("Agent 业务组成方案已过期或对应凭证不再需要结构判断")
     return ComponentBuildResult(
         checked_components,
         tuple(excluded),

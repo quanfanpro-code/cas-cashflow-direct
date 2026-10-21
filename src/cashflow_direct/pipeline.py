@@ -261,7 +261,8 @@ def _load_state(run_dir: Path) -> dict[str, object]:
 
 
 _STRUCTURE_STATE_KEYS = ("component_structure_plans", "component_structure_requests",
-                         "component_structure_plan_selections")
+                         "component_structure_plan_selections", "component_structure_agent_plans",
+                         "component_structure_agent_basis")
 
 
 def _check_structure_store(run_dir: Path, state: Mapping[str, object]) -> None:
@@ -1871,6 +1872,7 @@ def _semantic_components_after_component_build(
             ).items()
         },
         structure_plan_selections=state.get("component_structure_plan_selections", {}),
+        structure_agent_plans=state.get("component_structure_agent_plans", {}),
     )
     return tuple(c for c in build.components if "structure_pending" not in c.anomalies)
 
@@ -2606,8 +2608,25 @@ def confirm_component_structure(
     confirmed: dict[str, list[str]] = {}
     basis_by_voucher: dict[str, str] = {}
     confirmed_plans = dict(state.get("component_structure_plan_selections", {}))
+    agent_plans = dict(state.get("component_structure_agent_plans", {}))
+    agent_basis = dict(state.get("component_structure_agent_basis", {}))
     for voucher_key, selection_payload in selections.items():
         request = request_by_voucher[voucher_key]
+        if isinstance(selection_payload, Mapping) and "agent_plan" in selection_payload:
+            if request.get("candidate_plans") or request.get("candidate_entry_id_combinations"):
+                raise ValueError("已有完整候选时须先选择既有方案：" + voucher_key)
+            reason = str(selection_payload.get("reason", "")).strip()
+            if not reason:
+                raise ValueError("Agent 业务组成须说明原始账内依据：" + voucher_key)
+            proposal = selection_payload["agent_plan"]
+            trial = {**agent_plans, voucher_key: proposal}
+            build_cashflow_components(
+                _standardized_entries_from_state(state), _scope_from_dict(state["cash_scope"]),
+                structure_plan_selections=confirmed_plans, structure_agent_plans=trial,
+            )
+            agent_plans[voucher_key] = proposal
+            agent_basis[voucher_key] = reason
+            continue
         if request.get("candidate_plans"):
             plan_id = str(selection_payload.get("plan_id", "")) if isinstance(selection_payload, Mapping) else ""
             if plan_id not in {p["plan_id"] for p in request["candidate_plans"]}:
@@ -2648,6 +2667,8 @@ def confirm_component_structure(
     state["component_structure_selections"] = existing_confirmed
     state["component_structure_selection_basis"] = existing_basis
     state["component_structure_plan_selections"] = confirmed_plans
+    state["component_structure_agent_plans"] = agent_plans
+    state["component_structure_agent_basis"] = agent_basis
     state["component_structure_requests"] = [r for r in requests if r["voucher_key"] not in selections]
     _retire_structure_tasks(state)
     if not state["component_structure_requests"]:
@@ -2799,6 +2820,7 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             ).items()
         },
         structure_plan_selections=state.get("component_structure_plan_selections", {}),
+        structure_agent_plans=state.get("component_structure_agent_plans", {}),
     )
     state["counterpart_level1_checks"] = [asdict(check) for check in build.counterpart_level1_checks]
     _write_trace_jsonl(run_dir, "对方科目一级核验.jsonl", build.counterpart_level1_checks)
@@ -2852,6 +2874,10 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
             else "waiting_component_structure_confirmation"
         )
         _write_trace_jsonl(run_dir, "业务组成待确认.jsonl", build.structure_requests)
+        _write_trace_jsonl(run_dir, "业务组成Agent分析请求.jsonl", [
+            request for request in requests
+            if not request["candidate_plans"] and not request["candidate_entry_id_combinations"]
+        ])
         for batch_number in range(0, len(structure_tasks), 25):
             _write_trace_jsonl(
                 run_dir,
