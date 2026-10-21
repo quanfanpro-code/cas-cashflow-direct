@@ -10,7 +10,7 @@ from tests.test_pipeline import _complete_all_pending_ai
 
 def prepare(tmp_path):
     w=Workbook();s=w.active;s.append(['日期','凭证号','摘要','科目名称','借方金额','贷方金额'])
-    for v,summary,account,debit,credit in [('待查','支付费用','银行存款',0,70),('待查','支付费用','银行存款',0,30),('待查','职工社保','应付职工薪酬_社保费',70,0),('待查','单位代垫款','其他应收款_代垫款',30,0),('已知','支付银行手续费','财务费用_手续费',5,0),('已知','支付银行手续费','银行存款',0,5)]:
+    for v,summary,account,debit,credit in [('待查','支付费用','银行存款',0,70),('待查','支付费用','银行存款',0,30),('待查','经营推广','管理费用_推广费',70,0),('待查','单位代垫款','其他应收款_代垫款',30,0),('已知','支付银行手续费','财务费用_手续费',5,0),('已知','支付银行手续费','银行存款',0,5)]:
         s.append(['2026-01-01',v,summary,account,debit,credit])
     f=tmp_path/'匿名序时账.xlsx';w.save(f);w.close()
     run=p.run_preflight([f],('250000','125000','10000'),tmp_path).run_dir

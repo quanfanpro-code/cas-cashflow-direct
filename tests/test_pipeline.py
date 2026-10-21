@@ -368,6 +368,21 @@ def _structured_ai_payload(
     summary = context.split("摘要原文：", 1)[1].split("；", 1)[0]
     account_path = context.split("完整对方科目路径：", 1)[1].split("；", 1)[0]
     candidate = candidate_item_id or str(task["candidate_item_ids"][0])
+    summary_candidates = task.get("summary_candidate_item_ids")
+    account_candidates = task.get("account_path_candidate_item_ids")
+    summary_supported = candidate_item_id is not None or candidate in (
+        task["candidate_item_ids"] if summary_candidates is None else summary_candidates)
+    account_supported = candidate_item_id is not None or candidate in (
+        task["candidate_item_ids"] if account_candidates is None else account_candidates)
+
+    def source_payload(supported: bool, basis: str, fact: str, quality: str) -> dict[str, object]:
+        return {
+            "candidate_item_id": candidate if supported else "",
+            "quality": quality if supported else "invalid",
+            "basis_text": basis if supported else "",
+            "classification_facts": [fact] if supported else [],
+            "conflict": False,
+        }
     review_round = (
         "A"
         if "；独立复核A：" in context
@@ -380,21 +395,9 @@ def _structured_ai_payload(
     return {
         "task_id": task["task_id"],
         "component_id": task["component_id"],
-        "summary": {
-            "candidate_item_id": candidate,
-            "quality": summary_quality,
-            "basis_text": summary,
-            "classification_facts": [f"summary:{summary}"],
-            "conflict": False,
-        },
-        "account_path": {
-            "candidate_item_id": candidate,
-            "quality": account_quality,
-            "basis_text": account_path,
-            "classification_facts": [f"account:{account_path}"],
-            "conflict": False,
-        },
-        "sources_independent": True,
+        "summary": source_payload(summary_supported, summary, f"summary:{summary}", summary_quality),
+        "account_path": source_payload(account_supported, account_path, f"account:{account_path}", account_quality),
+        "sources_independent": summary_supported and account_supported,
         "business_conflict": False,
         "direction_status": "compatible",
         "reason": "只重新解释本行摘要和完整对方科目路径",

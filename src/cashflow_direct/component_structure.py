@@ -349,17 +349,20 @@ def _equivalent_source_groups(business_rows, cash, policy, assigned):
         if not remaining:
             continue
         matching = [signature for signature, sources in source_classes.items()
-                    if remaining == -_balance(sources[0])
+                    if remaining * _balance(sources[0]) < 0
+                    and remaining % _balance(sources[0]) == 0
+                    and abs(remaining // _balance(sources[0])) <= len(sources)
                     and _reciprocal_coverage(members, sources)]
         if len(matching) != 1:
             return ()
-        assignments[matching[0]].append(key)
+        assignments[matching[0]].append((key, abs(remaining // _balance(source_classes[matching[0]][0]))))
     for signature, sources in source_classes.items():
-        keys = sorted(assignments[signature])
-        if len(keys) != len(sources):
+        needs = sorted(assignments[signature])
+        if sum(count for _, count in needs) != len(sources):
             return ()
-        for key, source in zip(keys, sorted(sources, key=lambda row: row.entry_id)):
-            assigned[key].append(source)
+        source_iter = iter(sorted(sources, key=lambda row: row.entry_id))
+        for key, count in needs:
+            assigned[key].extend(next(source_iter) for _ in range(count))
     result = []
     for key, members in business_rows.items():
         sources = assigned[key]
