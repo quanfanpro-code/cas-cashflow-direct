@@ -583,6 +583,49 @@ def test_payment_and_balanced_invoice_with_shared_payable_account():
     assert {item.entry_ids for item in result.structure_plans[0].noncash_groups} == {("E3", "E4", "E5")}
 
 
+def test_interleaved_balanced_postings_use_summary_and_full_account_not_row_order():
+    rows = (
+        entry(1, "其他应付款_供应商", 105, "付服务费"),
+        entry(2, "其他应付款_供应商", 94, "服务费回票"),
+        entry(3, "银行存款", -105, "付服务费"),
+        entry(4, "应交税费_进项税", 6, "服务费回票"),
+        entry(5, "其他应付款_供应商", -100, "服务费回票"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-105]
+    assert {frozenset(group.entry_ids) for group in result.structure_plans[0].noncash_groups} == {
+        frozenset({"E2", "E4", "E5"})}
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_unrelated_balanced_summary_without_account_link_stays_pending():
+    rows = (
+        entry(1, "银行存款", -100, "付服务费"),
+        entry(2, "管理费用_服务费", 100, "付服务费"),
+        entry(3, "预付账款", 50, "另外事项"),
+        entry(4, "其他应收款", -50, "另外事项"),
+    )
+    assert build(rows).structure_requests
+
+
+def test_separate_receipt_payment_and_noncash_adjustment_keep_both_cash_sources():
+    rows = (
+        entry(1, "其他货币资金_平台", 1000, "客户货款"),
+        entry(2, "应收账款_客户", -1000, "客户货款"),
+        entry(3, "其他应收款_平台", 300, "平台扣款"),
+        entry(4, "其他货币资金_平台", -300, "平台扣款"),
+        entry(5, "应收账款_客户", 50, "保证金调整"),
+        entry(6, "其他应收款_平台", -50, "保证金调整"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert sorted(item.cash_delta_cent for item in result.components) == [-300, 1000]
+    assert {frozenset(group.entry_ids) for group in result.structure_plans[0].noncash_groups} == {
+        frozenset({"E5", "E6"})}
+    assert result == build(tuple(reversed(rows)))
+
+
 def test_payroll_deductions_with_both_signs_keep_one_cash_business():
     rows = (
         entry(1, "应付职工薪酬_工资", 10000, "发放工资"),

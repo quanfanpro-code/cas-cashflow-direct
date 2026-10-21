@@ -138,6 +138,44 @@ def _known_noncash_group(rows: Sequence[NormalizedEntry], policy: Mapping[str, o
     )
 
 
+def _balanced_summary_plan(rows: Sequence[NormalizedEntry], cash_ids: set[str],
+                           policy: Mapping[str, object]) -> VoucherStructurePlan | None:
+    """摘要不同的整组先各自平衡；不按原始行序或金额子集猜分录。"""
+    by_summary = defaultdict(list)
+    for row in rows:
+        if not row.summary:
+            return None
+        by_summary[row.summary].append(row)
+    if len(by_summary) < 2 or any(len(group) < 2 or sum(map(_balance, group))
+                                  for group in by_summary.values()):
+        return None
+    cash_summaries = {row.summary for row in rows if row.entry_id in cash_ids}
+    cash_business_accounts = {row.account_name for row in rows
+                              if row.entry_id not in cash_ids and row.summary in cash_summaries}
+    business, noncash = [], []
+    for group in by_summary.values():
+        group_cash = [row for row in group if row.entry_id in cash_ids]
+        group_noncash = [row for row in group if row.entry_id not in cash_ids]
+        if group_cash:
+            parts = _business_groups(group_noncash, group_cash, policy)
+            if not parts:
+                return None
+            business.extend(parts)
+        else:
+            if not _known_noncash_group(group_noncash, policy, cash_summaries,
+                                        cash_business_accounts):
+                return None
+            ids = tuple(row.entry_id for row in group_noncash)
+            noncash.append(StructureNonCashGroup(
+                stable_id("NC", *ids), ids,
+                _evidence(group_noncash, "independent_balanced_summary"),
+            ))
+    plan = _plan(rows[0].voucher_key, business, noncash, rows,
+                 [row for row in rows if row.entry_id in cash_ids])
+    return plan if (not plan.unresolved_entry_ids and not plan.pending_cash_shares
+                    and not validate_structure_plan(plan, rows, cash_ids)) else None
+
+
 def _plan(voucher: str, groups, noncash, rows, cash) -> VoucherStructurePlan:
     groups = tuple(sorted(groups, key=lambda g: g.group_id))
     used = {i for g in groups for i in (*g.main_entry_ids, *g.settlement_entry_ids)}
@@ -427,6 +465,13 @@ def resolve_voucher_structure(entries: Sequence[NormalizedEntry], cash_entry_ids
                 )
     excluded = []
     explicit_ids = set()
+
+    summary_plan = _balanced_summary_plan(rows, cash_ids, policy)
+    if summary_plan is not None:
+        return StructureSearchResult(
+            summary_plan, (summary_plan,), True,
+            "不同摘要的整组各自借贷平衡、原始行完整覆盖并逐现金来源守恒",
+        )
 
     # 所填对方明确互相指向非现金科目时，先保留这项独立非现金结算；
     # 任何一方指向实际现金一级时均不在此排除，避免丢掉真实现金业务。
