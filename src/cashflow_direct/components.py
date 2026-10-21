@@ -1213,6 +1213,30 @@ def build_cashflow_components(
                     )
                     cash_entries = [entry for entry in cash_entries if entry.entry_id not in internal_ids]
                     voucher_entries = [entry for entry in voucher_entries if entry.entry_id not in internal_ids]
+            # 同凭证混有收付业务时，单独识别只有现金行、整组净额为零的转款。
+            # 即使原账把两个银行账户记在同一科目路径下，也保留每条现金来源。
+            transfer_terms = _COMPONENT_POLICY["relations"]["internal_transfer_summary_terms"]
+            cash_by_summary = defaultdict(list)
+            for entry in cash_entries:
+                cash_by_summary[entry.summary].append(entry)
+            standalone_transfer_ids = set()
+            for summary, group in cash_by_summary.items():
+                if (summary and len(group) >= 2 and any(term in summary for term in transfer_terms)
+                        and sum(entry_cash_delta_cent(entry) for entry in group) == 0
+                        and any(entry_cash_delta_cent(entry) > 0 for entry in group)
+                        and any(entry_cash_delta_cent(entry) < 0 for entry in group)
+                        and not any(entry.summary == summary for entry in voucher_entries
+                                    if entry not in cash_entries)):
+                    standalone_transfer_ids.update(entry.entry_id for entry in group)
+            if standalone_transfer_ids:
+                excluded.extend(
+                    InternalTransferLeg(voucher_key, entry.entry_id, abs(entry_cash_delta_cent(entry)))
+                    for entry in cash_entries if entry.entry_id in standalone_transfer_ids
+                )
+                cash_entries = [entry for entry in cash_entries
+                                if entry.entry_id not in standalone_transfer_ids]
+                voucher_entries = [entry for entry in voucher_entries
+                                   if entry.entry_id not in standalone_transfer_ids]
             if not cash_entries:
                 continue
             noncash = [entry for entry in voucher_entries if entry not in cash_entries]

@@ -264,7 +264,10 @@ def _business_groups(rows, cash, policy):
     elif (len(cash) == 1
           and len([r for r in rows if _balance(r) * amount < 0]) == 1
           and any(_balance(r) * amount > 0 for r in rows)
-          and next(r for r in rows if _balance(r) * amount < 0).summary == cash[0].summary
+          and (next(r for r in rows if _balance(r) * amount < 0).summary == cash[0].summary
+               or (len(cash[0].summary) >= 4 and next(
+                   r for r in rows if _balance(r) * amount < 0
+               ).summary.startswith(cash[0].summary)))
           and all(_has(r.account_name, policy["settlement_accounts"])
                   and r.summary.startswith(cash[0].summary)
                   for r in rows if _balance(r) * amount > 0)):
@@ -277,7 +280,8 @@ def _business_groups(rows, cash, policy):
                          and any(_has(r.account_name, policy["vat_accounts"]) for r in rows))
         debt_interest = (any(_has(r.account_name, policy["principal_accounts"]) for r in rows)
                          and any(_has(r.account_name, policy["interest_accounts"]) for r in rows))
-        if len(cash) == 1 and (same_business or vat_companion) and not debt_interest:
+        if ((len(cash) == 1 or len({r.summary for r in (*rows, *cash)}) == 1)
+                and (same_business or vat_companion) and not debt_interest):
             parts = [(rows, [])]
         elif len(cash) == 1:
             parts = [([r], []) for r in rows]

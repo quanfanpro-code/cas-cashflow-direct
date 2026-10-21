@@ -144,12 +144,22 @@
       "version": "2026-10-10-v1",
       "max_search_states": 4096,
       "max_relation_rows": 256,
+      "internal_transfer_summary_terms": [
+        "转款",
+        "转账",
+        "划转",
+        "转存",
+        "销户",
+        "提现"
+      ],
       "payroll_accounts": [
         "应付职工薪酬",
         "应付工资"
       ],
       "payroll_terms": [
         "工资",
+        "奖金",
+        "年终奖",
         "薪酬",
         "社保",
         "社会保险",
@@ -158,6 +168,8 @@
       "settlement_accounts": [
         "其他应收款",
         "其他应付款",
+        "应收票据",
+        "应付票据",
         "应收利息",
         "应交税费"
       ],

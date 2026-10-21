@@ -557,6 +557,20 @@ def test_equal_opposite_cash_with_related_business_is_not_silently_excluded():
     assert not result.excluded_internal_transfers
 
 
+def test_same_cash_account_transfer_is_removed_from_mixed_interest_voucher():
+    rows = (
+        entry(1, "财务费用_利息收入", -40, "银行结息"),
+        entry(2, "银行存款_本币", 40, "银行结息"),
+        entry(3, "银行存款_本币", -713121, "销户转款至总部账户"),
+        entry(4, "银行存款_本币", 713121, "销户转款至总部账户"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [40]
+    assert {item.entry_id for item in result.excluded_internal_transfers} == {"E3", "E4"}
+    assert result.components == build(tuple(reversed(rows))).components
+
+
 def test_single_cash_payment_with_same_business_deposit_offset():
     rows = (
         entry(1, "应付账款_货款", 76000, "支付药品款"),
@@ -567,6 +581,50 @@ def test_single_cash_payment_with_same_business_deposit_offset():
     assert not result.structure_requests
     assert [item.cash_delta_cent for item in result.components] == [-45600]
     assert result.components[0].counterpart_accounts == ("应付账款_货款",)
+
+
+def test_cash_payment_uses_payable_after_bill_and_deposit_offsets():
+    rows = (
+        entry(1, "应付账款_货款", 125000, "支付药品款（票据和保证金抵付）"),
+        entry(2, "应收票据_银行承兑汇票", -50000, "支付药品款"),
+        entry(3, "其他应付款_保证金", -30000, "支付药品款（保证金抵付）"),
+        entry(4, "银行存款", -45000, "支付药品款"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-45000]
+    assert result.components[0].counterpart_accounts == ("应付账款_货款",)
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_multiple_bank_deductions_cover_one_fee_and_tax_business():
+    rows = (
+        entry(1, "财务费用_手续费", 63028, "银行扣手续费"),
+        entry(2, "银行存款", -8446, "银行扣手续费"),
+        entry(3, "应交税费_进项税", 3782, "银行扣手续费"),
+        entry(4, "银行存款", -9300, "银行扣手续费"),
+        entry(5, "银行存款", -49064, "银行扣手续费"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-66810]
+    assert {(item.entry_id, item.allocated_cent) for item in result.source_allocations} == {
+        ("E2", -8446), ("E4", -9300), ("E5", -49064)}
+    assert result == build(tuple(reversed(rows)))
+
+
+def test_year_end_bonus_with_tax_offset_keeps_all_bank_payments():
+    rows = (
+        entry(1, "应付职工薪酬_奖金", 100000, "支付年终奖"),
+        entry(2, "银行存款", -60000, "支付年终奖"),
+        entry(3, "其他应收款_代扣个人所得税", -10000, "支付年终奖"),
+        entry(4, "银行存款", -30000, "支付年终奖"),
+    )
+    result = build(rows)
+    assert not result.structure_requests
+    assert [item.cash_delta_cent for item in result.components] == [-90000]
+    assert {(item.entry_id, item.allocated_cent) for item in result.source_allocations} == {
+        ("E2", -60000), ("E4", -30000)}
 
 
 def test_payment_and_balanced_invoice_with_shared_payable_account():
