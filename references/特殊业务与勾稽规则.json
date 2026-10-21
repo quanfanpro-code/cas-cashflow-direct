@@ -29,6 +29,15 @@
       "version": "1"
     },
     {
+      "rule_id": "SPECIAL-DOCUMENTED-REVERSAL",
+      "name": "明确引用原凭证的等额现金冲销",
+      "category": "特殊业务",
+      "priority": 20,
+      "reason": "只有原凭证日期、号码、记账字、同一现金账户、原现金摘要及反向金额全部唯一吻合，才沿用原项目相抵；达到整体重要性仍逐笔确认",
+      "status": "active",
+      "version": "1"
+    },
+    {
       "rule_id": "SPECIAL-CONTROLLED-EXCLUSION",
       "name": "真实现金受控排除",
       "category": "排除控制",
@@ -230,6 +239,15 @@
         "销项税"
       ]
     }
+  },
+  "documented_reversal": {
+    "enabled": true,
+    "rule_code": "SPECIAL-DOCUMENTED-REVERSAL",
+    "require_unique_reference": true,
+    "require_same_cash_account": true,
+    "require_same_cash_summary": true,
+    "require_equal_opposite_amount": true,
+    "overall_materiality_still_manual": true
   },
   "allowed_exclusion_types": [
     "internal_transfer",

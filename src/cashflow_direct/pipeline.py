@@ -83,6 +83,7 @@ from cashflow_direct.decision_policy import (
     validate_automatic_change_threshold,
 )
 from cashflow_direct.duplicates import assign_duplicate_items, find_suspected_duplicates
+from cashflow_direct.documented_reversals import apply_documented_reversals
 from cashflow_direct.differences import build_original_auto_differences
 from cashflow_direct.excel_recalculation import recalculate_workbook_with_excel
 from cashflow_direct.exclusion_policy import authorize_exclusion
@@ -3029,12 +3030,23 @@ def run_classification(run_dir: Path) -> ClassificationStageResult:
               and "structure_pending" not in item.anomalies}
     decisions = tuple(old_decisions[item.component_id] if item.component_id in reused else item
                       for item in routing.decisions)
+    decisions, reversal_links = apply_documented_reversals(
+        components,
+        decisions,
+        entries,
+        overall_cent=_materiality_from_state(state).overall_cent,
+        policy=_PIPELINE_RULES.special_policy["documented_reversal"],
+    )
+    state["documented_reversal_links"] = list(reversal_links)
+    _write_trace_jsonl(run_dir, "明确冲销配对留痕.jsonl", reversal_links)
     checked = validate_classification(components, decisions)
     if not checked.valid:
         raise RuntimeError("自动分类不变量失败：" + "；".join(checked.errors))
     old_tasks = tuple(_ai_task_from_dict(item) for item in state.get("ai_tasks", ())
                       if item["component_id"] in reused)
     tasks = (*old_tasks, *(item for item in routing.ai_tasks if item.component_id not in reused))
+    reversed_ids = {str(link["reversal_component_id"]) for link in reversal_links}
+    tasks = tuple(task for task in tasks if task.component_id not in reversed_ids)
     serialized_components = [asdict(item) for item in components]
     serialized_decisions = [asdict(item) for item in decisions]
     digest_source = json.dumps(serialized_components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
