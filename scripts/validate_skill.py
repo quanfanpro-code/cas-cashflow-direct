@@ -12,7 +12,7 @@ ALLOWED_IMPORTS = {
     "__future__", "argparse", "ast", "collections", "contextlib", "dataclasses", "datetime", "decimal",
     "difflib", "enum", "hashlib", "json", "math", "os", "pathlib", "posixpath", "re", "shutil", "sqlite3",
     "subprocess", "sys", "time", "tkinter", "types", "typing", "unittest", "xml", "zipfile",
-    "cashflow_direct", "openpyxl", "pandas", "xlsxwriter",
+    "cashflow_direct", "src", "openpyxl", "pandas", "xlsxwriter",
 }
 FORBIDDEN_TEXT = (
     "excel-master",
