@@ -1150,21 +1150,80 @@ class PipelineTests(unittest.TestCase):
             preflight = run_preflight(
                 [source], ("1000000", "750000", "50000"), output_parent=root
             )
-            self.assertEqual(1, preflight.source_entry_count)
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            file_id = str(state["files"][0]["file_id"])
+            self.assertEqual(
+                {"一月", "二月"}, {item["sheet"] for item in state["dataset_candidates"]}
+            )
+            self.assertEqual(0, preflight.source_entry_count)
+            confirm_mapping(
+                preflight.run_dir,
+                {
+                    f"{file_id}:dataset:一月": "use",
+                    f"{file_id}:dataset:二月": "use",
+                },
+            )
             state = json.loads(
                 (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
                     encoding="utf-8-sig"
                 )
             )
             self.assertEqual({"一月", "二月"}, {item["sheet"] for item in state["mappings"]})
+            self.assertEqual(1, len(state["entries"]))
             self.assertTrue(any(item["kind"] == "错误" for item in state["normalization_issues"]))
-            confirm_cash_scope(preflight.run_dir, preflight.recommended_cash_decisions)
+            confirm_cash_scope(preflight.run_dir, state["recommended_cash_decisions"])
             with self.assertRaisesRegex(RuntimeError, "补充期初、期末现金余额和汇率影响"):
                 run_classification(preflight.run_dir)
             supplement_cash_balances(preflight.run_dir, "0", "100", "0", "匿名余额资料")
             run_classification(preflight.run_dir)
             final = finalize_run(preflight.run_dir)
             self.assertEqual("诊断材料，不可作为最终表", final.overall_status)
+
+    def test_duplicate_like_dataset_sheets_require_user_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "同账两表.xlsx"
+            workbook = Workbook()
+            for title in ("生成结果", "原始数据"):
+                sheet = workbook.active if title == "生成结果" else workbook.create_sheet(title)
+                sheet.title = title
+                sheet.append(["日期", "凭证号", "摘要", "科目", "借方", "贷方"])
+                sheet.append(["2026-01-01", "记-1", "匿名收款", "银行存款", 100, None])
+                sheet.append(["2026-01-01", "记-1", "匿名收款", "主营业务收入", None, 100])
+            workbook.save(source)
+            preflight = run_preflight(
+                [source], ("1000000", "750000", "50000"), output_parent=root
+            )
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            file_id = str(state["files"][0]["file_id"])
+            self.assertEqual(
+                {"生成结果", "原始数据"}, {item["sheet"] for item in state["dataset_candidates"]}
+            )
+            self.assertEqual(0, len(state["entries"]))
+            with self.assertRaisesRegex(RuntimeError, "等待疑似数据工作表确认"):
+                confirm_mapping(preflight.run_dir, {})
+            confirm_mapping(
+                preflight.run_dir,
+                {
+                    f"{file_id}:dataset:生成结果": "use",
+                    f"{file_id}:dataset:原始数据": "ignore",
+                },
+            )
+            state = json.loads(
+                (preflight.run_dir / "计算留痕数据" / "运行状态.json").read_text(
+                    encoding="utf-8-sig"
+                )
+            )
+            self.assertEqual(["生成结果"], [item["sheet"] for item in state["mappings"]])
+            self.assertEqual(2, len(state["entries"]))
 
     def test_cash_balance_sheet_in_ten_thousand_yuan_is_scaled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

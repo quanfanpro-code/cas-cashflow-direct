@@ -671,6 +671,9 @@ def _parse_statement_rows(
         # 金融企业专用行（△ 前缀）金额全为零或无金额时不参与一般企业正表核对，直接跳过
         if name.startswith("△") and not current_value and not prior_value:
             continue
+        # 未识别行金额全为零或无金额时同样无核对信息，直接跳过（客户常原样保留无△前缀的金融企业专用行）
+        if item_id is None and not current_value and not prior_value:
+            continue
         if item_id is not None:
             values[item_id] = _amount_to_cent(current_value, unit_multiplier)
             prior_values[item_id] = _amount_to_cent(prior_value, unit_multiplier)

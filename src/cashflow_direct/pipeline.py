@@ -660,6 +660,8 @@ def run_preflight(
     designated_hit = False
     balance_candidates: dict[str, tuple[int, int]] = {}
     statement_candidates: list[dict[str, object]] = []
+    dataset_candidates: list[dict[str, object]] = []
+    deferred_reference_years: set[int] = set()
     mapped_dataset_sheets_by_file: dict[str, frozenset[str]] = {}
     for registered in intake.active_files:
         for key, candidate in _read_cash_balances(registered.path).items():
@@ -687,11 +689,57 @@ def run_preflight(
                 if isinstance(result, ExistingStatementResult)
             )
         detected = infer_dataset_mappings(snapshot, exclude_sheets=exclude_sheets)
+        dataset_hits = [mapping for mapping in detected if isinstance(mapping, DatasetMapping)]
         mapped_dataset_sheets_by_file[registered.file_id] = frozenset(
-            mapping.sheet_name for mapping in detected if isinstance(mapping, DatasetMapping)
+            mapping.sheet_name for mapping in dataset_hits
         )
+        # 同一文件出现多张疑似数据工作表（完整映射或带字段疑问）时，可能是同一内容的
+        # 多份副本，也可能是按月或按账户分表；程序不得代用户取舍，逐张登记候选并暂缓
+        # 归一化，由用户在 confirm-mapping 阶段逐张选择 use 或 ignore 后再入库。
+        field_question_sheets = {
+            str(mapping.sheet_name)
+            for mapping in detected
+            if isinstance(mapping, MappingQuestion)
+        }
+        candidate_sheets: set[str] = set()
+        if len(dataset_hits) + len(field_question_sheets) >= 2:
+            candidate_sheets = (
+                {mapping.sheet_name for mapping in dataset_hits} | field_question_sheets
+            )
+            for sheet_name in sorted(candidate_sheets):
+                dataset_candidates.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": sheet_name,
+                    }
+                )
+                questions.append(
+                    {
+                        "file_id": registered.file_id,
+                        "file": registered.path.name,
+                        "sheet": sheet_name,
+                        "role": "dataset_sheet",
+                        "kind": "dataset",
+                        "recommended": "use",
+                    }
+                )
         for mapping in detected:
             if isinstance(mapping, DatasetMapping):
+                if mapping.sheet_name in candidate_sheets:
+                    # 暂缓归一化时轻量扫描日期列年份，供正表多年度列选列使用
+                    date_column = mapping.role_to_column.get("voucher_date")
+                    sheet_rows = next(
+                        (sheet.rows for sheet in snapshot.sheets if sheet.name == mapping.sheet_name),
+                        (),
+                    )
+                    if date_column is not None:
+                        for row in sheet_rows[mapping.header_row_start:]:
+                            if date_column.column_index <= len(row) and (
+                                year := re.match(r"(\d{4})", str(row[date_column.column_index - 1] or ""))
+                            ):
+                                deferred_reference_years.add(int(year.group(1)))
+                    continue  # 等待用户确认用哪张工作表后再归一化
                 normalized = normalize_dataset(registered.path, registered.file_id, mapping)
                 entries.extend(normalized.entries)
                 profiles[str(registered.file_id)] = _profile_to_dict(normalized.profile)
@@ -738,6 +786,8 @@ def run_preflight(
                         }
                     )
             else:
+                if str(mapping.sheet_name) in candidate_sheets:
+                    continue  # 该表的字段疑问随工作表确认一并处理
                 questions.append(
                     {
                         "file_id": registered.file_id,
@@ -753,7 +803,7 @@ def run_preflight(
         int(year.group(1))
         for entry in entries
         if (year := re.match(r"(\d{4})", entry.voucher_date))
-    )
+    ) | frozenset(deferred_reference_years)
     for registered in intake.active_files:
         is_designated = designated_target is not None and registered.path.resolve() == designated_target
         statement_by_sheet = detect_statement_sheets(registered.path, rules, reference_years)
@@ -848,6 +898,8 @@ def run_preflight(
         "existing_statement_path": existing_statement_path,
         "statement_candidates": statement_candidates,
         "statement_confirmations": {},
+        "dataset_candidates": dataset_candidates,
+        "dataset_confirmations": {},
         "cash_balances": {key: value for key, (_, value) in balance_candidates.items()},
         "evidence_profiles": profiles,
         "normalization_issues": normalization_issues,
@@ -955,12 +1007,32 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
         )
         raise RuntimeError(f"{messages}；请合并工作表或明确目标正表后重新预检")
 
+    # ---- 疑似数据工作表确认（取值 use / ignore）----
+    dataset_candidates = list(state.get("dataset_candidates", ()))
+    dataset_confirmations = dict(state.get("dataset_confirmations", {}))
+    for candidate in dataset_candidates:
+        key = f"{candidate['file_id']}:dataset:{candidate['sheet']}"
+        choice = confirmations.get(key)
+        if choice not in {"use", "ignore"}:
+            raise RuntimeError(f"等待疑似数据工作表确认：{key}（取值 use 或 ignore）")
+        dataset_confirmations[key] = choice
+    ignored_dataset_sheets_by_file: dict[str, set[str]] = {}
+    for candidate in dataset_candidates:
+        key = f"{candidate['file_id']}:dataset:{candidate['sheet']}"
+        if dataset_confirmations[key] == "ignore":
+            ignored_dataset_sheets_by_file.setdefault(str(candidate["file_id"]), set()).add(
+                str(candidate["sheet"])
+            )
+
     # ---- 字段映射确认 ----
     pending_questions = [
         question for question in state.get("mapping_questions", ())
-        if question.get("kind") != "statement"
+        if question.get("kind") not in ("statement", "dataset")
+        and str(question.get("sheet", "")) not in ignored_dataset_sheets_by_file.get(
+            str(question.get("file_id", "")), frozenset()
+        )
     ]
-    if not pending_questions and not statement_candidates:
+    if not pending_questions and not statement_candidates and not dataset_candidates:
         state["mapping_confirmations"] = confirmations
         records = _prepare_account_mapping_state(
             state, tuple(_entry_from_dict(item) for item in state["entries"])
@@ -983,6 +1055,9 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     pending_by_file: dict[str, list[dict[str, object]]] = {}
     for question in pending_questions:
         pending_by_file.setdefault(str(question["file_id"]), []).append(question)
+    # 带疑似数据工作表候选的文件也要重新归一化，把用户确认使用的表入库
+    for candidate in dataset_candidates:
+        pending_by_file.setdefault(str(candidate["file_id"]), [])
 
     new_questions: list[dict[str, object]] = []
     new_entries: list[NormalizedEntry] = []
@@ -1030,7 +1105,10 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
             except ValueError as error:
                 raise ValueError(f"字段 {full_key} 的确认值必须是 Excel 列字母") from error
         path = files_by_id[file_id]
-        for mapping in infer_dataset_mappings(scan_workbook(path), overrides_by_sheet):
+        excluded_here = frozenset(ignored_dataset_sheets_by_file.get(file_id, ()))
+        for mapping in infer_dataset_mappings(
+            scan_workbook(path), overrides_by_sheet, exclude_sheets=excluded_here
+        ):
             if isinstance(mapping, MappingQuestion):
                 new_questions.append(
                     {
@@ -1075,6 +1153,7 @@ def confirm_mapping(run_dir: Path, decisions: Mapping[str, str]) -> StageResult:
     state["mapping_questions"] = new_questions
     state["mapping_confirmations"] = confirmations
     state["statement_confirmations"] = statement_confirmations
+    state["dataset_confirmations"] = dataset_confirmations
     state["evidence_profiles"] = profiles
     use_paths = {
         str(files_by_id[str(candidate["file_id"])])
