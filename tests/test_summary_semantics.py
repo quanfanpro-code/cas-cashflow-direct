@@ -75,6 +75,18 @@ class SummarySemanticsTests(unittest.TestCase):
         self.assertEqual(("CFI-06",), asset.candidate_item_ids)
         self.assertEqual(45, asset.quality.value)
 
+    def test_purchase_borrow_and_repay_are_not_decisive_by_themselves(self):
+        cases = {
+            "支付采购款": ("CFO-04",),
+            "收到借款": ("CFF-02",),
+            "支付偿还借款": ("CFF-04",),
+        }
+        for summary, candidate in cases.items():
+            with self.subTest(summary=summary):
+                result = analyze_summary(summary, self.rules)
+                self.assertEqual(candidate, result.candidate_item_ids)
+                self.assertLess(result.quality.value, 45)
+
     def test_wage_account_phrase_does_not_become_staff_compensation(self):
         for summary in (
             "付农民工资专用账户款",

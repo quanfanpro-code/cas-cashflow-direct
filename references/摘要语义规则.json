@@ -1,4 +1,4 @@
-﻿{
+{
   "schema_version": "1.5.0",
   "scope": "一般企业现金流量表直接法摘要语义",
   "noise_patterns": [
@@ -208,7 +208,7 @@
   ],
   "quality_rules": {
     "strong_values": {
-      "business_relation": ["sale", "purchase", "acquire", "dispose", "borrow", "repay"],
+      "business_relation": ["sale", "acquire", "dispose"],
       "counterparty_role": ["customer", "supplier", "employee", "shareholder", "bank"],
       "purpose": ["capital_use", "operating_use", "production_use", "administrative_use", "customer_project_use", "own_asset_use"],
       "attribute": ["principal", "interest", "net_amount", "decisive_object", "employee_tax_service", "shareholder_tax_service"]
