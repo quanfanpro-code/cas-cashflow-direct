@@ -37,10 +37,10 @@ def test_final_workbook_exposes_the_complete_decision_chain_per_effective_cashfl
 
         workbook = load_workbook(final.workbook_path, data_only=False)
         try:
-            assert "原表与系统决定差异" in workbook.sheetnames
-            assert "科目语义词典" in workbook.sheetnames
-            assert "同类检查" in workbook.sheetnames
-            trace = workbook["全量分类留痕"]
+            assert "原表与系统决定差异" not in workbook.sheetnames
+            assert "科目语义词典" not in workbook.sheetnames
+            assert "同类检查" not in workbook.sheetnames
+            trace = workbook["06 全量分类留痕"]
             headers = [cell.value for cell in trace[1]]
             expected_order = [
                 "日期",
@@ -104,16 +104,7 @@ def test_final_workbook_exposes_the_complete_decision_chain_per_effective_cashfl
                 for row in range(2, trace.max_row + 1)
             )
 
-            difference = workbook["原表与系统决定差异"]
-            difference_headers = [cell.value for cell in difference[1]]
-            for header in (
-                "差异形成原因",
-                "打分逻辑描述及打分结果",
-                "独立来源1",
-                "独立来源2",
-            ):
-                assert header in difference_headers
-            assert "主表项目名称" not in difference_headers
-            assert "审定现流表项目" in difference_headers
+            for header in ("判断理由", "摘要来源质量", "完整路径来源质量", "最终决定项目"):
+                assert header in headers
         finally:
             workbook.close()

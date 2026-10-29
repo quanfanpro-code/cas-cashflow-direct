@@ -129,7 +129,7 @@ def test_核验结果经过正式入口保存并提供中文异常说明(tmp_pat
     final = finalize_run(result.run_dir)
     output = load_workbook(final.workbook_path, read_only=True, data_only=True)
     try:
-        rows = output["全量分类留痕"].iter_rows(values_only=True)
+        rows = output["06 全量分类留痕"].iter_rows(values_only=True)
         header = next(rows)
         row = next(rows)
         values = dict(zip(header, row))

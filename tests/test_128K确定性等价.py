@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import shutil
@@ -81,8 +81,8 @@ def workbook_business_signature(path: Path, root: Path) -> list:
             "validations": validations,
         })
     workbook.close()
-    if "现金流量表正表" not in [item["title"] for item in signature]:
-        raise AssertionError("未实际读取现金流量表正表，不能用空签名通过")
+    if "03 现金流量表正表" not in [item["title"] for item in signature]:
+        raise AssertionError("未实际读取03 现金流量表正表，不能用空签名通过")
     return signature
 
 
@@ -136,7 +136,7 @@ def test_workbook_signature_detects_injected_difference(tmp_path: Path):
     mutated = tmp_path / "mutated.xlsx"
     shutil.copy2(round_trip, mutated)
     workbook = load_workbook(mutated, data_only=False)
-    sheet = workbook["现金流量表正表"]
+    sheet = workbook["03 现金流量表正表"]
     changed = False
     for row in sheet.iter_rows():
         for cell in row:
@@ -146,7 +146,7 @@ def test_workbook_signature_detects_injected_difference(tmp_path: Path):
                 break
         if changed:
             break
-    assert changed, "现金流量表正表中没有可修改的数值单元格"
+    assert changed, "03 现金流量表正表中没有可修改的数值单元格"
     workbook.save(mutated)
     workbook.close()
     assert workbook_business_signature(final.workbook_path, root) != workbook_business_signature(mutated, root)

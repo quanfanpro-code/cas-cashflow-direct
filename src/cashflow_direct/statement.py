@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cashflow_direct.classification import RulePack, standardize_flow_item
@@ -342,7 +342,7 @@ def build_statement_layers(
     fx_cent: int | None = None,
     additional_system_adjustments: Sequence[StatementAdjustment] = (),
 ) -> StatementLayers:
-    """分别形成系统自动基线、人工调整和原项目明细重建值。"""
+    """分别形成独立系统编制金额、人工调整和原项目明细重建值。"""
     leaf_ids = tuple(
         item.item_id for item in rules.statement_items if item.is_leaf
     )
@@ -369,34 +369,19 @@ def build_statement_layers(
     detail_leaf, detail_support = _original_detail_values(
         components, decisions, rules
     )
-    if existing is None:
-        automatic = aggregate_statement(
-            components,
-            tuple(
-                decision
-                for decision in decisions
-                if decision.decision_source != "manual"
-            ),
-            rules,
-            opening_cent=opening_cent,
-            fx_cent=fx_cent,
-        )
-    else:
-        customer_leaf = {
-            item_id: int(existing.standardized_values.get(item_id) or 0)
-            for item_id in leaf_ids
-        }
-        automatic = _roll_up_statement(
-            {
-                item_id: customer_leaf[item_id] + system_leaf[item_id]
-                for item_id in leaf_ids
-            },
-            rules,
-            opening_cent=opening_cent,
-            fx_cent=fx_cent,
-            prior_values=existing.prior_values,
-            support=system_support,
-        )
+    automatic = aggregate_statement(
+        components,
+        tuple(
+            replace(decision, resolved=False)
+            if decision.decision_source == "manual"
+            else decision
+            for decision in decisions
+        ),
+        rules,
+        opening_cent=opening_cent,
+        fx_cent=fx_cent,
+        prior_values=None if existing is None else existing.prior_values,
+    )
     detail = _roll_up_statement(
         detail_leaf,
         rules,

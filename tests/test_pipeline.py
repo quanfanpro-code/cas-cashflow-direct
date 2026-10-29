@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sqlite3
@@ -727,7 +727,7 @@ class PipelineTests(unittest.TestCase):
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
                 sheet = workbook[
-                    "现金范围与现金流量表与货币资金变动的勾稽核对"
+                    "05 现金勾稽"
                 ]
                 rows = {
                     str(sheet.cell(row, 1).value): sheet.cell(row, 2).value
@@ -811,24 +811,16 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(0, state["reconciliation"]["difference_cent"])
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
-                sheet = workbook["原表与系统决定差异"]
+                self.assertNotIn("原表与系统决定差异", workbook.sheetnames)
+                sheet = workbook["06 全量分类留痕"]
                 headers = [cell.value for cell in sheet[1]]
                 row = {
                     header: sheet.cell(2, column).value
                     for column, header in enumerate(headers, start=1)
                 }
-                self.assertEqual(2, sheet.max_row)
                 self.assertEqual("记", row["凭证字"])
                 self.assertEqual("1", str(row["凭证号"]))
-                self.assertEqual("6711", str(row["科目编码"]))
-                self.assertEqual("原项目无法标准化", row["原项目标准化结果"])
-                self.assertEqual("支付其他与经营活动有关的现金", row["审定现流表项目"])
-                self.assertEqual(100, row["借方"])
-                self.assertIsNone(row["流量金额（原币）"])
-                self.assertEqual(
-                    "证据得分70分；金额档位为低于明显微小错报临界值；符合自动修改条件。",
-                    row["差异形成原因"],
-                )
+                self.assertEqual("支付其他与经营活动有关的现金", row["最终决定项目"])
             finally:
                 workbook.close()
 
@@ -1029,7 +1021,7 @@ class PipelineTests(unittest.TestCase):
                 )
 
     def test_trace_marks_direction_source(self) -> None:
-        # 全量分类留痕表含"现金方向依据"列，序时账明细（无流量金额列）标"借贷差额"
+        # 06 全量分类留痕表含"现金方向依据"列，序时账明细（无流量金额列）标"借贷差额"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             inputs = write_end_to_end_case(root)
@@ -1043,7 +1035,7 @@ class PipelineTests(unittest.TestCase):
             final = finalize_run(preflight.run_dir)
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
-                sheet = workbook["全量分类留痕"]
+                sheet = workbook["06 全量分类留痕"]
                 headers = [cell.value for cell in sheet[1]]
                 self.assertIn("现金方向依据", headers)
                 column = headers.index("现金方向依据") + 1
@@ -1285,10 +1277,10 @@ class PipelineTests(unittest.TestCase):
             final = finalize_run(preflight.run_dir)
             self.assertTrue(final.workbook_path.is_file())
             self.assertTrue((final.run_dir / "计算留痕数据" / "计算留痕.sqlite3").is_file())
-            self.assertTrue(final.overall_status.startswith("草稿：现金流量表"))
+            self.assertEqual("最终可使用", final.overall_status)
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
-                self.assertIsNotNone(workbook["现金流量表正表"]["C4"].value)
+                self.assertIsNotNone(workbook["03 现金流量表正表"]["C4"].value)
             finally:
                 workbook.close()
 
@@ -1430,7 +1422,7 @@ class PipelineTests(unittest.TestCase):
             final = finalize_run(preflight.run_dir)
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
-                self.assertIsNotNone(workbook["正表核对报告"]["A2"].value)
+                self.assertIsNotNone(workbook["04 客户正表对比"]["A2"].value)
             finally:
                 workbook.close()
 
@@ -1560,33 +1552,8 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(90, state["decisions"][0]["evidence_score"])
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
-                ai_sheet = workbook["AI复核记录"]
-                # 尚未提交的另一轮不计失败；只有本轮越界结果留技术失败记录。
-                self.assertEqual(4, ai_sheet.max_row)
-                ai_headers = [cell.value for cell in ai_sheet[1]]
-                stage_column = ai_headers.index("阶段") + 1
-                self.assertCountEqual(
-                    [
-                        "分类AI技术失败",
-                        "分类AI有效结果",
-                        "分类AI有效结果",
-                    ],
-                    [
-                        ai_sheet.cell(row, stage_column).value
-                        for row in range(2, ai_sheet.max_row + 1)
-                    ],
-                )
-                ai_headers = [cell.value for cell in ai_sheet[1]]
-                for header in (
-                    "阶段",
-                    "review_round",
-                    "reviewer_id",
-                    "model_id",
-                    "reviewed_at",
-                    "prior_result_difference",
-                ):
-                    self.assertIn(header, ai_headers)
-                trace_headers = [cell.value for cell in workbook["全量分类留痕"][1]]
+                self.assertNotIn("AI复核记录", workbook.sheetnames)
+                trace_headers = [cell.value for cell in workbook["06 全量分类留痕"][1]]
                 for header in (
                     "原现流项目",
                     "本行完整对方科目路径",
@@ -1653,13 +1620,13 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("最终可使用", final.overall_status)
             workbook = load_workbook(final.workbook_path, data_only=False)
             try:
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 self.assertEqual(
                     "本期无重大剩余不确定事项，无需人工复核。",
                     review.cell(2, 1).value,
                 )
-                main = workbook["现金流量表正表"]
+                main = workbook["03 现金流量表正表"]
                 proposed_row = next(
                     row
                     for row in range(4, main.max_row + 1)

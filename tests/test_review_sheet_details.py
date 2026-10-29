@@ -66,10 +66,9 @@ def test_manual_sheets_only_show_real_rows_and_each_amount_is_numeric() -> None:
         build_output_workbook(model, path)
         workbook = load_workbook(path, data_only=False)
         try:
-            assert len(workbook.sheetnames) == 14
-            assert "低金额系统兜底明细" in workbook.sheetnames
-            assert "低金额批量处理" not in workbook.sheetnames
-            for sheet_name in ("重要待复核事项", "低金额系统兜底明细"):
+            assert len(workbook.sheetnames) == 6
+            assert "低金额系统兜底明细" not in workbook.sheetnames
+            for sheet_name in ("02 重要待复核事项",):
                 sheet = workbook[sheet_name]
                 headers = [cell.value for cell in sheet[1]]
                 for removed in ("行类型", "批次编号(技术)", "批次最不利影响金额", "批次现金变化金额", "人工处理状态", "人工可选标准项目"):
@@ -77,7 +76,7 @@ def test_manual_sheets_only_show_real_rows_and_each_amount_is_numeric() -> None:
                 business_col = headers.index("同一业务序号") + 1
                 business_rows = [row for row in range(2, sheet.max_row + 1) if sheet.cell(row, business_col).value]
                 assert business_rows == [2, 3]
-                amount_header = "本行分配现金变化" if sheet_name == "重要待复核事项" else "本行金额"
+                amount_header = "本行分配现金变化" if sheet_name == "02 重要待复核事项" else "本行金额"
                 amount_col = headers.index(amount_header) + 1
                 assert [sheet.cell(row, amount_col).value for row in business_rows] == [34_352.90, 97_631.43]
                 assert all(isinstance(sheet.cell(row, amount_col).value, (int, float)) for row in business_rows)
@@ -88,85 +87,45 @@ def test_manual_sheets_only_show_real_rows_and_each_amount_is_numeric() -> None:
             workbook.close()
 
 
-def test_fallback_default_is_valid_and_one_business_choice_updates_all_real_rows() -> None:
-    model = replace(workbook_model(0, 0), low_amount_fallback_batches=(fallback_batch(),), trace_rows=trace_rows())
+def test_fallback_result_is_editable_in_full_trace_without_a_manual_gate() -> None:
+    rows = tuple({**row, "最终决定项目": row["系统候选项目"]} for row in trace_rows())
+    model = replace(workbook_model(0, 0), low_amount_fallback_batches=(fallback_batch(),), trace_rows=rows)
 
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "兜底改选.xlsx"
+        path = Path(tmp) / "兜底留痕.xlsx"
         build_output_workbook(model, path)
         workbook = load_workbook(path, data_only=False)
         try:
-            sheet = workbook["低金额系统兜底明细"]
+            assert "低金额系统兜底明细" not in workbook.sheetnames
+            sheet = workbook["06 全量分类留痕"]
             headers = [cell.value for cell in sheet[1]]
-            assert [sheet.cell(row, 1).value for row in (2, 3)] == ["2025-03-22", "2025-03-22"]
-            hidden_ranges = tuple(
-                (dimension.min, dimension.max)
-                for dimension in sheet.column_dimensions.values()
-                if dimension.hidden
-            )
-            for column in range(1, len(REVIEW_HEADERS) + 1):
-                if sheet.cell(1, column).value is None:
-                    assert any(start <= column <= end for start, end in hidden_ranges)
-            assert sheet.max_column == len(REVIEW_HEADERS) + 1
-            choice_col = headers.index("人工改选项目") + 1
-            final_col = headers.index("最终采用项目") + 1
-            first_choice = sheet.cell(2, choice_col)
-            second_choice = sheet.cell(3, choice_col)
-            assert first_choice.value == "采用系统兜底项目"
-            assert first_choice.protection.locked is False
-            assert second_choice.data_type == "f"
-            assert first_choice.coordinate in second_choice.value
-            assert sheet.cell(2, final_col).data_type == "f"
-            assert sheet.cell(3, final_col).data_type == "f"
+            final_col = headers.index("最终决定项目") + 1
+            assert sheet.cell(2, final_col).value == "销售商品、提供劳务收到的现金"
+            assert sheet.cell(3, final_col).value == "销售商品、提供劳务收到的现金"
             assert sheet.data_validations.dataValidation
+            assert not sheet.protection.sheet
         finally:
             workbook.close()
 
 
-def test_fallback_sheet_hides_advisor_and_technical_columns_by_default() -> None:
-    model = replace(
-        workbook_model(0, 0),
-        low_amount_fallback_batches=(fallback_batch(),),
-        trace_rows=trace_rows(),
-    )
+def test_full_trace_hides_technical_columns_by_default() -> None:
+    rows = tuple({**row, "最终决定项目": row["系统候选项目"]} for row in trace_rows())
+    model = replace(workbook_model(0, 0), low_amount_fallback_batches=(fallback_batch(),), trace_rows=rows)
 
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "兜底隐藏列.xlsx"
+        path = Path(tmp) / "留痕隐藏列.xlsx"
         build_output_workbook(model, path)
         workbook = load_workbook(path)
         try:
-            sheet = workbook["低金额系统兜底明细"]
+            sheet = workbook["06 全量分类留痕"]
             headers = [cell.value for cell in sheet[1]]
-            hidden_ranges = tuple(
-                (dimension.min, dimension.max)
-                for dimension in sheet.column_dimensions.values()
-                if dimension.hidden
-            )
-
-            def is_hidden(column: int) -> bool:
-                return any(start <= column <= end for start, end in hidden_ranges)
-
-            expected_hidden = (
-                "人工依据",
-                "外部资料位置",
-                "处理人",
-                "处理时间",
-                "系统项目(技术)",
-                "系统基线金额(技术)",
-                "系统项目调整(技术)",
-                "目标项目金额(技术)",
-                "包含笔数(技术)",
-                "业务组成编号(技术)",
-                "原基线项目(技术)",
-            )
-            for header in expected_hidden:
-                assert header in headers
-                assert is_hidden(headers.index(header) + 1), f"{header} 应默认隐藏"
-            removed_index = REVIEW_HEADERS.index("批次编号(技术)")
-            assert headers[removed_index] is None
-            assert is_hidden(removed_index + 1), "批次编号(技术) 应默认隐藏"
-            for visible in ("人工改选项目", "最终采用项目", "系统兜底项目"):
-                assert not is_hidden(headers.index(visible) + 1), f"{visible} 不应隐藏"
+            for header in ("业务组成编号(技术)", "摘要来源质量", "完整路径来源质量", "证据得分"):
+                column = headers.index(header) + 1
+                assert any(
+                    dimension.hidden and dimension.min <= column <= dimension.max
+                    for dimension in sheet.column_dimensions.values()
+                )
+            assert not sheet.protection.sheet
         finally:
             workbook.close()
 
@@ -192,7 +151,7 @@ def test_important_businesses_are_contiguous_without_synthetic_rows() -> None:
         build_output_workbook(model, path)
         workbook = load_workbook(path, data_only=False)
         try:
-            sheet = workbook["重要待复核事项"]
+            sheet = workbook["02 重要待复核事项"]
             headers = [cell.value for cell in sheet[1]]
             business_col = headers.index("同一业务序号") + 1
             choice_col = headers.index("人工确认项目") + 1

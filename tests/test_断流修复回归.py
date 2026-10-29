@@ -27,7 +27,7 @@ def test_诊断保留结构门禁与现金(tmp_path):
     assert result.overall_status.startswith('诊断材料')
     assert sum(c['cash_delta_cent'] for c in after['components'])==-10500
     w=load_workbook(result.workbook_path,read_only=True,data_only=False)
-    assert len(w.sheetnames)==14 and str(w['使用说明与状态']['B3'].value).startswith('诊断材料');w.close()
+    assert len(w.sheetnames)==6 and str(w['01 使用说明与状态']['B3'].value).startswith('诊断材料');w.close()
     with pytest.raises(RuntimeError,match='业务组成'):p.finalize_run(run)
 
 def test_诊断不得绕过分类AI(tmp_path):

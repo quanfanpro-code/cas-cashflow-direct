@@ -182,7 +182,31 @@ class StatementTests(unittest.TestCase):
         self.assertEqual(-10_000, layers.manual_adjustments["CFO-07"])
         self.assertEqual(10_000, layers.manual_adjustments["CFO-05"])
 
-    def test_internal_transfer_difference_also_reduces_automatic_baseline(self) -> None:
+    def test_manual_change_without_customer_keeps_original_in_system_layer(self) -> None:
+        rules = load_rule_pack(ROOT)
+        component = cashflow_component(
+            "人工改判",
+            -10_000,
+            original_item_text=rules.item_by_id["CFO-07"].name,
+            component_id="LAYER-MANUAL-NO-CUSTOMER",
+        )
+        decision = _layer_decision(
+            component.component_id,
+            original_item_id="CFO-07",
+            target_item_id="CFO-05",
+            resolved=True,
+            source="manual",
+            action="manual_decision",
+        )
+
+        layers = build_statement_layers((component,), (decision,), rules)
+
+        self.assertEqual(10_000, layers.automatic_baseline.values["CFO-07"])
+        self.assertEqual(0, layers.automatic_baseline.values["CFO-05"])
+        self.assertEqual(-10_000, layers.manual_adjustments["CFO-07"])
+        self.assertEqual(10_000, layers.manual_adjustments["CFO-05"])
+
+    def test_internal_transfer_difference_does_not_change_independent_system_amount(self) -> None:
         rules = load_rule_pack(ROOT)
         entry = NormalizedEntry(
             entry_id="TRANSFER-IN",
@@ -214,9 +238,9 @@ class StatementTests(unittest.TestCase):
         )
 
         self.assertEqual(-27_002, layers.system_adjustments["CFO-03"])
-        self.assertEqual(72_998, layers.automatic_baseline.values["CFO-03"])
+        self.assertEqual(0, layers.automatic_baseline.values["CFO-03"])
 
-    def test_internal_transfer_removes_negative_original_amount_with_positive_adjustment(self) -> None:
+    def test_reversed_internal_transfer_also_stays_outside_system_amount(self) -> None:
         rules = load_rule_pack(ROOT)
         entry = NormalizedEntry(
             entry_id="TRANSFER-REVERSE",
@@ -248,7 +272,7 @@ class StatementTests(unittest.TestCase):
         )
 
         self.assertEqual(27_002, layers.system_adjustments["CFO-03"])
-        self.assertEqual(127_002, layers.automatic_baseline.values["CFO-03"])
+        self.assertEqual(0, layers.automatic_baseline.values["CFO-03"])
 
     def test_leaf_subtotals_and_net_cash_reconcile(self) -> None:
         case = classified_components()

@@ -180,9 +180,11 @@ def manual_adjustment_formula(
     duplicate_last_row: int,
     base_amount: float = 0,
     low_amount_last_row: int = 2,
+    duplicate_first_row: int = 2,
 ) -> str:
     review_end = max(2, review_last_row)
-    duplicate_end = max(2, duplicate_last_row)
+    duplicate_start = max(2, duplicate_first_row)
+    duplicate_end = max(duplicate_start, duplicate_last_row)
     low_end = max(2, low_amount_last_row)
     system_adjustment = _review_col("系统项目调整(技术)", absolute=True)
     baseline_item = _review_col("原基线项目(技术)", absolute=True)
@@ -191,12 +193,10 @@ def manual_adjustment_formula(
     manual_item = _review_col("人工确认项目", absolute=True)
     return (
         f'={base_amount}'
-        f'+SUMIFS(\'重要待复核事项\'!{system_adjustment}$2:{system_adjustment}${review_end},\'重要待复核事项\'!{baseline_item}$2:{baseline_item}${review_end},"{item_name}")'
-        f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{item_name}")'
-        f'+SUMIFS(\'重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'重要待复核事项\'!{system_item}$2:{system_item}${review_end},"{item_name}",\'重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{USE_SYSTEM_RECOMMENDATION}")'
-        f'+SUMIFS(\'低金额系统兜底明细\'!{system_adjustment}$2:{system_adjustment}${low_end},\'低金额系统兜底明细\'!{baseline_item}$2:{baseline_item}${low_end},"{item_name}")'
-        f'+SUMIFS(\'低金额系统兜底明细\'!{target_amount}$2:{target_amount}${low_end},\'低金额系统兜底明细\'!{manual_item}$2:{manual_item}${low_end},"{item_name}")'
-        f'+SUMIFS(\'疑似重复事项\'!$F$2:$F${duplicate_end},\'疑似重复事项\'!$B$2:$B${duplicate_end},"{item_name}")'
+        f'+SUMIFS(\'02 重要待复核事项\'!{system_adjustment}$2:{system_adjustment}${review_end},\'02 重要待复核事项\'!{baseline_item}$2:{baseline_item}${review_end},"{item_name}")'
+        f'+SUMIFS(\'02 重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'02 重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{item_name}")'
+        f'+SUMIFS(\'02 重要待复核事项\'!{target_amount}$2:{target_amount}${review_end},\'02 重要待复核事项\'!{system_item}$2:{system_item}${review_end},"{item_name}",\'02 重要待复核事项\'!{manual_item}$2:{manual_item}${review_end},"{USE_SYSTEM_RECOMMENDATION}")'
+        f'+SUMIFS(\'02 重要待复核事项\'!$F${duplicate_start}:$F${duplicate_end},\'02 重要待复核事项\'!$B${duplicate_start}:$B${duplicate_end},"{item_name}")'
     )
 
 
@@ -219,12 +219,12 @@ def trace_manual_adjustment_terms(
     final_item = trace_col("最终决定项目")
     item = item_name.replace('"', '""')
     return (
-        f'-SUMIFS(\'全量分类留痕\'!{base_amount}$2:{base_amount}${trace_last_row},'
-        f'\'全量分类留痕\'!{base_item}$2:{base_item}${trace_last_row},"{item}",'
-        f'\'全量分类留痕\'!{active}$2:{active}${trace_last_row},1)'
-        f'+SUMIFS(\'全量分类留痕\'!{target_amount}$2:{target_amount}${trace_last_row},'
-        f'\'全量分类留痕\'!{final_item}$2:{final_item}${trace_last_row},"{item}",'
-        f'\'全量分类留痕\'!{active}$2:{active}${trace_last_row},1)'
+        f'-SUMIFS(\'06 全量分类留痕\'!{base_amount}$2:{base_amount}${trace_last_row},'
+        f'\'06 全量分类留痕\'!{base_item}$2:{base_item}${trace_last_row},"{item}",'
+        f'\'06 全量分类留痕\'!{active}$2:{active}${trace_last_row},1)'
+        f'+SUMIFS(\'06 全量分类留痕\'!{target_amount}$2:{target_amount}${trace_last_row},'
+        f'\'06 全量分类留痕\'!{final_item}$2:{final_item}${trace_last_row},"{item}",'
+        f'\'06 全量分类留痕\'!{active}$2:{active}${trace_last_row},1)'
     )
 
 
@@ -413,7 +413,7 @@ def _write_summary_view_sheet(
     sheet.write(
         1,
         0,
-        "本表纯展示：按 现流项目×标准一级科目×现金方向 汇总全量分类留痕的笔数与合计现金变化，"
+        "本表纯展示：按 现流项目×标准一级科目×现金方向 汇总06 全量分类留痕的笔数与合计现金变化，"
         "不产生复核义务、动作、门禁或状态影响。每个项目末尾的校验行＝全量留痕按项目独立合计−本表组合小计，"
         "差额为零即视图无漏行；人工改选后自动联动，组合排序为出表时预排，不随联动重排。",
         formats["note"],
@@ -428,9 +428,9 @@ def _write_summary_view_sheet(
         account_col = xl_col_to_name(trace_headers.index(source["account"]))
         amount_col = xl_col_to_name(trace_headers.index(source["amount"]))
         last = trace_row_count + 1
-        item_range = f"'全量分类留痕'!${item_col}$2:${item_col}${last}"
-        account_range = f"'全量分类留痕'!${account_col}$2:${account_col}${last}"
-        amount_range = f"'全量分类留痕'!${amount_col}$2:${amount_col}${last}"
+        item_range = f"'06 全量分类留痕'!${item_col}$2:${item_col}${last}"
+        account_range = f"'06 全量分类留痕'!${account_col}$2:${account_col}${last}"
+        amount_range = f"'06 全量分类留痕'!${amount_col}$2:${amount_col}${last}"
     for item in leaf_items:
         project_combos = sorted(
             ((key, value) for key, value in combos.items() if key[0] == item.name),
@@ -482,7 +482,7 @@ def _write_summary_view_sheet(
     sheet.autofilter(2, 0, max(3, current_row - 1), len(headers) - 1)
     _configure_sheet(sheet, len(headers), current_row)
     sheet.freeze_panes(3, 0)
-    sheet.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
+
 
 
 def _write_low_amount_review_sheet(
@@ -594,7 +594,7 @@ def _write_low_amount_review_sheet(
             REVIEW_HEADERS.index("人工确认项目"),
             master_row,
             REVIEW_HEADERS.index("人工确认项目"),
-            {"validate": "list", "source": f"='低金额系统兜底明细'!{list_range}"},
+            {"validate": "list", "source": f"='02 重要待复核事项'!{list_range}"},
         )
         manual_col = _review_col("人工确认项目")
         system_col = _review_col("系统项目(技术)")
@@ -669,7 +669,7 @@ def _write_low_amount_review_sheet(
     sheet.autofilter(0, 0, current_row - 1, len(REVIEW_HEADERS) - 1)
     sheet.set_column(helper_column, helper_column, None, None, {"hidden": True})
     _configure_sheet(sheet, len(REVIEW_HEADERS), current_row)
-    sheet.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
+
     return max(2, current_row)
 
 
@@ -678,19 +678,21 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     if target.exists():
         raise FileExistsError(f"输出文件已存在，不会覆盖：{target}")
     if len(model.trace_rows) > 100_000:
-        raise ValueError("全量分类留痕超过本版本 100,000 行验收范围")
+        raise ValueError("06 全量分类留痕超过本版本 100,000 行验收范围")
     if len(model.difference_rows) > 100_000:
         raise ValueError("原表与系统决定差异明细超过本版本 100,000 行验收范围")
     if any(
         not batch.alternative_item_codes and not batch.mandatory
         for batch in model.review_batches
     ):
-        raise ValueError("重要待复核事项存在没有备选现流项目的记录")
+        raise ValueError("02 重要待复核事项存在没有备选现流项目的记录")
     target.parent.mkdir(parents=True, exist_ok=True)
     workbook = xlsxwriter.Workbook(str(target))
     workbook.set_calc_mode("auto")
     formats = _formats(workbook)
     sheets = {name: workbook.add_worksheet(name) for name in SHEET_NAMES}
+    for sheet in sheets.values():
+        sheet.set_default_row(18)
     item_name_by_id = {
         item.item_id: item.name for item in model.rules.statement_items
     }
@@ -732,17 +734,12 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
     )
     trace_last = max(2, len(trace_rows) + 1)
     try:
-        low_amount_last = _write_low_amount_review_sheet(
-            sheets["低金额系统兜底明细"],
-            model,
-            formats,
-            item_name_by_id,
-        )
-        status = sheets["使用说明与状态"]
+        low_amount_last = 2
+        status = sheets["01 使用说明与状态"]
         status.set_default_row(18)
         status.set_row(0, 24)
         status.hide_gridlines(2)
-        status.merge_range("A1:D1", "直接法现金流量表正表编制与复核底稿", formats["title"])
+        status.merge_range("A1:D1", "直接法03 现金流量表正表编制与复核底稿", formats["title"])
         status.write("A3", "当前状态", formats["header"])
         reconciliation_complete = bool(
             model.reconciliation is not None
@@ -774,26 +771,28 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             or reconciliation_complete
         ):
             review_end = review_last
-            duplicate_end = max(2, len(model.duplicate_groups) + 1)
+            duplicate_first = review_last + 3
+            duplicate_last = duplicate_first + len(model.duplicate_groups)
+            duplicate_start = duplicate_first + 1
             pending_terms = []
             if model.review_batches:
                 review_status_col = _review_col("人工处理状态")
                 pending_terms.append(
-                    f'COUNTIF(\'重要待复核事项\'!{review_status_col}2:{review_status_col}{review_end},"等待人工处理")'
+                    f'COUNTIF(\'02 重要待复核事项\'!{review_status_col}2:{review_status_col}{review_end},"等待人工处理")'
                 )
             if model.duplicate_groups:
                 pending_terms.append(
-                    f'COUNTIF(\'疑似重复事项\'!H2:H{duplicate_end},"无效选择")'
+                    f'COUNTIF(\'02 重要待复核事项\'!H{duplicate_start}:H{duplicate_last},"无效选择")'
                 )
                 pending_terms.append(
-                    f'COUNTIFS(\'疑似重复事项\'!G2:G{duplicate_end},"是",'
-                    f'\'疑似重复事项\'!H2:H{duplicate_end},"待确认")'
+                    f'COUNTIFS(\'02 重要待复核事项\'!G{duplicate_start}:G{duplicate_last},"是",'
+                    f'\'02 重要待复核事项\'!H{duplicate_start}:H{duplicate_last},"待确认")'
                 )
             completed_value = '"最终可使用"'
             if reconciliation_complete:
                 bridge_row = len(model.cash_scope_rows) + 7
                 completed_value = (
-                    f'IF(\'现金范围与现金流量表与货币资金变动的勾稽核对\'!B{bridge_row}="{_RECONCILIATION_STATUS["final_success"]}",'
+                    f'IF(\'05 现金勾稽\'!B{bridge_row}="{_RECONCILIATION_STATUS["final_success"]}",'
                     '"最终可使用","草稿：现金流量表尚待分类或现金变动桥接存在差异")'
                 )
             condition = "+".join(pending_terms) or "0"
@@ -820,7 +819,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
         status.freeze_panes(2, 0)
         status.print_area("A1:D20")
 
-        review = sheets["重要待复核事项"]
+        review = sheets["02 重要待复核事项"]
         review_detail_count = 0
         for column, header in enumerate(IMPORTANT_REVIEW_HEADERS):
             review.write(0, column, header, formats["header"])
@@ -881,7 +880,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     for trace_row in trace_by_component.get(component_id, ())
                 ]
                 if not actual_rows:
-                    raise ValueError("重要待复核事项缺少真实现金分配明细：" + batch.batch_id)
+                    raise ValueError("02 重要待复核事项缺少真实现金分配明细：" + batch.batch_id)
                 for component_id in batch.component_ids:
                     review_row_by_component[component_id] = next_excel_row
                 batch_actual_rows.append((batch, actual_rows))
@@ -1141,7 +1140,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         REVIEW_HEADERS.index("人工确认项目"),
                         {
                             "validate": "list",
-                            "source": f"='重要待复核事项'!{list_range}",
+                            "source": f"='02 重要待复核事项'!{list_range}",
                         },
                     )
                 current_review_row += 1
@@ -1236,9 +1235,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             len(REVIEW_HEADERS),
             review_last,
         )
-        review.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
-        duplicate = sheets["疑似重复事项"]
+
+        duplicate = sheets["02 重要待复核事项"]
+        duplicate_first = review_last + 3
+        duplicate_last = duplicate_first + len(model.duplicate_groups)
         duplicate_headers = (
             "组编号",
             "标准项目",
@@ -1249,10 +1250,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             "是否阻止完成",
             "状态",
         )
-        for column, header in enumerate(duplicate_headers):
-            duplicate.write(0, column, header, formats["header"])
         if model.duplicate_groups:
-            for row_index, group in enumerate(model.duplicate_groups, 1):
+            duplicate.write(duplicate_first - 2, 0, "疑似重复事项", formats["section"])
+            for column, header in enumerate(duplicate_headers):
+                duplicate.write(duplicate_first - 1, column, header, formats["header"])
+            for row_index, group in enumerate(model.duplicate_groups, duplicate_first):
                 duplicate.write(row_index, 0, group.group_id, formats["text"])
                 if group.item_id:
                     duplicate.write(
@@ -1271,11 +1273,11 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     duplicate.write_formula(
                         row_index,
                         1,
-                        "=IFERROR(INDEX('重要待复核事项'!"
+                        "=IFERROR(INDEX('02 重要待复核事项'!"
                         f"${manual_column}$2:${manual_column}${review_last},"
                         "MATCH(\"*"
                         f"{group.component_ids[0]}"
-                        "*\",'重要待复核事项'!"
+                        "*\",'02 重要待复核事项'!"
                         f"${component_column}$2:${component_column}${review_last},0)),"
                         '"待人工决定")',
                         formats["text"],
@@ -1305,26 +1307,21 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                     "待确认" if group.blocks_manual_completion else "默认保留",
                 )
                 duplicate.data_validation(row_index, 2, row_index, 2, {"validate": "list", "source": ["保留", "剔除"]})
-            duplicate.autofilter(0, 0, len(model.duplicate_groups), len(duplicate_headers) - 1)
-        else:
-            duplicate.write(1, 0, "本期未发现跨文件疑似重复事项。", formats["note"])
+            duplicate.autofilter(duplicate_first - 1, 0, duplicate_last - 1, len(duplicate_headers) - 1)
         duplicate.set_column("A:C", 18)
         duplicate.set_column("D:H", 18)
-        _configure_sheet(duplicate, len(duplicate_headers), len(model.duplicate_groups) + 1)
-        duplicate.protect("", {"autofilter": True, "sort": True, "select_unlocked_cells": True})
 
-        main = sheets["现金流量表正表"]
+        main = sheets["03 现金流量表正表"]
         main.set_default_row(18)
         main.set_row(0, 24)
         main.hide_gridlines(2)
         main.merge_range("A1:F1", "现金流量表", formats["title"])
         main.write("A2", "金额单位：人民币元", formats["note"])
-        headers = ("项目编号", "项目", "上期金额", "自动基线", "人工调整", "最终金额")
+        headers = ("项目编号", "项目", "上期金额", "系统编制金额", "人工调整", "审定金额")
         for column, header in enumerate(headers):
             main.write(2, column, header, formats["header"])
         ordered = sorted(model.rules.statement_items, key=lambda item: item.display_order)
         excel_row_by_id = {item.item_id: index + 4 for index, item in enumerate(ordered)}
-        duplicate_last = max(2, len(model.duplicate_groups) + 1)
         for index, item in enumerate(ordered):
             row = index + 3
             excel_row = row + 1
@@ -1379,113 +1376,47 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             )
         main.freeze_panes(3, 0)
         main.autofilter(2, 0, len(ordered) + 2, len(headers) - 1)
-        main.set_column("A:A", 16)
+        main.set_column("A:A", 16, None, {"hidden": True})
         main.set_column("B:B", 50)
         main.set_column("C:F", 18)
         main.set_landscape()
         main.fit_to_pages(1, 1)
         main.print_area(0, 0, len(ordered) + 2, 5)
-        main.protect("", {"autofilter": True, "sort": True})
 
-        comparison_rows = () if model.comparison is None else tuple(
-            {
-                "项目": item_name_by_id[row.item_id],
-                "客户金额": None if row.existing_cent is None else row.existing_cent / 100,
-                "系统自动调整": row.system_adjustment_cent / 100,
-                "自动基线": row.computed_cent / 100,
-                "人工调整": row.manual_adjustment_cent / 100,
-                "最终金额": row.final_cent / 100,
-                "最终差异": None if row.difference_cent is None else row.difference_cent / 100,
-                "明细重建金额": row.detail_reconstruction_cent / 100,
-                "原表与明细勾稽差额": None if row.detail_gap_cent is None else row.detail_gap_cent / 100,
-                "支持组成": "、".join(row.support_component_ids),
-            }
-            for row in model.comparison.rows
-        )
-        comparison_sheet = sheets["正表核对报告"]
+        comparison_rows = () if model.comparison is None else model.comparison.rows
+        comparison_sheet = sheets["04 客户正表对比"]
         if comparison_rows:
-            comparison_headers = (
-                "项目",
-                "客户金额",
-                "系统自动调整",
-                "自动基线",
-                "人工调整",
-                "最终金额",
-                "最终差异",
-                "明细重建金额",
-                "原表与明细勾稽差额",
-                "支持组成",
-            )
+            comparison_headers = ("项目", "客户金额", "审定金额", "差异")
             for column, header in enumerate(comparison_headers):
                 comparison_sheet.write(0, column, header, formats["header"])
             for row_index, row in enumerate(comparison_rows, 1):
                 main_row = row_index + 3
-                comparison_sheet.write(row_index, 0, row["项目"], formats["text"])
-                if row["客户金额"] is None:
+                excel_row = row_index + 1
+                comparison_sheet.write(row_index, 0, item_name_by_id[row.item_id], formats["text"])
+                if row.existing_cent is None:
                     comparison_sheet.write_blank(row_index, 1, None, formats["money"])
                 else:
-                    comparison_sheet.write_number(row_index, 1, row["客户金额"], formats["money"])
-                comparison_sheet.write_number(row_index, 2, row["系统自动调整"], formats["money"])
-                comparison_sheet.write_formula(row_index, 3, f"='现金流量表正表'!D{main_row}", formats["money"], row["自动基线"])
-                comparison_sheet.write_formula(row_index, 4, f"='现金流量表正表'!E{main_row}", formats["money"], row["人工调整"])
-                comparison_sheet.write_formula(row_index, 5, f"='现金流量表正表'!F{main_row}", formats["money"], row["最终金额"])
+                    comparison_sheet.write_number(row_index, 1, row.existing_cent / 100, formats["money"])
                 comparison_sheet.write_formula(
                     row_index,
-                    6,
-                    f'=IF(B{row_index + 1}="","",ROUND(F{row_index + 1}-B{row_index + 1},2))',
+                    2,
+                    f"='03 现金流量表正表'!F{main_row}",
                     formats["money"],
-                    "" if row["最终差异"] is None else row["最终差异"],
+                    row.final_cent / 100,
                 )
-                comparison_sheet.write_number(row_index, 7, row["明细重建金额"], formats["money"])
-                if row["原表与明细勾稽差额"] is None:
-                    comparison_sheet.write_blank(row_index, 8, None, formats["money"])
-                else:
-                    comparison_sheet.write_number(row_index, 8, row["原表与明细勾稽差额"], formats["money"])
-                comparison_sheet.write(row_index, 9, row["支持组成"], formats["text"])
+                comparison_sheet.write_formula(
+                    row_index,
+                    3,
+                    f'=IF(B{excel_row}="","",ROUND(C{excel_row}-B{excel_row},2))',
+                    formats["money"],
+                    "" if row.difference_cent is None else row.difference_cent / 100,
+                )
             comparison_sheet.autofilter(0, 0, len(comparison_rows), len(comparison_headers) - 1)
             comparison_sheet.set_column("A:A", 48)
-            comparison_sheet.set_column("B:I", 18)
-            comparison_sheet.set_column("J:J", 40, None, {"hidden": True})
+            comparison_sheet.set_column("B:D", 18)
             _configure_sheet(comparison_sheet, len(comparison_headers), len(comparison_rows) + 1)
-            comparison_sheet.protect("", {"autofilter": True, "sort": True})
         else:
-            _write_dict_rows(comparison_sheet, (), formats, "本次为编制任务，未提供客户现有正表。")
-        ai_display_rows = tuple(
-            {
-                ("现流项目" if key == "item_id" else key): (
-                    item_name_by_id.get(str(value), value)
-                    if key == "item_id"
-                    else json.dumps(value, ensure_ascii=False)
-                    if isinstance(value, (dict, list, tuple))
-                    else value
-                )
-                for key, value in row.items()
-            }
-            for row in model.ai_records
-        )
-        _write_dict_rows(
-            sheets["AI复核记录"],
-            ai_display_rows,
-            formats,
-            "本期没有需要 AI 复核的事项。",
-        )
-        sheets["AI复核记录"].hide()
-
-        _write_difference_rows(
-            sheets["原表与系统决定差异"], model.difference_rows, formats
-        )
-        difference_sheet = sheets["原表与系统决定差异"]
-        for header in (
-            "来源文件",
-            "来源工作表",
-            "来源单元格",
-        ):
-            column = DIFFERENCE_HEADERS.index(header)
-            difference_sheet.set_column(column, column, 20, None, {"hidden": True})
-        difference_sheet.protect(
-            "", {"autofilter": True, "sort": True}
-        )
-
+            comparison_sheet.hide()
         cash_rows = list(model.cash_scope_rows)
         if model.reconciliation is not None:
             legacy_reconciliation = model.reconciliation.bridge_difference_cent is None
@@ -1530,7 +1461,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                         "金额（元）": None if amount is None else amount / 100,
                     }
                 )
-        cash_sheet = sheets["现金范围与现金流量表与货币资金变动的勾稽核对"]
+        cash_sheet = sheets["05 现金勾稽"]
         _write_dict_rows(cash_sheet, tuple(cash_rows), formats, "现金范围尚未确认。")
         if reconciliation_complete:
             opening_row = len(model.cash_scope_rows) + 2
@@ -1544,7 +1475,7 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             cash_sheet.write_formula(
                 classified_row - 1,
                 2,
-                f"='现金流量表正表'!F{excel_row_by_id['NET-CASH']}-'现金流量表正表'!F{excel_row_by_id['FX']}",
+                f"='03 现金流量表正表'!F{excel_row_by_id['NET-CASH']}-'03 现金流量表正表'!F{excel_row_by_id['FX']}",
                 formats["money"],
                 classified_net_cent / 100,
             )
@@ -1554,9 +1485,9 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
             review_end = review_last
             low_end = max(2, low_amount_last)
             pending_formula = (
-                f'=SUMIFS(\'重要待复核事项\'!{review_cash_change}$2:{review_cash_change}${review_end},'
-                f'\'重要待复核事项\'!{review_baseline}$2:{review_baseline}${review_end},"",'
-                f'\'重要待复核事项\'!{review_status}$2:{review_status}${review_end},"等待人工处理")'
+                f'=SUMIFS(\'02 重要待复核事项\'!{review_cash_change}$2:{review_cash_change}${review_end},'
+                f'\'02 重要待复核事项\'!{review_baseline}$2:{review_baseline}${review_end},"",'
+                f'\'02 重要待复核事项\'!{review_status}$2:{review_status}${review_end},"等待人工处理")'
             )
             cash_sheet.write_formula(
                 pending_row - 1,
@@ -1583,14 +1514,14 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 bridge_row - 1,
                 1,
                 f'=IF(C{bridge_row}<>0,"{_RECONCILIATION_STATUS["bridge_difference"]}",'
-                f'IF(COUNTIF(\'重要待复核事项\'!{review_status}$2:{review_status}${review_end},"等待人工处理")>0,'
+                f'IF(COUNTIF(\'02 重要待复核事项\'!{review_status}$2:{review_status}${review_end},"等待人工处理")>0,'
                 f'"{_RECONCILIATION_STATUS["bridge_pending"]}",'
                 f'IF(C{final_row}=0,"{_RECONCILIATION_STATUS["final_success"]}",'
                 f'"{_RECONCILIATION_STATUS["bridge_pending"]}")))',
                 formats["pending"],
                 model.reconciliation.status,
             )
-        trace_sheet = sheets["全量分类留痕"]
+        trace_sheet = sheets["06 全量分类留痕"]
         _write_dict_rows(trace_sheet, trace_rows, formats, "没有现金流业务组成。")
         if trace_rows and "最终决定项目" in trace_headers:
             final_column = trace_headers.index("最终决定项目")
@@ -1663,8 +1594,8 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 review_match = review_by_component.get(component_id)
                 if current_decision == "等待人工复核" and review_match is not None:
                     review_excel_row, batch = review_match
-                    selected_expression = f"'重要待复核事项'!{review_choice}{review_excel_row}"
-                    system_expression = f"'重要待复核事项'!{review_system_item}{review_excel_row}"
+                    selected_expression = f"'02 重要待复核事项'!{review_choice}{review_excel_row}"
+                    system_expression = f"'02 重要待复核事项'!{review_system_item}{review_excel_row}"
                     resolved_expression = (
                         f'IF({selected_expression}="{USE_SYSTEM_RECOMMENDATION}",'
                         f'{system_expression},{selected_expression})'
@@ -1780,27 +1711,6 @@ def build_output_workbook(model: WorkbookModel, output_path: Path) -> Path:
                 or header.endswith("（技术）")
             ):
                 trace_sheet.set_column(column, column, 20, None, {"hidden": True})
-        _write_dict_rows(
-            sheets["科目语义词典"],
-            model.dictionary_rows,
-            formats,
-            "本次没有需要展示的完整对方科目路径。",
-        )
-        _write_dict_rows(
-            sheets["同类检查"],
-            model.consistency_rows,
-            formats,
-            "本期未发现相同原始来源却形成不同项目的事项。",
-        )
-        _write_summary_view_sheet(
-            sheets["分类汇总视图"],
-            model,
-            formats,
-            trace_headers,
-            len(trace_rows),
-        )
-        _write_dict_rows(sheets["输入识别与字段映射"], model.mapping_rows, formats, "没有字段映射记录。")
-        sheets["输入识别与字段映射"].hide()
     finally:
         workbook.close()
     return target
@@ -1812,25 +1722,19 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
     try:
         if tuple(workbook.sheetnames) != SHEET_NAMES:
             errors.append("工作表名称或顺序不正确")
+        expected_hidden = set() if model.comparison is not None else {"04 客户正表对比"}
         hidden_sheets = {
             sheet.title
             for sheet in workbook.worksheets
             if sheet.sheet_state == "hidden"
         }
-        if hidden_sheets != {"AI复核记录", "输入识别与字段映射"}:
-            errors.append("机器工作表的默认隐藏状态不正确")
+        if hidden_sheets != expected_hidden:
+            errors.append("条件隐藏状态不正确")
+        if any(sheet.protection.sheet for sheet in workbook.worksheets):
+            errors.append("仍有工作表启用了保护")
         if workbook._external_links:
             errors.append("工作簿包含外部链接")
-        difference = workbook["原表与系统决定差异"]
-        if tuple(cell.value for cell in difference[1]) != DIFFERENCE_HEADERS:
-            errors.append("原表与系统决定差异表头不正确")
-        if difference.freeze_panes != "A2":
-            errors.append("原表与系统决定差异冻结窗格不正确")
-        if model.difference_rows and difference.auto_filter.ref is None:
-            errors.append("原表与系统决定差异未设置筛选")
-        if not difference.protection.sheet:
-            errors.append("原表与系统决定差异未设置只读保护")
-        main = workbook["现金流量表正表"]
+        main = workbook["03 现金流量表正表"]
         if main.freeze_panes != "A4":
             errors.append("正表冻结窗格不正确")
         if main.auto_filter.ref is None:
@@ -1841,50 +1745,35 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
             for cell in row
             if isinstance(cell.value, str) and cell.value.startswith("=")
         ]
-        if not any("重要待复核事项" in formula for formula in formulas):
+        if not any("02 重要待复核事项" in formula for formula in formulas):
             errors.append("正表未引用重要待复核事项调整层")
-        if not any("疑似重复事项" in formula for formula in formulas):
-            errors.append("正表未引用疑似重复事项调整层")
         if any("[" in formula for formula in formulas):
             errors.append("正表公式引用了外部工作簿")
         trace_supports_manual_choice = any(
             "最终决定项目" in row for row in model.trace_rows
         )
         if trace_supports_manual_choice and not any(
-            "全量分类留痕" in formula for formula in formulas
+            "06 全量分类留痕" in formula for formula in formulas
         ):
             errors.append("正表未引用全量分类留痕人工改选层")
-        if any("原表与系统决定差异" in formula for formula in formulas):
-            errors.append("正表公式引用了原表与系统决定差异")
-        status_formulas = [
-            cell.value
-            for row in workbook["使用说明与状态"].iter_rows()
-            for cell in row
-            if isinstance(cell.value, str) and cell.value.startswith("=")
-        ]
-        if any("原表与系统决定差异" in formula for formula in status_formulas):
-            errors.append("首页状态公式引用了原表与系统决定差异")
         for index, item in enumerate(sorted(model.rules.statement_items, key=lambda value: value.display_order), 4):
             actual = main.cell(index, 4).value
             expected = model.statement.values[item.item_id] / 100
             if actual != expected:
-                errors.append(f"自动基线不一致：{item.item_id}")
+                errors.append(f"系统编制金额不一致：{item.item_id}")
                 break
         manual_batches = tuple(
             (index + 2, batch)
             for index, batch in enumerate(model.review_batches)
             if not batch.follows_component_id
         )
-        if manual_batches and not workbook["重要待复核事项"].data_validations.dataValidation:
+        review_sheet = workbook["02 重要待复核事项"]
+        if (manual_batches or model.duplicate_groups) and not review_sheet.data_validations.dataValidation:
             errors.append("重要待复核事项缺少下拉选择")
-        review_sheet = workbook["重要待复核事项"]
         if tuple(cell.value for cell in review_sheet[1][: len(REVIEW_HEADERS)]) != IMPORTANT_REVIEW_HEADERS:
             errors.append("重要待复核事项表头不完整或顺序不正确")
-        fallback_sheet = workbook["低金额系统兜底明细"]
-        if tuple(cell.value for cell in fallback_sheet[1][: len(REVIEW_HEADERS)]) != FALLBACK_HEADERS:
-            errors.append("低金额系统兜底明细表头不完整或顺序不正确")
-        if model.low_amount_fallback_batches and not fallback_sheet.data_validations.dataValidation:
-            errors.append("低金额系统兜底明细缺少人工改选下拉")
+        if model.low_amount_fallback_batches and not workbook["06 全量分类留痕"].data_validations.dataValidation:
+            errors.append("全量分类留痕缺少低金额兜底改选下拉")
         # 设计第五节：强制人工复核批次的行必须使用区域引用下拉（内联列表会超 255 字符上限）
         trace_row_counts: dict[str, int] = {}
         for row in model.trace_rows:
@@ -1904,7 +1793,7 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
             )
             next_review_excel_row += max(1, expanded_row_count)
         if mandatory_excel_rows:
-            validations = workbook["重要待复核事项"].data_validations.dataValidation
+            validations = workbook["02 重要待复核事项"].data_validations.dataValidation
             choice_column = _review_col("人工确认项目")
             for excel_row in mandatory_excel_rows:
                 if not any(
@@ -1914,12 +1803,12 @@ def validate_output_workbook(path: Path, model: WorkbookModel) -> WorkbookValida
                 ):
                     errors.append(f"强制人工复核批次第 {excel_row} 行未使用区域引用下拉")
                     break
-        if model.duplicate_groups and not workbook["疑似重复事项"].data_validations.dataValidation:
-            errors.append("疑似重复事项缺少下拉选择")
+        if model.duplicate_groups and not workbook["02 重要待复核事项"].data_validations.dataValidation:
+            errors.append("02 重要待复核事项缺少下拉选择")
         if manual_batches:
             choice_column = _review_col("人工确认项目")
             first_manual_row = manual_batches[0][0]
-            fill = workbook["重要待复核事项"][f"{choice_column}{first_manual_row}"].fill.fgColor.rgb
+            fill = workbook["02 重要待复核事项"][f"{choice_column}{first_manual_row}"].fill.fgColor.rgb
             if fill not in {"FFDDEBF7", "DDEBF7"}:
                 errors.append("人工输入单元格未使用蓝色标识")
     finally:

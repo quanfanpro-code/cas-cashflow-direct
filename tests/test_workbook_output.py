@@ -32,20 +32,12 @@ def test_review_sheet_exposes_level1_mapping_candidates() -> None:
 
 
 EXPECTED_SHEETS = [
-    "使用说明与状态",
-    "现金流量表正表",
-    "正表核对报告",
-    "重要待复核事项",
-    "低金额系统兜底明细",
-    "疑似重复事项",
-    "AI复核记录",
-    "原表与系统决定差异",
-    "现金范围与现金流量表与货币资金变动的勾稽核对",
-    "全量分类留痕",
-    "科目语义词典",
-    "同类检查",
-    "分类汇总视图",
-    "输入识别与字段映射",
+    "01 使用说明与状态",
+    "02 重要待复核事项",
+    "03 现金流量表正表",
+    "04 客户正表对比",
+    "05 现金勾稽",
+    "06 全量分类留痕",
 ]
 
 
@@ -96,7 +88,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 manual_column = headers.index("人工确认项目") + 1
                 system_column = headers.index("系统项目(技术)") + 1
@@ -132,7 +124,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                status = workbook["使用说明与状态"]
+                status = workbook["01 使用说明与状态"]
                 self.assertEqual("本次自动修改最低证据分", status["A6"].value)
                 self.assertEqual("55分（客户选择；70为默认推荐）", status["B6"].value)
             finally:
@@ -147,7 +139,7 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 self.assertEqual(
                     "45分（客户选择；70为默认推荐）",
-                    workbook["使用说明与状态"]["B6"].value,
+                    workbook["01 使用说明与状态"]["B6"].value,
                 )
             finally:
                 workbook.close()
@@ -181,7 +173,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 review_headers = [cell.value for cell in review[1]]
                 self.assertEqual("2026-01-01", review.cell(2, review_headers.index("日期") + 1).value)
                 self.assertNotIn("已决定项目", review_headers)
@@ -195,8 +187,8 @@ class WorkbookOutputTests(unittest.TestCase):
                         f"{get_column_letter(review_headers.index(optional) + 1)}2",
                         status_formula,
                     )
-                self.assertEqual("2026-01-01", workbook["原表与系统决定差异"]["A2"].value)
-                trace = workbook["全量分类留痕"]
+                self.assertNotIn("原表与系统决定差异", workbook.sheetnames)
+                trace = workbook["06 全量分类留痕"]
                 trace_headers = [cell.value for cell in trace[1]]
                 self.assertEqual("2026-01-01", trace.cell(2, trace_headers.index("日期") + 1).value)
             finally:
@@ -209,7 +201,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["重要待复核事项"]
+                sheet = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in sheet[1]]
                 for removed in (
                     "来源文件", "来源工作表", "来源行号", "来源单元格",
@@ -277,7 +269,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["全量分类留痕"]
+                sheet = workbook["06 全量分类留痕"]
                 headers = [cell.value for cell in sheet[1]]
                 self.assertNotIn("人工决定", headers)
                 self.assertFalse(_column_is_hidden(sheet, headers.index("原始完整科目路径") + 1))
@@ -310,14 +302,14 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                trace = workbook["全量分类留痕"]
+                trace = workbook["06 全量分类留痕"]
                 headers = [cell.value for cell in trace[1]]
                 formula = trace.cell(
                     2, headers.index("最终决定项目") + 1
                 ).value
-                self.assertIn("重要待复核事项", formula)
+                self.assertIn("02 重要待复核事项", formula)
                 self.assertIn("$AD2", formula)
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 review_headers = [cell.value for cell in review[1]]
                 self.assertEqual(
                     "RC-1",
@@ -352,7 +344,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                trace = workbook["全量分类留痕"]
+                trace = workbook["06 全量分类留痕"]
                 headers = [cell.value for cell in trace[1]]
                 final_column = headers.index("最终决定项目") + 1
                 final_range = (
@@ -394,7 +386,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     "销售商品、提供劳务收到的现金",
                     trace.cell(2, final_column).value,
                 )
-                self.assertIn("重要待复核事项", trace.cell(3, final_column).value)
+                self.assertIn("02 重要待复核事项", trace.cell(3, final_column).value)
 
                 technical_headers = (
                     "人工改选基准项目(技术)",
@@ -411,7 +403,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     trace.cell(2, base_column).value,
                 )
                 pending_base_formula = trace.cell(3, base_column).value
-                self.assertIn("重要待复核事项", pending_base_formula)
+                self.assertIn("02 重要待复核事项", pending_base_formula)
                 self.assertIn(model.rules.item_by_id["CFO-07"].name, pending_base_formula)
             finally:
                 workbook.close()
@@ -441,9 +433,9 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                trace = workbook["全量分类留痕"]
+                trace = workbook["06 全量分类留痕"]
                 trace_headers = [cell.value for cell in trace[1]]
-                main = workbook["现金流量表正表"]
+                main = workbook["03 现金流量表正表"]
                 main_headers = [cell.value for cell in main[3]]
                 item_name = model.rules.item_by_id["CFO-01"].name
                 item_row = next(
@@ -455,7 +447,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     item_row, main_headers.index("人工调整") + 1
                 ).value
 
-                self.assertIn("'全量分类留痕'", formula)
+                self.assertIn("'06 全量分类留痕'", formula)
                 self.assertIn("-SUMIFS(", formula)
                 for header in (
                     "人工改选基准项目(技术)",
@@ -467,9 +459,9 @@ class WorkbookOutputTests(unittest.TestCase):
                     column = get_column_letter(trace_headers.index(header) + 1)
                     self.assertIn(f"${column}$2:${column}$2", formula)
 
-                comparison = workbook["正表核对报告"]
-                self.assertEqual("='现金流量表正表'!E4", comparison["E2"].value)
-                self.assertEqual("='现金流量表正表'!F4", comparison["F2"].value)
+                comparison = workbook["04 客户正表对比"]
+                self.assertEqual("='03 现金流量表正表'!F4", comparison["C2"].value)
+                self.assertEqual('=IF(B2="","",ROUND(C2-B2,2))', comparison["D2"].value)
             finally:
                 workbook.close()
 
@@ -481,7 +473,7 @@ class WorkbookOutputTests(unittest.TestCase):
             workbook = load_workbook(path, data_only=False)
             try:
                 self.assertEqual(EXPECTED_SHEETS, workbook.sheetnames)
-                status_formula = workbook["使用说明与状态"]["B3"].value
+                status_formula = workbook["01 使用说明与状态"]["B3"].value
                 self.assertNotIn("可靠同类组", str(status_formula))
             finally:
                 workbook.close()
@@ -560,7 +552,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["重要待复核事项"]
+                sheet = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in sheet[1]]
                 required = (
                     "日期", "凭证字", "凭证号", "本行摘要",
@@ -611,7 +603,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(workbook_model(2, 0), path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["重要待复核事项"]
+                sheet = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in sheet[1]]
                 manual_column = headers.index("人工确认项目") + 1
                 self.assertNotIn("人工可选标准项目", headers)
@@ -651,7 +643,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                cash = workbook["现金范围与现金流量表与货币资金变动的勾稽核对"]
+                cash = workbook["05 现金勾稽"]
                 amount_column = [cell.value for cell in cash[1]].index("金额（元）") + 1
                 opening_row = next(
                     row
@@ -662,7 +654,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     "#,##0.00", cash.cell(opening_row, amount_column).number_format
                 )
                 self.assertIn(
-                    "#,##0.00", workbook["全量分类留痕"]["B2"].number_format
+                    "#,##0.00", workbook["06 全量分类留痕"]["B2"].number_format
                 )
             finally:
                 workbook.close()
@@ -686,7 +678,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["重要待复核事项"]
+                sheet = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in sheet[1]]
                 allocated_column = headers.index("本行分配现金变化") + 1
                 business_column = headers.index("同一业务序号") + 1
@@ -704,60 +696,16 @@ class WorkbookOutputTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_original_auto_difference_sheet_keeps_rows_visible_and_read_only(self) -> None:
-        difference_row = {
-            "日期": "2026-01-01",
-            "凭证字": "记",
-            "凭证号": "1",
-            "摘要": "匿名税费",
-            "科目编码": "1002.01",
-            "科目名称": "银行存款",
-            "借方": None,
-            "贷方": 100.0,
-            "流量金额（原币）": 100.0,
-            "对方科目": "营业外支出",
-            "原项目标准化结果": "支付的各项税费",
-            "审定现流表项目": "支付其他与经营活动有关的现金",
-            "差异形成原因": "标准项目不一致",
-            "打分逻辑描述及打分结果": "90分",
-            "独立来源1": "缴纳税费；强（45分）",
-            "独立来源2": "营业外支出；强（45分）",
-            "来源文件": "匿名输入.xlsx",
-            "来源工作表": "明细",
-            "来源单元格": "A2:L2",
-        }
-        model = replace(workbook_model(0, 0), difference_rows=(difference_row,))
+    def test_difference_and_machine_records_are_not_separate_human_sheets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "原表差异.xlsx"
-            build_output_workbook(model, path)
-            workbook = load_workbook(path, data_only=False)
-            try:
-                sheet = workbook["原表与系统决定差异"]
-                self.assertEqual(
-                    list(difference_row), [cell.value for cell in sheet[1]]
-                )
-                self.assertEqual("A2", sheet.freeze_panes)
-                self.assertIsNotNone(sheet.auto_filter.ref)
-                self.assertEqual("营业外支出", sheet["J2"].value)
-                self.assertEqual(
-                    "支付其他与经营活动有关的现金", sheet["L2"].value
-                )
-                self.assertIn("#,##0.00", sheet["H2"].number_format)
-                self.assertIsNone(sheet["G2"].value)
-                self.assertTrue(sheet["A2"].protection.locked)
-                self.assertTrue(sheet.protection.sheet)
-            finally:
-                workbook.close()
-
-    def test_empty_difference_sheet_remains_visible_with_explanation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "无差异.xlsx"
+            path = Path(tmp) / "精简底稿.xlsx"
             build_output_workbook(workbook_model(0, 0), path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["原表与系统决定差异"]
-                self.assertEqual("visible", sheet.sheet_state)
-                self.assertIn("无差异", str(sheet["A2"].value))
+                self.assertNotIn("原表与系统决定差异", workbook.sheetnames)
+                self.assertNotIn("AI复核记录", workbook.sheetnames)
+                self.assertIn("06 全量分类留痕", workbook.sheetnames)
+                self.assertTrue(all(not sheet.protection.sheet for sheet in workbook.worksheets))
             finally:
                 workbook.close()
 
@@ -791,7 +739,7 @@ class WorkbookOutputTests(unittest.TestCase):
 
     def test_workbook_has_expected_visible_sheets_and_no_external_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "现金流量表正表及复核底稿.xlsx"
+            path = Path(tmp) / "03 现金流量表正表及复核底稿.xlsx"
             model = workbook_model(review_batches=1, duplicate_groups=1)
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False, keep_links=True)
@@ -802,7 +750,7 @@ class WorkbookOutputTests(unittest.TestCase):
                     for sheet in workbook.worksheets
                     if sheet.sheet_state == "hidden"
                 }
-                self.assertEqual({"AI复核记录", "输入识别与字段映射"}, hidden)
+                self.assertEqual({"04 客户正表对比"}, hidden)
                 self.assertEqual([], workbook._external_links)
             finally:
                 workbook.close()
@@ -828,17 +776,17 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 formulas = [
                     cell.value
-                    for row in workbook["现金流量表正表"].iter_rows()
+                    for row in workbook["03 现金流量表正表"].iter_rows()
                     for cell in row
                     if isinstance(cell.value, str) and cell.value.startswith("=")
                 ]
-                self.assertTrue(any("重要待复核事项" in formula for formula in formulas))
-                self.assertTrue(any("疑似重复事项" in formula for formula in formulas))
-                self.assertTrue(any("全量分类留痕" in formula for formula in formulas))
+                self.assertTrue(any("02 重要待复核事项" in formula for formula in formulas))
+                self.assertTrue(any("02 重要待复核事项" in formula for formula in formulas))
+                self.assertTrue(any("06 全量分类留痕" in formula for formula in formulas))
                 self.assertTrue(all("原表与自动判定差异" not in formula for formula in formulas))
                 self.assertLess(len(formulas), 300)
-                self.assertTrue(workbook["现金流量表正表"].freeze_panes)
-                self.assertTrue(workbook["重要待复核事项"].data_validations.dataValidation)
+                self.assertTrue(workbook["03 现金流量表正表"].freeze_panes)
+                self.assertTrue(workbook["02 重要待复核事项"].data_validations.dataValidation)
             finally:
                 workbook.close()
 
@@ -859,8 +807,8 @@ class WorkbookOutputTests(unittest.TestCase):
         self.assertEqual(10_000, adjustments["CFI-09"])
         self.assertEqual(-20_000, adjustments["CFO-03"])
         formula = manual_adjustment_formula("支付其他与经营活动有关的现金", 2, 2)
-        self.assertIn("重要待复核事项", formula)
-        self.assertIn("疑似重复事项", formula)
+        self.assertIn("02 重要待复核事项", formula)
+        self.assertIn("02 重要待复核事项", formula)
         self.assertIn("支付其他与经营活动有关的现金", formula)
         self.assertIn(USE_SYSTEM_RECOMMENDATION, formula)
         self.assertNotIn("CFO-07", formula)
@@ -904,14 +852,19 @@ class WorkbookOutputTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "待决定项目的疑似重复事项.xlsx"
+            path = Path(tmp) / "待决定项目的02 重要待复核事项.xlsx"
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                duplicate_item = workbook["疑似重复事项"]["B2"].value
+                duplicate_item = next(
+                    cell.value
+                    for row in workbook["02 重要待复核事项"].iter_rows()
+                    for cell in row
+                    if isinstance(cell.value, str) and cell.value.startswith("=IFERROR(INDEX(")
+                )
                 self.assertIsInstance(duplicate_item, str)
                 self.assertTrue(duplicate_item.startswith("="))
-                self.assertIn("重要待复核事项", duplicate_item)
+                self.assertIn("02 重要待复核事项", duplicate_item)
             finally:
                 workbook.close()
 
@@ -928,13 +881,13 @@ class WorkbookOutputTests(unittest.TestCase):
             try:
                 review_formulas = [
                     cell.value
-                    for row in workbook["重要待复核事项"].iter_rows()
+                    for row in workbook["02 重要待复核事项"].iter_rows()
                     for cell in row
                     if isinstance(cell.value, str) and cell.value.startswith("=")
                 ]
                 self.assertFalse(any("无效选择" in formula for formula in review_formulas))
-                headers = [cell.value for cell in workbook["重要待复核事项"][1]]
-                status_formula = workbook["重要待复核事项"].cell(
+                headers = [cell.value for cell in workbook["02 重要待复核事项"][1]]
+                status_formula = workbook["02 重要待复核事项"].cell(
                     2, REVIEW_HEADERS.index("人工处理状态") + 1
                 ).value
                 self.assertIn(get_column_letter(headers.index("人工确认项目") + 1), status_formula)
@@ -997,7 +950,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 manual_column = headers.index("人工确认项目") + 1
                 amount_column = headers.index("单笔金额") + 1
@@ -1137,7 +1090,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 status_column = REVIEW_HEADERS.index("人工处理状态") + 1
                 validation = review.data_validations.dataValidation[0]
@@ -1156,8 +1109,8 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(workbook_model(0, 0), path)
             workbook = load_workbook(path, data_only=False)
             try:
-                self.assertIn("无重大", workbook["重要待复核事项"]["A2"].value)
-                self.assertEqual(35, workbook["现金流量表正表"].max_row - 3)
+                self.assertIn("无重大", workbook["02 重要待复核事项"]["A2"].value)
+                self.assertEqual(35, workbook["03 现金流量表正表"].max_row - 3)
             finally:
                 workbook.close()
 
@@ -1168,10 +1121,10 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                status_formula = workbook["使用说明与状态"]["B3"].value
+                status_formula = workbook["01 使用说明与状态"]["B3"].value
                 self.assertIn("待确认", status_formula)
                 self.assertIn("无效选择", status_formula)
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 headers = [cell.value for cell in review[1]]
                 manual_column = headers.index("人工确认项目") + 1
                 manual_cell = review.cell(2, manual_column)
@@ -1196,8 +1149,7 @@ class WorkbookOutputTests(unittest.TestCase):
                 self.assertIsNone(review.cell(4, helper_column).value)
                 self.assertNotIn("CFI-09", validation)
                 self.assertNotIn("CFO-01", validation)
-                self.assertTrue(review.protection.sheet)
-                self.assertTrue(workbook["现金流量表正表"].protection.sheet)
+                self.assertTrue(all(not sheet.protection.sheet for sheet in workbook.worksheets))
             finally:
                 workbook.close()
 
@@ -1222,10 +1174,10 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                self.assertIn("现金流量表正表", workbook["正表核对报告"]["E2"].value)
-                headers = [cell.value for cell in workbook["现金范围与现金流量表与货币资金变动的勾稽核对"][1]]
+                self.assertIn("03 现金流量表正表", workbook["04 客户正表对比"]["C2"].value)
+                headers = [cell.value for cell in workbook["05 现金勾稽"][1]]
                 self.assertIn("金额（元）", headers)
-                cash_sheet = workbook["现金范围与现金流量表与货币资金变动的勾稽核对"]
+                cash_sheet = workbook["05 现金勾稽"]
                 net_row = next(
                     row for row in range(2, cash_sheet.max_row + 1)
                     if cash_sheet.cell(row, 1).value == "已分类现金流量表净额"
@@ -1234,12 +1186,12 @@ class WorkbookOutputTests(unittest.TestCase):
                     row for row in range(2, cash_sheet.max_row + 1)
                     if cash_sheet.cell(row, 1).value == "现金变动桥接差异"
                 )
-                self.assertIn("现金流量表正表", cash_sheet.cell(net_row, 3).value)
+                self.assertIn("03 现金流量表正表", cash_sheet.cell(net_row, 3).value)
                 self.assertTrue(str(cash_sheet.cell(difference_row, 3).value).startswith("="))
                 self.assertIn("ROUND", cash_sheet.cell(difference_row, 3).value)
-                self.assertIn("ROUND", workbook["正表核对报告"]["G2"].value)
-                self.assertIn("现金范围与现金流量表与货币资金变动的勾稽核对", workbook["使用说明与状态"]["B3"].value)
-                self.assertNotIn("101", str(workbook["全量分类留痕"].print_area))
+                self.assertIn("ROUND", workbook["04 客户正表对比"]["D2"].value)
+                self.assertIn("05 现金勾稽", workbook["01 使用说明与状态"]["B3"].value)
+                self.assertNotIn("101", str(workbook["06 全量分类留痕"].print_area))
             finally:
                 workbook.close()
 
@@ -1292,7 +1244,7 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                headers = [cell.value for cell in workbook["全量分类留痕"][1]]
+                headers = [cell.value for cell in workbook["06 全量分类留痕"][1]]
                 self.assertEqual(
                     [
                         "记录类型", "摘要", "现金变化", "原现流项目", "对方科目", "自动判定现流项目",
@@ -1305,9 +1257,9 @@ class WorkbookOutputTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     "支付其他与经营活动有关的现金",
-                    workbook["全量分类留痕"]["F2"].value,
+                    workbook["06 全量分类留痕"]["F2"].value,
                 )
-                trace = workbook["全量分类留痕"]
+                trace = workbook["06 全量分类留痕"]
                 for visible_header in ("决策来源", "一致性复核状态"):
                     column_index = headers.index(visible_header) + 1
                     self.assertFalse(
@@ -1333,7 +1285,7 @@ class WorkbookOutputTests(unittest.TestCase):
                         )
                     )
 
-                review = workbook["重要待复核事项"]
+                review = workbook["02 重要待复核事项"]
                 review_headers = [cell.value for cell in review[1]]
                 self.assertEqual(
                     "支付其他与经营活动有关的现金",
@@ -1367,17 +1319,9 @@ class WorkbookOutputTests(unittest.TestCase):
                 ).value
                 self.assertNotIn("OR(FALSE)", status_formula)
 
-                duplicate = workbook["疑似重复事项"]
-                self.assertEqual("收到其他与经营活动有关的现金", duplicate["B2"].value)
-
-                ai_sheet = workbook["AI复核记录"]
-                ai_headers = [cell.value for cell in ai_sheet[1]]
-                self.assertIn("现流项目", ai_headers)
-                item_column = ai_headers.index("现流项目") + 1
-                self.assertEqual(
-                    "收到其他与经营活动有关的现金",
-                    ai_sheet.cell(2, item_column).value,
-                )
+                duplicate = workbook["02 重要待复核事项"]
+                self.assertEqual("收到其他与经营活动有关的现金", duplicate["B6"].value)
+                self.assertNotIn("AI复核记录", workbook.sheetnames)
             finally:
                 workbook.close()
 
@@ -1396,24 +1340,13 @@ class WorkbookOutputTests(unittest.TestCase):
             build_output_workbook(model, path)
             workbook = load_workbook(path, data_only=False)
             try:
-                sheet = workbook["正表核对报告"]
+                sheet = workbook["04 客户正表对比"]
                 self.assertEqual(
-                    (
-                        "项目",
-                        "客户金额",
-                        "系统自动调整",
-                        "自动基线",
-                        "人工调整",
-                        "最终金额",
-                        "最终差异",
-                        "明细重建金额",
-                        "原表与明细勾稽差额",
-                        "支持组成",
-                    ),
+                    ("项目", "客户金额", "审定金额", "差异"),
                     tuple(cell.value for cell in sheet[1]),
                 )
                 self.assertEqual(model.rules.statement_items[0].name, sheet["A2"].value)
-                self.assertTrue(sheet.column_dimensions["J"].hidden)
+                self.assertEqual(4, sheet.max_column)
             finally:
                 workbook.close()
 
@@ -1438,7 +1371,7 @@ class WorkbookOutputTests(unittest.TestCase):
 
 
 def test_trace_output_is_chinese(tmp_path):
-    """A4 输出中文化：全量分类留痕可见单元格不含英文技术值，证据得分为数值（Task 14）。"""
+    """A4 输出中文化：06 全量分类留痕可见单元格不含英文技术值，证据得分为数值（Task 14）。"""
     from dataclasses import replace
 
     base = workbook_model(0, 0)
@@ -1458,7 +1391,7 @@ def test_trace_output_is_chinese(tmp_path):
     path = Path(tmp_path) / "out.xlsx"
     build_output_workbook(model, path)
     wb = load_workbook(path, data_only=False)
-    sheet = wb["全量分类留痕"]
+    sheet = wb["06 全量分类留痕"]
     hidden = {dim.min for dim in sheet.column_dimensions.values() if dim.hidden}
     english = ("high", "medium", "low", "internal_transfer", "system")
     for row in sheet.iter_rows():

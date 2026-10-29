@@ -40,7 +40,7 @@ class ProjectContractTests(unittest.TestCase):
         for token in forbidden:
             self.assertNotIn(token, text)
 
-    def test_user_documents_describe_the_thirteen_sheet_output_without_reliable_groups(self) -> None:
+    def test_user_documents_describe_the_six_sheet_output_without_reliable_groups(self) -> None:
         documents = (
             ROOT / "README.md",
             ROOT / "SKILL.md",
@@ -48,13 +48,11 @@ class ProjectContractTests(unittest.TestCase):
         for path in documents:
             text = path.read_text(encoding="utf-8-sig")
             current_text = text.split("## 🗓️ 更新记录", 1)[0]
-            self.assertIn("十四张", current_text, path.name)
-            self.assertIn("分类汇总视图", current_text, path.name)
-            self.assertIn("低金额系统兜底明细", current_text, path.name)
+            self.assertIn("六张", current_text, path.name)
+            self.assertIn("全量分类留痕", current_text, path.name)
             self.assertNotIn("低金额人工批量", current_text, path.name)
             self.assertNotIn("固定包含十二张", current_text, path.name)
             self.assertNotIn("工作簿恰有十二张", current_text, path.name)
-            self.assertIn("原表与系统决定差异", text, path.name)
             self.assertNotIn("可靠同类组批量处理", current_text, path.name)
             self.assertNotIn("原表与自动判定差异", text, path.name)
 

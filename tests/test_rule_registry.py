@@ -32,10 +32,14 @@ def test_rule_registry_loads_every_current_rule_category_from_one_entry() -> Non
         "一级科目基线",
     }
     assert len(registry.statement_item_ids) == 35
-    assert registry.output_sheet_names[4] == "低金额系统兜底明细"
-    assert len(registry.output_sheet_names) == 14
-    assert registry.output_sheet_names[12] == "分类汇总视图"
-    assert registry.output_sheet_names[13] == "输入识别与字段映射"
+    assert registry.output_sheet_names == (
+        "01 使用说明与状态",
+        "02 重要待复核事项",
+        "03 现金流量表正表",
+        "04 客户正表对比",
+        "05 现金勾稽",
+        "06 全量分类留痕",
+    )
     assert registry.difference_source_order == ("account_path", "summary")
     summary_view = registry.output_policy["summary_view"]
     assert summary_view["columns"] == [

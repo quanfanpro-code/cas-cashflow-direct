@@ -347,25 +347,15 @@ def _validate_registry(
     if not isinstance(output, dict):
         raise RuleRegistryError("缺少工作簿输出规则")
     sheet_names = output.get("sheet_names")
-    if (
-        not isinstance(sheet_names, list)
-        or len(sheet_names) != 14
-        or len(set(sheet_names)) != 14
-        or sheet_names[4] != "低金额系统兜底明细"
-        or sheet_names[12] != "分类汇总视图"
-        or "低金额人工批量" in sheet_names
-    ):
-        raise RuleRegistryError("最终工作簿必须是规定的14张工作表")
-    summary_view = output.get("summary_view")
-    if (
-        not isinstance(summary_view, dict)
-        or summary_view.get("sheet_name") != "分类汇总视图"
-        or not summary_view.get("columns")
-        or not summary_view.get("check_row_rule")
-        or summary_view.get("source_columns")
-        != {"item": "最终决定项目", "account": "标准一级科目", "amount": "本行分配现金变化"}
-    ):
-        raise RuleRegistryError("工作簿输出规则缺少分类汇总视图结构")
+    if sheet_names != [
+        "01 使用说明与状态",
+        "02 重要待复核事项",
+        "03 现金流量表正表",
+        "04 客户正表对比",
+        "05 现金勾稽",
+        "06 全量分类留痕",
+    ]:
+        raise RuleRegistryError("最终工作簿必须是规定的6张带序号工作表")
     if output.get("fallback_default_hidden_headers") != [
         "人工依据",
         "外部资料位置",

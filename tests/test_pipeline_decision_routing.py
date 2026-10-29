@@ -726,7 +726,7 @@ def test_pipeline_builds_one_manual_choice_for_pending_base_and_vat() -> None:
         }
         workbook = load_workbook(final.workbook_path, data_only=False)
         try:
-            review = workbook["重要待复核事项"]
+            review = workbook["02 重要待复核事项"]
             headers = [cell.value for cell in review[1]]
             manual_column = headers.index("人工确认项目") + 1
             dependent_row = next(
